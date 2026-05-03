@@ -1,0 +1,8 @@
+pandas>=2.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+plotly>=5.14.0
+quantstats>=0.0.59
+empyrical>=0.5.5
+rqalpha>=4.0.0
+backtrader>=1.9.78
