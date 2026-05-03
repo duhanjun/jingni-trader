@@ -1,5 +1,19 @@
 # 量化交易Agent Skill技能套件 - 实施计划
 
+## 技术栈映射表
+
+| Skill | 底层主要Python库 |
+|-------|-----------------|
+| quant-trading-master | 无（纯调度） |
+| market-researcher | tushare, akshare, matplotlib, plotly |
+| data-engineering | pandas, numpy, scipy, tushare |
+| alpha-researcher | ta-lib/pandas-ta, alphalens, scipy, pandas |
+| strategy-developer | backtrader, pandas, numpy |
+| backtest-validator | backtrader, quantstats, empyrical, matplotlib, plotly |
+| portfolio-optimizer | pypfopt, cvxpy, scipy, pandas |
+| risk-manager | numpy, scipy, pandas, empyrical |
+| execution-trader | pandas, numpy |
+
 ## [ ] Task 1: 项目结构设计与主Skill开发（quant-trading-master）
 - **Priority**: P0
 - **Depends On**: None
@@ -9,6 +23,7 @@
   - 定义主Skill与子Skill的通信协议和数据格式
   - 编写主Skill的SKILL.md、scripts/main_workflow.py、references/流程说明
 - **Acceptance Criteria Addressed**: AC-1, AC-11
+- **底层库**: 无（纯调度逻辑）
 - **Test Requirements**:
   - `programmatic` TR-1.1: 验证主Skill的SKILL.md格式符合Anthropic标准
   - `programmatic` TR-1.2: 验证项目目录结构正确
@@ -25,26 +40,28 @@
   - 开发监管政策追踪脚本：市场动态、公告梳理
   - 编写references文档：市场分析框架、指标说明
 - **Acceptance Criteria Addressed**: AC-2
+- **底层库**: tushare, akshare, matplotlib, plotly
 - **Test Requirements**:
-  - `programmatic` TR-2.1: 能正确获取市场指数数据
-  - `programmatic` TR-2.2: 能正确获取行业板块数据
-  - `programmatic` TR-2.3: 能正确获取宏观数据
+  - `programmatic` TR-2.1: 能正确获取市场指数数据（tushare）
+  - `programmatic` TR-2.2: 能正确获取行业板块数据（akshare）
+  - `programmatic` TR-2.3: 能正确获取宏观数据（akshare）
   - `human-judgement` TR-2.4: 检查市场分析报告格式完整性
-- **Notes**: 复用已有的tushare skill设计
+- **Notes**: 复用已有的tushare skill设计，整合akshare补充数据
 
 ## [ ] Task 3: 数据工程Skill开发（data-engineering）
 - **Priority**: P0
 - **Depends On**: Task 1
 - **Description**:
-  - 开发数据获取脚本：对接Tushare和xcsc-tushare API
-  - 开发数据清洗脚本：缺失值处理、异常值检测（Winsorize）、复权处理
+  - 开发数据获取脚本：对接tushare API
+  - 开发数据清洗脚本：缺失值处理（pandas）、异常值检测（Winsorize/scipy）、复权处理
   - 开发数据标准化脚本：Point-in-Time一致性处理、因子对齐
   - 开发数据存储脚本：CSV/Parquet格式导出，规范化命名
   - 编写references文档：API调用说明、数据字典、数据清洗规则
 - **Acceptance Criteria Addressed**: AC-3, AC-11
+- **底层库**: pandas, numpy, scipy, tushare
 - **Test Requirements**:
-  - `programmatic` TR-3.1: 数据获取脚本能正确获取日线数据
-  - `programmatic` TR-3.2: 数据清洗脚本能正确处理缺失值
+  - `programmatic` TR-3.1: 数据获取脚本能正确获取日线数据（tushare）
+  - `programmatic` TR-3.2: 数据清洗脚本能正确处理缺失值（pandas）
   - `programmatic` TR-3.3: 验证输出CSV/Parquet文件格式正确
   - `programmatic` TR-3.4: 数据命名规范符合约定
 - **Notes**: 复用已有的tushare/xcsc-tushare-skill设计
@@ -59,10 +76,11 @@
   - 开发多Alpha融合脚本：等权融合、IC加权、风险归因加权
   - 编写references文档：因子说明、IC分析指南、多因子融合方法
 - **Acceptance Criteria Addressed**: AC-4, AC-11
+- **底层库**: ta-lib/pandas-ta, alphalens, scipy, pandas
 - **Test Requirements**:
-  - `programmatic` TR-4.1: 因子计算结果与已知公式一致
-  - `programmatic` TR-4.2: IC计算正确
-  - `programmatic` TR-4.3: 相关性矩阵正确
+  - `programmatic` TR-4.1: 因子计算结果与已知公式一致（ta-lib）
+  - `programmatic` TR-4.2: IC计算正确（alphalens）
+  - `programmatic` TR-4.3: 相关性矩阵正确（pandas/scipy）
   - `human-judgement` TR-4.4: 检查因子分析报告格式完整性
 - **Notes**: 参考WorldQuant Alpha表达式和alphalens框架
 
@@ -72,11 +90,12 @@
 - **Description**:
   - 开发策略模板生成脚本：趋势跟踪、均值回归、套利、配对交易等模板
   - 开发策略idea生成脚本：基于市场环境的策略建议
-  - 开发参数优化脚本：网格搜索、贝叶斯优化
+  - 开发参数优化脚本：网格搜索、随机搜索
   - 开发策略组合分析脚本：相关性分析、风险贡献分析
   - 开发策略文档生成脚本：自动生成策略说明文档
   - 编写references文档：策略模板说明、最佳实践、参数范围建议
 - **Acceptance Criteria Addressed**: AC-5, AC-11
+- **底层库**: backtrader, pandas, numpy
 - **Test Requirements**:
   - `programmatic` TR-5.1: 能生成至少3种策略模板
   - `programmatic` TR-5.2: 参数优化能找到预设最优解
@@ -88,35 +107,37 @@
 - **Priority**: P0
 - **Depends On**: Task 5
 - **Description**:
-  - 开发事件驱动回测引擎脚本：支持买卖信号、持仓管理
-  - 开发绩效指标计算脚本：年化收益、夏普比率、最大回撤、胜率、盈亏比
-  - 开发过拟合检测脚本：蒙特卡洛模拟、Walk-Forward分析
+  - 开发事件驱动回测引擎脚本：支持买卖信号、持仓管理（backtrader）
+  - 开发绩效指标计算脚本：年化收益、夏普比率、最大回撤、胜率、盈亏比（quantstats/empyrical）
+  - 开发过拟合检测脚本：蒙特卡洛模拟、Walk-Forward分析（numpy/scipy）
   - 开发交易成本建模脚本：佣金、滑点、冲击成本模型
   - 开发回测报告生成脚本：Markdown/JSON格式报告
-  - 开发回测可视化脚本：收益曲线、回撤曲线（matplotlib）
+  - 开发回测可视化脚本：收益曲线、回撤曲线（matplotlib/plotly）
   - 编写references文档：回测框架说明、绩效指标定义、过拟合检测方法
 - **Acceptance Criteria Addressed**: AC-6, AC-11
+- **底层库**: backtrader, quantstats, empyrical, matplotlib, plotly
 - **Test Requirements**:
-  - `programmatic` TR-6.1: 回测引擎能正确执行买卖信号
-  - `programmatic` TR-6.2: 绩效指标计算与标准公式一致
+  - `programmatic` TR-6.1: 回测引擎能正确执行买卖信号（backtrader）
+  - `programmatic` TR-6.2: 绩效指标计算与标准公式一致（quantstats/empyrical）
   - `programmatic` TR-6.3: 回测报告能正确生成
-  - `programmatic` TR-6.4: 图表能正确生成
+  - `programmatic` TR-6.4: 图表能正确生成（matplotlib/plotly）
   - `human-judgement` TR-6.5: 检查回测报告格式完整性
-- **Notes**: 使用backtrader或自研轻量级回测框架
+- **Notes**: 使用backtrader作为核心回测框架，quantstats生成报告
 
 ## [ ] Task 7: 组合优化Skill开发（portfolio-optimizer）
 - **Priority**: P1
 - **Depends On**: Task 6
 - **Description**:
-  - 开发协方差矩阵估计脚本：历史协方差、指数加权协方差 shrinkage
-  - 开发组合权重优化脚本：风险平价、等权、最小方差、最大夏普
+  - 开发协方差矩阵估计脚本：历史协方差、指数加权协方差 shrinkage（pypfopt）
+  - 开发组合权重优化脚本：风险平价、等权、最小方差、最大夏普（pypfopt + cvxpy）
   - 开发Barra风格因子归因脚本：行业暴露、风格暴露分析
   - 开发换手率优化脚本：交易成本优化
   - 编写references文档：优化算法说明、风险模型说明
 - **Acceptance Criteria Addressed**: AC-7, AC-11
+- **底层库**: pypfopt, cvxpy, scipy, pandas
 - **Test Requirements**:
-  - `programmatic` TR-7.1: 协方差矩阵计算正确
-  - `programmatic` TR-7.2: 优化算法收敛
+  - `programmatic` TR-7.1: 协方差矩阵计算正确（pypfopt）
+  - `programmatic` TR-7.2: 优化算法收敛（cvxpy）
   - `programmatic` TR-7.3: 归因分析结果合理
   - `human-judgement` TR-7.4: 检查优化报告格式完整性
 - **Notes**: 参考现代投资组合理论（MPT）和 Barra风险模型
@@ -125,13 +146,14 @@
 - **Priority**: P0
 - **Depends On**: Task 7
 - **Description**:
-  - 开发VaR/CVaR计算脚本：历史模拟法、参数法、蒙特卡洛法
-  - 开发实时风险监控脚本：持仓限额、保证金、盈亏预警
-  - 开发压力测试脚本：历史情景、假设情景模拟
+  - 开发VaR/CVaR计算脚本：历史模拟法、参数法、蒙特卡洛法（numpy/scipy）
+  - 开发实时风险监控脚本：持仓限额、保证金、盈亏预警（pandas）
+  - 开发压力测试脚本：历史情景、假设情景模拟（numpy）
   - 开发合规检查脚本：持仓集中度、交易频率、涨跌停限制检查
-  - 开发风险归因分析脚本：收益归因、风险归因
+  - 开发风险归因分析脚本：收益归因、风险归因（empyrical）
   - 编写references文档：风险指标说明、风控规则、合规要求
 - **Acceptance Criteria Addressed**: AC-8, AC-11
+- **底层库**: numpy, scipy, pandas, empyrical
 - **Test Requirements**:
   - `programmatic` TR-8.1: VaR计算结果与标准方法一致
   - `programmatic` TR-8.2: 合规检查能正确识别违规持仓
@@ -143,13 +165,14 @@
 - **Priority**: P1
 - **Depends On**: Task 8
 - **Description**:
-  - 开发模拟账户管理脚本：资金初始化、账户状态跟踪
+  - 开发模拟账户管理脚本：资金初始化、账户状态跟踪（pandas）
   - 开发订单模拟执行脚本：市价单、限价单、止损单
-  - 开发持仓跟踪脚本：实时持仓更新、成本计算、盈亏计算
+  - 开发持仓跟踪脚本：实时持仓更新、成本计算、盈亏计算（numpy）
   - 开发实盘接口框架脚本：预留接口，支持扩展到券商API
   - 开发交易日志脚本：完整交易记录、审计日志
   - 编写references文档：模拟交易规则、订单类型说明、券商API对接说明
 - **Acceptance Criteria Addressed**: AC-9, AC-11
+- **底层库**: pandas, numpy
 - **Test Requirements**:
   - `programmatic` TR-9.1: 模拟账户能正确执行买入/卖出信号
   - `programmatic` TR-9.2: 持仓计算正确（平均成本、盈亏）
@@ -166,14 +189,14 @@
   - 开发OpenClaw安装脚本：支持Linux/macOS自动安装
   - 开发Skill导入脚本：将所有Skill复制到正确目录
   - 开发环境变量配置脚本：指导用户配置TUSHARE_TOKEN等
-  - 开发依赖检查脚本：检查Python版本、必需包
+  - 开发依赖检查脚本：检查Python版本、必需包，自动安装Python依赖
   - 编写README说明：完整使用指南
 - **Acceptance Criteria Addressed**: AC-10
 - **Test Requirements**:
   - `programmatic` TR-10.1: 检测脚本能正确识别OpenClaw安装状态
   - `programmatic` TR-10.2: 安装脚本能在干净环境完成安装
   - `programmatic` TR-10.3: Skill导入脚本能将所有Skill导入到正确位置
-  - `programmatic` TR-10.4: 依赖检查能正确识别缺失项
+  - `programmatic` TR-10.4: 依赖检查能正确识别缺失项，自动安装Python依赖
   - `human-judgement` TR-10.5: 检查README文档完整性
 - **Notes**: 安装脚本是用户体验的关键，需要健壮的错误处理
 
@@ -199,12 +222,12 @@
   - 编写每个Skill的使用说明
   - 创建测试用例和测试数据
   - 进行代码审查和优化
-  - 创建requirements.txt
+  - 创建requirements.txt（包含所有Python依赖）
 - **Acceptance Criteria Addressed**: All
 - **Test Requirements**:
   - `programmatic` TR-12.1: 所有脚本能正常运行
   - `programmatic` TR-12.2: 文档示例代码能正确执行
-  - `programmatic` TR-12.3: requirements.txt包含所有依赖
+  - `programmatic` TR-12.3: requirements.txt包含所有依赖（pandas, numpy, scipy, backtrader, quantstats, pypfopt, tushare, akshare等）
   - `human-judgement` TR-12.4: 代码审查通过
   - `human-judgement` TR-12.5: README完整且易于理解
 - **Notes**: 好的文档能大大降低使用门槛

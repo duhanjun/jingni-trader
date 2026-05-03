@@ -1,21 +1,19 @@
 # 量化交易Agent Skill技能套件 - 产品需求文档
 
 ## 概述
-- **Summary**: 构建一套完整的量化交易Agent Skill技能套件，基于专业量化交易机构的系统架构，覆盖A股市场和股指期货的全流程量化投研与交易工作。主Skill作为协调中枢，调用各个子Skill完成从市场研究、Alpha因子挖掘、策略构建、回测验证、组合优化、风控管理到模拟/实盘交易的全流程。
+- **Summary**: 构建一套完整的量化交易Agent Skill技能套件，基于专业量化交易机构的系统架构，覆盖A股市场和股指期货的全流程量化投研与交易工作。**整个系统基于主流Python开源项目构建**，每个Skill负责整合调度特定的Python开源库，主Skill作为协调中枢调用各子Skill完成全流程工作。
 - **Purpose**: 为OpenClaw系统提供专业级量化交易能力，通过模块化的Skill设计实现投研流程的自动化、标准化和可复用性。
 - **Target Users**: 量化交易研究者、宽客、量化基金团队、个人投资者
 
+## 技术栈选型原则
+- **核心原则**: 每个Skill的scripts只负责整合和调度主流Python开源库，不重复造轮子
+- **稳定性**: 优先选择GitHub Star高、社区活跃、维护良好的成熟项目
+- **易用性**: 优先选择API简洁、文档完善、示例丰富的项目
+- **扩展性**: 预留接口支持后续替换或升级底层库
+
 ## 目标
 1. 构建一个主Skill（quant-trading-master）作为协调中枢，负责全流程任务编排
-2. 构建8个子Skill覆盖量化交易核心模块：
-   - 市场研究Skill（market-researcher）
-   - 数据工程Skill（data-engineering）
-   - Alpha因子研究Skill（alpha-researcher）
-   - 策略开发Skill（strategy-developer）
-   - 回测验证Skill（backtest-validator）
-   - 组合优化Skill（portfolio-optimizer）
-   - 风险管理层Skill（risk-manager）
-   - 交易执行Skill（execution-trader）
+2. 构建8个子Skill覆盖量化交易核心模块，每个Skill基于对应的主流Python开源库
 3. 提供自动化安装脚本，支持自动检测和安装OpenClaw，自动导入所有Skill
 4. 所有API密钥从环境变量统一读取（TUSHARE_TOKEN, XCSC_TUSHARE_TOKEN等）
 
@@ -24,6 +22,62 @@
 - 不提供投资建议或财务分析服务
 - 不实现交易所直连交易（仅通过券商API接口模拟/实盘执行）
 - 不包含高频交易相关模块（Tick级撮合、内存撮合引擎等）
+
+## 主流Python开源库技术栈
+
+### 数据获取层
+| 库名 | 用途 | 特点 |
+|------|------|------|
+| **tushare** | A股基础数据 | 主流中文金融数据接口 |
+| **akshare** | A股/期货/宏观数据 | 免费、开源、数据种类丰富 |
+| **yfinance** | 海外市场数据 | 简单易用、覆盖全球市场 |
+
+### 数据处理层
+| 库名 | 用途 | 特点 |
+|------|------|------|
+| **pandas** | 数据分析基础 | 事实标准、高效灵活 |
+| **numpy** | 数值计算基础 | 底层高性能 |
+| **scipy** | 科学计算 | 统计、优化算法 |
+
+### 因子与指标层
+| 库名 | 用途 | 特点 |
+|------|------|------|
+| **ta-lib** | 技术指标计算 | 150+指标、性能优 |
+| **pandas-ta** | 技术指标（纯Python） | 无需编译、安装简单 |
+| **alphalens** | 因子分析 | 专为因子研究设计 |
+
+### 回测与策略层
+| 库名 | 用途 | 特点 |
+|------|------|------|
+| **backtrader** | 事件驱动回测 | 轻量、灵活、文档丰富 |
+| **zipline-reloaded** | Pipeline回测 | Quantopian生态、Pipeline API |
+| **vectorbt** | 向量化回测 | 高性能、参数优化强 |
+
+### 绩效分析层
+| 库名 | 用途 | 特点 |
+|------|------|------|
+| **quantstats** | 绩效分析报告 | 一键生成专业报告 |
+| **empyrical** | 风险指标计算 | Zipline核心组件 |
+
+### 组合优化层
+| 库名 | 用途 | 特点 |
+|------|------|------|
+| **pypfopt** | 组合优化 | 现代投资组合理论 |
+| **cvxpy** | 凸优化 | 底层优化器 |
+
+### 可视化层
+| 库名 | 用途 | 特点 |
+|------|------|------|
+| **matplotlib** | 基础图表 | 灵活、广泛支持 |
+| **plotly** | 交互图表 | Web风格、交互强 |
+| **seaborn** | 统计图表 | 美观、统计友好 |
+
+### 机器学习层（可选扩展）
+| 库名 | 用途 | 特点 |
+|------|------|------|
+| **scikit-learn** | 传统ML | 全面、易用 |
+| **lightgbm** | 梯度提升 | 高效、准确 |
+| **statsmodels** | 统计建模 | 时间序列强 |
 
 ## 背景与上下文
 
@@ -44,24 +98,7 @@
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 各层级核心职责
-
-| 层级 | 核心功能 | 专业系统参考 |
-|------|----------|-------------|
-| **数据工程层** | 数据采集、清洗、存储、Point-in-Time一致性 | Tushare数据、Wind、Bloomberg |
-| **特征工程层** | 技术因子、基本面因子、另类数据特征提取 | Alpha因子库、Feature Store |
-| **Alpha因子层** | 单Alpha生成、IC分析、多Alpha融合 | WorldQuant Alpha表达式 |
-| **信号生成层** | 规则策略、机器学习策略、强化学习策略 | XGBoost、LSTM、PPO |
-| **策略开发层** | 策略模板、参数优化、策略组合 | MultiCharts、聚宽 |
-| **回测验证层** | 事件驱动回测、蒙特卡洛模拟、过拟合检测 | Backtrader、Zipline |
-| **组合优化层** | 风险模型、Barra归因、组合权重优化 | Barra、RiskParity |
-| **风险管理层** | VaR/CVaR、压力测试、实时风控、合规检查 | 事前/事中/事后风控 |
-| **交易执行层** | 订单管理、智能算法（TWVAP/VWAP）、券商对接 | PTrade、QMT |
-| **监控运维层** | 日志系统、告警、策略运行监控 | Prometheus+Grafana |
-
 ### 量化投研标准工作流程
-基于Alpha因子研究的标准流程（参考WorldQuant Alpha-GPT框架）：
-
 ```
 阶段1: 市场研究与假设生成
     ↓
@@ -90,6 +127,7 @@
 - 根据阶段调度相应子Skill完成工作
 - 管理会话状态和任务上下文
 - 输出结构化的量化研究报告和交易信号
+- **底层库**: 无（纯调度逻辑）
 
 ### FR-2: 市场研究Skill（market-researcher）
 - 市场环境分析（大势判断、风格识别、情绪监控）
@@ -97,13 +135,15 @@
 - 热点主题与概念股挖掘
 - 宏观数据监控（CPI/PPI/PMI等）
 - 监管政策与市场动态追踪
+- **底层库**: tushare + akshare + matplotlib/plotly（可视化）
 
 ### FR-3: 数据工程Skill（data-engineering）
-- 从Tushare/xcsc-tushare获取行情数据和基本面数据
-- 数据清洗：对齐、缺失值处理、异常值检测（Winsorize）
-- 数据标准化：复权处理、因子对齐、Point-in-Time一致性
+- 从tushare/akshare获取行情数据和基本面数据
+- 数据清洗：缺失值处理、异常值检测（Winsorize）、复权处理
+- 数据标准化：Point-in-Time一致性处理、因子对齐
 - 本地存储：CSV/Parquet格式，规范化命名
 - 支持日线、周线、分钟线数据
+- **底层库**: pandas + numpy + scipy + tushare
 
 ### FR-4: Alpha因子研究Skill（alpha-researcher）
 - 单Alpha因子构建与评估（动量、价值、质量、情绪等）
@@ -111,13 +151,15 @@
 - 因子相关性分析与去冗余
 - 多Alpha融合与权重分配
 - Alpha因子报告生成
+- **底层库**: ta-lib/pandas-ta + alphalens + scipy
 
 ### FR-5: 策略开发Skill（strategy-developer）
 - 策略模板库（趋势跟踪、均值回归、套利、配对交易等）
 - 策略idea生成与评估框架
-- 参数优化（网格搜索、贝叶斯优化）
+- 参数优化（网格搜索、随机搜索）
 - 策略组合分析（相关性分析、风险贡献）
 - 策略文档自动生成
+- **底层库**: backtrader + scikit-learn（可选）
 
 ### FR-6: 回测验证Skill（backtest-validator）
 - 事件驱动回测引擎
@@ -125,6 +167,7 @@
 - 过拟合检测（蒙特卡洛模拟、Walk-Forward分析）
 - 交易成本建模（佣金、滑点、冲击成本）
 - 回测报告生成与可视化
+- **底层库**: backtrader + quantstats + empyrical + matplotlib/plotly
 
 ### FR-7: 组合优化Skill（portfolio-optimizer）
 - 风险模型构建（协方差矩阵估计）
@@ -132,13 +175,15 @@
 - Barra风格因子归因
 - 行业/风格暴露分析
 - 换手率与交易成本优化
+- **底层库**: pypfopt + cvxpy + scipy
 
 ### FR-8: 风险管理层Skill（risk-manager）
 - 持仓风险计算（VaR、CVaR、Expected Shortfall）
 - 实时风险监控（持仓限额、保证金、盈亏预警）
-- 压力测试（历史情景、假设情景）
+- 压力测试（历史情景、假设情景模拟）
 - 合规检查（持仓集中度、交易频率、涨跌停限制）
 - 风险归因分析
+- **底层库**: numpy + scipy + pandas + empyrical
 
 ### FR-9: 交易执行Skill（execution-trader）
 - 模拟账户管理（资金初始化、状态跟踪）
@@ -146,13 +191,14 @@
 - 实盘接口框架（预留接口，支持扩展到券商API）
 - 仓位同步与成本计算
 - 交易日志记录
+- **底层库**: pandas + numpy（模拟逻辑）
 
 ### FR-10: 自动化安装脚本
 - 检测本地是否已安装OpenClaw
 - 如未安装，自动完成OpenClaw安装（Linux/macOS）
 - 自动导入所有Skill到正确目录
 - 环境变量配置指导
-- 依赖检查与安装
+- 依赖检查与安装（自动安装Python依赖）
 
 ## 非功能需求
 
@@ -175,23 +221,16 @@
 - 敏感操作日志审计
 
 ### NFR-4: 可扩展性
-- 模块化设计，便于添加新功能
+- 底层库可替换（预留接口）
 - 支持自定义因子和策略模板
 - 预留MCP服务接口扩展
-- 插件化架构
-
-### NFR-5: 性能要求
-- 回测引擎支持多进程加速
-- 数据获取支持增量更新
-- 缓存机制减少重复请求
 
 ## 约束
 
 ### 技术约束
 - Python 3.9+
-- 主要依赖：pandas, numpy, scipy, scikit-learn, tushare
+- 核心依赖：pandas, numpy, scipy, backtrader, quantstats, pypfopt, tushare, akshare
 - Skill文件遵循Anthropic标准格式（SKILL.md + scripts/ + references/）
-- 数据存储：CSV（轻量级）、Parquet（高性能）
 
 ### 业务约束
 - 数据仅用于学习和研究
@@ -219,7 +258,7 @@
 - **Given**: 用户询问市场环境或板块机会
 - **When**: 调用market-researcher Skill
 - **Then**: 返回市场分析报告和关键指标
-- **Verification**: `programmatic` - 能正确调用Tushare接口并分析数据
+- **Verification**: `programmatic` - 能正确调用tushare/akshare接口并分析数据
 
 ### AC-3: 数据工程功能
 - **Given**: 用户指定股票池、时间范围和数据类型
@@ -243,7 +282,7 @@
 - **Given**: 用户提供策略参数和回测时间范围
 - **When**: 调用backtest-validator Skill执行回测
 - **Then**: 生成包含关键指标的绩效报告和可视化图表
-- **Verification**: `programmatic` - 绩效指标计算正确、无未来函数
+- **Verification**: `programmatic` - 绩效指标计算正确、图表正确生成
 
 ### AC-7: 组合优化功能
 - **Given**: 用户提供候选股票池和风险偏好
@@ -279,6 +318,5 @@
 
 - [ ] 实盘交易接口具体对接哪家券商？（需要用户确认，如QMT、Ptrade、东方财富等）
 - [ ] 是否需要支持期权策略相关模块？
-- [ ] 是否需要集成机器学习/深度学习模型训练框架？
-- [ ] 是否需要回测结果可视化？（matplotlib/plotly图表）
+- [ ] 是否需要集成机器学习模型训练框架（scikit-learn、lightgbm）？
 - [ ] 是否需要支持多策略组合同时运行？
