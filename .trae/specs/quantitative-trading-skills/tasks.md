@@ -1,18 +1,17 @@
-# 量化交易Agent Skill技能套件 - 实施计划
+# 量化交易Agent Skill技能套件 - 实施计划（A股专属版）
 
 ## 技术栈映射表
 
-| Skill | 底层主要Python库 |
-|-------|-----------------|
-| quant-trading-master | 无（纯调度） |
-| market-researcher | tushare, akshare, matplotlib, plotly |
-| data-engineering | pandas, numpy, scipy, tushare |
-| alpha-researcher | ta-lib/pandas-ta, alphalens, scipy, pandas |
-| strategy-developer | backtrader, pandas, numpy |
-| backtest-validator | backtrader, quantstats, empyrical, matplotlib, plotly |
-| portfolio-optimizer | pypfopt, cvxpy, scipy, pandas |
-| risk-manager | numpy, scipy, pandas, empyrical |
-| execution-trader | pandas, numpy |
+| Skill | 底层主要Python库 | A股适配要点 |
+|-------|-------------------|-------------|
+| quant-trading-master | 无（纯调度） | - |
+| a-share-data-engine | tushare, baostock, akshare, pandas, sqlalchemy | 数据本土化、ST/涨跌停标记 |
+| a-share-factor-engine | ta-lib/pandas-ta, alphalens, scikit-learn | A股因子体系、行业中性化IC |
+| strategy-model-engine | lightgbm, catboost, optuna, mlflow | 截面选股、择时模型 |
+| backtest-engine | rqalpha, backtrader, quantstats | T+1、涨跌停、费用模拟 |
+| portfolio-risk-engine | pypfopt, riskfolio-lib, numpy | A股约束、止损机制 |
+| execution-monitor-engine | pandas, numpy（模拟）, vnpy（实盘） | 模拟交易、实盘接口框架 |
+| reports-engine | quantstats, plotly, matplotlib | A股风格暴露、Brinson归因 |
 
 ## [ ] Task 1: 项目结构设计与主Skill开发（quant-trading-master）
 - **Priority**: P0
@@ -22,7 +21,7 @@
   - 开发主Skill（quant-trading-master）：协调中枢，负责全流程任务编排
   - 定义主Skill与子Skill的通信协议和数据格式
   - 编写主Skill的SKILL.md、scripts/main_workflow.py、references/流程说明
-- **Acceptance Criteria Addressed**: AC-1, AC-11
+- **Acceptance Criteria Addressed**: AC-1, AC-10
 - **底层库**: 无（纯调度逻辑）
 - **Test Requirements**:
   - `programmatic` TR-1.1: 验证主Skill的SKILL.md格式符合Anthropic标准
@@ -30,160 +29,161 @@
   - `human-judgement` TR-1.3: 检查主Skill的工作流说明是否清晰完整
 - **Notes**: 主Skill是整个系统的核心，需要精心设计任务分解逻辑和阶段判断机制
 
-## [ ] Task 2: 市场研究Skill开发（market-researcher）
+## [ ] Task 2: A股数据采集与治理Skill开发（a-share-data-engine）
 - **Priority**: P0
 - **Depends On**: Task 1
 - **Description**:
-  - 开发市场环境分析脚本：大势判断、风格识别、情绪监控
-  - 开发行业板块分析脚本：轮动分析、热点主题挖掘
-  - 开发宏观数据监控脚本：CPI/PPI/PMI等指标
-  - 开发监管政策追踪脚本：市场动态、公告梳理
-  - 编写references文档：市场分析框架、指标说明
-- **Acceptance Criteria Addressed**: AC-2
-- **底层库**: tushare, akshare, matplotlib, plotly
+  - 开发数据获取脚本：对接Tushare Pro/BaoStock/AkShare API
+  - 开发数据清洗脚本：复权处理、停牌标记、涨跌停板标记（limit_flag）
+  - 开发ST/退市风险过滤脚本：每日维护st_list
+  - 开发新股过滤脚本：剔除上市不足60个交易日的新股
+  - 开发数据存储脚本：SQLite/MySQL/PostgreSQL持久化，规范化命名
+  - 编写references文档：API调用说明、数据字典、A股清洗规则
+- **Acceptance Criteria Addressed**: AC-2, AC-10
+- **底层库**: tushare, baostock, akshare, pandas, sqlalchemy, numpy
 - **Test Requirements**:
-  - `programmatic` TR-2.1: 能正确获取市场指数数据（tushare）
-  - `programmatic` TR-2.2: 能正确获取行业板块数据（akshare）
-  - `programmatic` TR-2.3: 能正确获取宏观数据（akshare）
-  - `human-judgement` TR-2.4: 检查市场分析报告格式完整性
-- **Notes**: 复用已有的tushare skill设计，整合akshare补充数据
+  - `programmatic` TR-2.1: 数据获取脚本能正确获取日线数据（tushare）
+  - `programmatic` TR-2.2: 涨跌停标记字段正确生成
+  - `programmatic` TR-2.3: ST过滤能正确剔除ST股票
+  - `programmatic` TR-2.4: 新股过滤能正确剔除上市不足60日的新股
+  - `programmatic` TR-2.5: 数据库存储功能正常
+- **Notes**: 复用已有的tushare skill设计，整合baostock/akshare作为补充
 
-## [ ] Task 3: 数据工程Skill开发（data-engineering）
+## [ ] Task 3: A股阿尔法因子库Skill开发（a-share-factor-engine）
 - **Priority**: P0
-- **Depends On**: Task 1
-- **Description**:
-  - 开发数据获取脚本：对接tushare API
-  - 开发数据清洗脚本：缺失值处理（pandas）、异常值检测（Winsorize/scipy）、复权处理
-  - 开发数据标准化脚本：Point-in-Time一致性处理、因子对齐
-  - 开发数据存储脚本：CSV/Parquet格式导出，规范化命名
-  - 编写references文档：API调用说明、数据字典、数据清洗规则
-- **Acceptance Criteria Addressed**: AC-3, AC-11
-- **底层库**: pandas, numpy, scipy, tushare
-- **Test Requirements**:
-  - `programmatic` TR-3.1: 数据获取脚本能正确获取日线数据（tushare）
-  - `programmatic` TR-3.2: 数据清洗脚本能正确处理缺失值（pandas）
-  - `programmatic` TR-3.3: 验证输出CSV/Parquet文件格式正确
-  - `programmatic` TR-3.4: 数据命名规范符合约定
-- **Notes**: 复用已有的tushare/xcsc-tushare-skill设计
-
-## [ ] Task 4: Alpha因子研究Skill开发（alpha-researcher）
-- **Priority**: P0
-- **Depends On**: Task 3
+- **Depends On**: Task 2
 - **Description**:
   - 开发单Alpha因子构建脚本：动量、价值、质量、情绪等因子
-  - 开发因子IC分析脚本：IC序列计算、ICIR分析
+  - 开发A股专用因子脚本：1个月反转、lncap市值、换手率、资金流、事件因子
+  - 开发因子IC分析脚本：IC序列计算、ICIR分析（行业中性化处理）
   - 开发因子相关性分析脚本：相关性矩阵、去冗余建议
   - 开发多Alpha融合脚本：等权融合、IC加权、风险归因加权
-  - 编写references文档：因子说明、IC分析指南、多因子融合方法
-- **Acceptance Criteria Addressed**: AC-4, AC-11
-- **底层库**: ta-lib/pandas-ta, alphalens, scipy, pandas
+  - 编写references文档：因子说明、IC分析指南（A股分组规则）、多因子融合方法
+- **Acceptance Criteria Addressed**: AC-3, AC-10
+- **底层库**: ta-lib/pandas-ta, alphalens, pandas, scikit-learn, numpy, scipy
 - **Test Requirements**:
-  - `programmatic` TR-4.1: 因子计算结果与已知公式一致（ta-lib）
-  - `programmatic` TR-4.2: IC计算正确（alphalens）
-  - `programmatic` TR-4.3: 相关性矩阵正确（pandas/scipy）
-  - `human-judgement` TR-4.4: 检查因子分析报告格式完整性
-- **Notes**: 参考WorldQuant Alpha表达式和alphalens框架
+  - `programmatic` TR-3.1: 因子计算结果与已知公式一致（ta-lib）
+  - `programmatic` TR-3.2: IC计算正确（含行业中性化处理）
+  - `programmatic` TR-3.3: 相关性矩阵正确
+  - `programmatic` TR-3.4: A股专用因子（反转、市值、换手率）正确计算
+  - `human-judgement` TR-3.5: 检查因子分析报告格式完整性
+- **Notes**: 参考WorldQuant Alpha表达式和Alphalens框架，需修改分组函数按中证全指/沪深300分行业分层
 
-## [ ] Task 5: 策略开发Skill开发（strategy-developer）
+## [ ] Task 4: A股策略开发与模型训练Skill开发（strategy-model-engine）
 - **Priority**: P1
-- **Depends On**: Task 4
+- **Depends On**: Task 3
 - **Description**:
-  - 开发策略模板生成脚本：趋势跟踪、均值回归、套利、配对交易等模板
-  - 开发策略idea生成脚本：基于市场环境的策略建议
-  - 开发参数优化脚本：网格搜索、随机搜索
-  - 开发策略组合分析脚本：相关性分析、风险贡献分析
-  - 开发策略文档生成脚本：自动生成策略说明文档
-  - 编写references文档：策略模板说明、最佳实践、参数范围建议
-- **Acceptance Criteria Addressed**: AC-5, AC-11
-- **底层库**: backtrader, pandas, numpy
+  - 开发策略模板生成脚本：趋势跟踪、均值回归、配对交易等模板
+  - 开发截面选股模型脚本：LightGBM/CatBoost多因子选股
+  - 开发择时模型脚本：基于分钟线技术指标的3日涨跌分类器
+  - 开发参数优化脚本：Optuna超参搜索
+  - 开发实验管理脚本：MLflow记录因子组合和模型参数
+  - 开发过拟合防范脚本：分组时序交叉验证（Purged Group Time Series Split）
+  - 编写references文档：策略模板说明、模型使用指南、最佳实践
+- **Acceptance Criteria Addressed**: AC-4, AC-10
+- **底层库**: lightgbm, catboost, scikit-learn, optuna, mlflow, numpy, pandas
 - **Test Requirements**:
-  - `programmatic` TR-5.1: 能生成至少3种策略模板
-  - `programmatic` TR-5.2: 参数优化能找到预设最优解
-  - `programmatic` TR-5.3: 能生成完整的策略文档
-  - `human-judgement` TR-5.4: 检查策略文档结构完整性
+  - `programmatic` TR-4.1: 能生成至少3种策略模板
+  - `programmatic` TR-4.2: LightGBM选股模型能正常运行
+  - `programmatic` TR-4.3: Optuna参数优化能找到预设最优解
+  - `programmatic` TR-4.4: MLflow能正确记录实验
+  - `human-judgement` TR-4.5: 检查策略文档结构完整性
 - **Notes**: 策略逻辑由AI根据市场情况生成，此Skill提供框架和模板
 
-## [ ] Task 6: 回测验证Skill开发（backtest-validator）
+## [ ] Task 5: A股策略回测与仿真Skill开发（backtest-engine）
+- **Priority**: P0
+- **Depends On**: Task 4
+- **Description**:
+  - 开发RQAlpha回测脚本：配置A股规则，执行回测
+  - 开发Backtrader回测脚本：自定义技术策略辅助
+  - 开发A股规则模拟脚本：T+1、涨跌停板、费用（佣金万2.5、印花税1‰、过户费）
+  - 开发停牌处理脚本：资产冻结，复牌后恢复
+  - 开发绩效指标计算脚本：年化收益、夏普比率、最大回撤、胜率、盈亏比（quantstats/empyrical）
+  - 开发过拟合检测脚本：Walk-Forward分析
+  - 开发回测报告生成脚本：Markdown/JSON格式报告
+  - 开发回测可视化脚本：收益曲线、回撤曲线（matplotlib/plotly）
+  - 编写references文档：RQAlpha配置说明、回测框架说明、绩效指标定义
+- **Acceptance Criteria Addressed**: AC-5, AC-10
+- **底层库**: rqalpha, backtrader, quantstats, empyrical, matplotlib, plotly, numpy, pandas
+- **Test Requirements**:
+  - `programmatic` TR-5.1: RQAlpha能正确执行回测（T+1规则生效）
+  - `programmatic` TR-5.2: 涨跌停板限制正确生效
+  - `programmatic` TR-5.3: 绩效指标计算与标准公式一致
+  - `programmatic` TR-5.4: 回测报告能正确生成
+  - `programmatic` TR-5.5: 图表能正确生成（matplotlib/plotly）
+  - `human-judgement` TR-5.6: 检查回测报告格式完整性
+- **Notes**: RQAlpha是A股回测首选，内置涨跌停、T+1、手续费；Backtrader作为辅助
+
+## [ ] Task 6: 组合优化与风控Skill开发（portfolio-risk-engine）
 - **Priority**: P0
 - **Depends On**: Task 5
 - **Description**:
-  - 开发事件驱动回测引擎脚本：支持买卖信号、持仓管理（backtrader）
-  - 开发绩效指标计算脚本：年化收益、夏普比率、最大回撤、胜率、盈亏比（quantstats/empyrical）
-  - 开发过拟合检测脚本：蒙特卡洛模拟、Walk-Forward分析（numpy/scipy）
-  - 开发交易成本建模脚本：佣金、滑点、冲击成本模型
-  - 开发回测报告生成脚本：Markdown/JSON格式报告
-  - 开发回测可视化脚本：收益曲线、回撤曲线（matplotlib/plotly）
-  - 编写references文档：回测框架说明、绩效指标定义、过拟合检测方法
-- **Acceptance Criteria Addressed**: AC-6, AC-11
-- **底层库**: backtrader, quantstats, empyrical, matplotlib, plotly
+  - 开发协方差矩阵估计脚本：历史协方差、指数加权协方差 shrinkage（pypfopt）
+  - 开发组合权重优化脚本：风险平价、最小方差、最大夏普（pypfopt）
+  - 开发Barra风格因子归因脚本：行业暴露、风格暴露分析（CNE5模型）
+  - 开发A股约束处理脚本：单一股票持仓不超过10%、行业暴露偏离基准±5%
+  - 开发止损机制脚本：单日回撤-3%硬止损、个股放量跌破20日均线止损
+  - 开发VaR/CVaR计算脚本：历史模拟法、参数法（numpy/scipy）
+  - 开发实时风险监控脚本：持仓限额、保证金、盈亏预警
+  - 编写references文档：优化算法说明、风险模型说明、风控规则
+- **Acceptance Criteria Addressed**: AC-6, AC-10
+- **底层库**: pypfopt, riskfolio-lib, numpy, scipy, pandas, empyrical
 - **Test Requirements**:
-  - `programmatic` TR-6.1: 回测引擎能正确执行买卖信号（backtrader）
-  - `programmatic` TR-6.2: 绩效指标计算与标准公式一致（quantstats/empyrical）
-  - `programmatic` TR-6.3: 回测报告能正确生成
-  - `programmatic` TR-6.4: 图表能正确生成（matplotlib/plotly）
-  - `human-judgement` TR-6.5: 检查回测报告格式完整性
-- **Notes**: 使用backtrader作为核心回测框架，quantstats生成报告
+  - `programmatic` TR-6.1: 协方差矩阵计算正确（pypfopt）
+  - `programmatic` TR-6.2: 优化算法收敛，权重满足A股约束
+  - `programmatic` TR-6.3: Barra归因分析结果合理
+  - `programmatic` TR-6.4: 止损机制能正确触发
+  - `programmatic` TR-6.5: VaR计算结果与标准方法一致
+  - `human-judgement` TR-6.6: 检查优化报告格式完整性
+- **Notes**: 风控是量化交易的生命线，A股约束需要严格遵守
 
-## [ ] Task 7: 组合优化Skill开发（portfolio-optimizer）
+## [ ] Task 7: A股实盘执行与监控Skill开发（execution-monitor-engine）
 - **Priority**: P1
 - **Depends On**: Task 6
-- **Description**:
-  - 开发协方差矩阵估计脚本：历史协方差、指数加权协方差 shrinkage（pypfopt）
-  - 开发组合权重优化脚本：风险平价、等权、最小方差、最大夏普（pypfopt + cvxpy）
-  - 开发Barra风格因子归因脚本：行业暴露、风格暴露分析
-  - 开发换手率优化脚本：交易成本优化
-  - 编写references文档：优化算法说明、风险模型说明
-- **Acceptance Criteria Addressed**: AC-7, AC-11
-- **底层库**: pypfopt, cvxpy, scipy, pandas
-- **Test Requirements**:
-  - `programmatic` TR-7.1: 协方差矩阵计算正确（pypfopt）
-  - `programmatic` TR-7.2: 优化算法收敛（cvxpy）
-  - `programmatic` TR-7.3: 归因分析结果合理
-  - `human-judgement` TR-7.4: 检查优化报告格式完整性
-- **Notes**: 参考现代投资组合理论（MPT）和 Barra风险模型
-
-## [ ] Task 8: 风险管理层Skill开发（risk-manager）
-- **Priority**: P0
-- **Depends On**: Task 7
-- **Description**:
-  - 开发VaR/CVaR计算脚本：历史模拟法、参数法、蒙特卡洛法（numpy/scipy）
-  - 开发实时风险监控脚本：持仓限额、保证金、盈亏预警（pandas）
-  - 开发压力测试脚本：历史情景、假设情景模拟（numpy）
-  - 开发合规检查脚本：持仓集中度、交易频率、涨跌停限制检查
-  - 开发风险归因分析脚本：收益归因、风险归因（empyrical）
-  - 编写references文档：风险指标说明、风控规则、合规要求
-- **Acceptance Criteria Addressed**: AC-8, AC-11
-- **底层库**: numpy, scipy, pandas, empyrical
-- **Test Requirements**:
-  - `programmatic` TR-8.1: VaR计算结果与标准方法一致
-  - `programmatic` TR-8.2: 合规检查能正确识别违规持仓
-  - `programmatic` TR-8.3: 告警阈值能正确触发
-  - `human-judgement` TR-8.4: 检查风险报告格式完整性
-- **Notes**: 风控是量化交易的生命线，需要严谨的数学计算
-
-## [ ] Task 9: 交易执行Skill开发（execution-trader）
-- **Priority**: P1
-- **Depends On**: Task 8
 - **Description**:
   - 开发模拟账户管理脚本：资金初始化、账户状态跟踪（pandas）
   - 开发订单模拟执行脚本：市价单、限价单、止损单
   - 开发持仓跟踪脚本：实时持仓更新、成本计算、盈亏计算（numpy）
-  - 开发实盘接口框架脚本：预留接口，支持扩展到券商API
+  - 开发实盘接口框架脚本：预留接口，支持扩展到vnpy/XTP
   - 开发交易日志脚本：完整交易记录、审计日志
-  - 编写references文档：模拟交易规则、订单类型说明、券商API对接说明
-- **Acceptance Criteria Addressed**: AC-9, AC-11
-- **底层库**: pandas, numpy
+  - 开发风控守护进程脚本：单日亏损超阈值报警、持仓集中度监控
+  - 编写references文档：模拟交易规则、订单类型说明、vnpy/XTP对接说明
+- **Acceptance Criteria Addressed**: AC-7, AC-10
+- **底层库**: pandas, numpy（模拟逻辑），vnpy（实盘扩展）
 - **Test Requirements**:
-  - `programmatic` TR-9.1: 模拟账户能正确执行买入/卖出信号
-  - `programmatic` TR-9.2: 持仓计算正确（平均成本、盈亏）
-  - `programmatic` TR-9.3: 模拟绩效统计与实际交易一致
-  - `programmatic` TR-9.4: 交易日志记录完整
-  - `human-judgement` TR-9.5: 检查实盘接口框架设计合理性
+  - `programmatic` TR-7.1: 模拟账户能正确执行买入/卖出信号
+  - `programmatic` TR-7.2: 持仓计算正确（平均成本、盈亏）
+  - `programmatic` TR-7.3: 模拟绩效统计与实际交易一致
+  - `programmatic` TR-7.4: 交易日志记录完整
+  - `programmatic` TR-7.5: 风控守护进程能正确触发报警
+  - `human-judgement` TR-7.6: 检查实盘接口框架设计合理性
 - **Notes**: 模拟交易是实盘前的重要验证环节，实盘接口需要用户根据实际券商API实现
 
-## [ ] Task 10: 自动化安装脚本开发
+## [ ] Task 8: 绩效归因与可视化报告Skill开发（reports-engine）
+- **Priority**: P1
+- **Depends On**: Task 6
+- **Description**:
+  - 开发日收益报告脚本：quantstats一键生成
+  - 开发滚动夏普、月度热力图脚本
+  - 开发A股风格暴露分析脚本：大盘/小盘/成长/价值暴露
+  - 开发行业暴露图脚本：申万一级行业暴露
+  - 开发Brinson归因脚本：超额收益分解
+  - 开发动态净值曲线脚本：plotly交互图表
+  - 开发因子衰减走势图脚本：matplotlib静态图表
+  - 编写references文档：报告说明、归因方法、图表使用指南
+- **Acceptance Criteria Addressed**: AC-8, AC-10
+- **底层库**: quantstats, plotly, matplotlib, pandas, numpy
+- **Test Requirements**:
+  - `programmatic` TR-8.1: quantstats报告正确生成
+  - `programmatic` TR-8.2: A股风格暴露分析正确（基准为沪深300）
+  - `programmatic` TR-8.3: Brinson归因计算正确
+  - `programmatic` TR-8.4: plotly图表能正确生成
+  - `human-judgement` TR-8.5: 检查报告格式完整性
+- **Notes**: 报告需要符合国内投资人审阅习惯
+
+## [ ] Task 9: 自动化安装脚本开发
 - **Priority**: P0
-- **Depends On**: Task 1-9
+- **Depends On**: Task 1-8
 - **Description**:
   - 开发OpenClaw检测脚本：检测系统是否已安装OpenClaw
   - 开发OpenClaw安装脚本：支持Linux/macOS自动安装
@@ -191,18 +191,18 @@
   - 开发环境变量配置脚本：指导用户配置TUSHARE_TOKEN等
   - 开发依赖检查脚本：检查Python版本、必需包，自动安装Python依赖
   - 编写README说明：完整使用指南
-- **Acceptance Criteria Addressed**: AC-10
+- **Acceptance Criteria Addressed**: AC-9
 - **Test Requirements**:
-  - `programmatic` TR-10.1: 检测脚本能正确识别OpenClaw安装状态
-  - `programmatic` TR-10.2: 安装脚本能在干净环境完成安装
-  - `programmatic` TR-10.3: Skill导入脚本能将所有Skill导入到正确位置
-  - `programmatic` TR-10.4: 依赖检查能正确识别缺失项，自动安装Python依赖
-  - `human-judgement` TR-10.5: 检查README文档完整性
+  - `programmatic` TR-9.1: 检测脚本能正确识别OpenClaw安装状态
+  - `programmatic` TR-9.2: 安装脚本能在干净环境完成安装
+  - `programmatic` TR-9.3: Skill导入脚本能将所有Skill导入到正确位置
+  - `programmatic` TR-9.4: 依赖检查能正确识别缺失项，自动安装Python依赖
+  - `human-judgement` TR-9.5: 检查README文档完整性
 - **Notes**: 安装脚本是用户体验的关键，需要健壮的错误处理
 
-## [ ] Task 11: 环境变量和安全配置
+## [ ] Task 10: 环境变量和安全配置
 - **Priority**: P0
-- **Depends On**: Task 10
+- **Depends On**: Task 9
 - **Description**:
   - 设计统一的环境变量规范
   - 创建环境变量模板文件（.env.example）
@@ -210,13 +210,13 @@
   - 编写安全配置说明文档（SECURITY.md）
 - **Acceptance Criteria Addressed**: NFR-3
 - **Test Requirements**:
-  - `programmatic` TR-11.1: 所有脚本能从环境变量正确读取API密钥
-  - `programmatic` TR-11.2: 缺少环境变量时脚本能给出明确提示
+  - `programmatic` TR-10.1: 所有脚本能从环境变量正确读取API密钥
+  - `programmatic` TR-10.2: 缺少环境变量时脚本能给出明确提示
 - **Notes**: 安全是底线，API密钥不能硬编码
 
-## [ ] Task 12: 项目文档与测试
+## [ ] Task 11: 项目文档与测试
 - **Priority**: P1
-- **Depends On**: Task 1-11
+- **Depends On**: Task 1-10
 - **Description**:
   - 编写完整项目README
   - 编写每个Skill的使用说明
@@ -225,9 +225,9 @@
   - 创建requirements.txt（包含所有Python依赖）
 - **Acceptance Criteria Addressed**: All
 - **Test Requirements**:
-  - `programmatic` TR-12.1: 所有脚本能正常运行
-  - `programmatic` TR-12.2: 文档示例代码能正确执行
-  - `programmatic` TR-12.3: requirements.txt包含所有依赖（pandas, numpy, scipy, backtrader, quantstats, pypfopt, tushare, akshare等）
-  - `human-judgement` TR-12.4: 代码审查通过
-  - `human-judgement` TR-12.5: README完整且易于理解
+  - `programmatic` TR-11.1: 所有脚本能正常运行
+  - `programmatic` TR-11.2: 文档示例代码能正确执行
+  - `programmatic` TR-11.3: requirements.txt包含所有依赖（pandas, numpy, scipy, rqalpha, backtrader, lightgbm, tushare, akshare, quantstats, pypfopt等）
+  - `human-judgement` TR-11.4: 代码审查通过
+  - `human-judgement` TR-11.5: README完整且易于理解
 - **Notes**: 好的文档能大大降低使用门槛
