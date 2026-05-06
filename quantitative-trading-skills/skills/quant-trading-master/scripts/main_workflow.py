@@ -27,6 +27,7 @@ class Stage(Enum):
     投研阶段枚举
     """
     DATA_ACQUISITION = "数据获取"
+    FACTOR_RESEARCH = "因子研究"
     FACTOR_CONSTRUCTION = "因子构建"
     MODEL_TRAINING = "模型训练"
     BACKTEST_VALIDATION = "回测验证"
@@ -92,6 +93,7 @@ class StageStateMachine:
     # 阶段顺序
     STAGE_ORDER = [
         Stage.DATA_ACQUISITION,
+        Stage.FACTOR_RESEARCH,
         Stage.FACTOR_CONSTRUCTION,
         Stage.MODEL_TRAINING,
         Stage.BACKTEST_VALIDATION,
@@ -103,6 +105,7 @@ class StageStateMachine:
     # 阶段到子Skill的映射
     STAGE_TO_SKILL = {
         Stage.DATA_ACQUISITION: "a-share-data-engine",
+        Stage.FACTOR_RESEARCH: "qlib-research-engine",
         Stage.FACTOR_CONSTRUCTION: "a-share-factor-engine",
         Stage.MODEL_TRAINING: "strategy-model-engine",
         Stage.BACKTEST_VALIDATION: "backtest-engine",
@@ -147,6 +150,7 @@ class MilestoneChecker:
         """
         required_artifacts = {
             Stage.DATA_ACQUISITION: ["data_file"],
+            Stage.FACTOR_RESEARCH: ["qlib_factors_file"],
             Stage.FACTOR_CONSTRUCTION: ["factor_file"],
             Stage.MODEL_TRAINING: ["model_file"],
             Stage.BACKTEST_VALIDATION: ["backtest_report"],
@@ -215,6 +219,13 @@ class SubSkillDispatcher:
                 "success": True,
                 "data_file": str(data_file),
                 "message": "数据获取完成（模拟）"
+            }
+        elif stage == Stage.FACTOR_RESEARCH:
+            qlib_factors_file = self.data_dir / f"{ctx.task_id}_qlib_factors.parquet"
+            return {
+                "success": True,
+                "qlib_factors_file": str(qlib_factors_file),
+                "message": "Qlib因子研究完成（模拟）- 使用Alpha360因子库"
             }
         elif stage == Stage.FACTOR_CONSTRUCTION:
             factor_file = self.data_dir / f"{ctx.task_id}_factors.parquet"
@@ -389,8 +400,9 @@ if __name__ == "__main__":
         time_range={"start_date": "2020-01-01", "end_date": "2024-01-01"},
         config={
             "data_backend": "tushare",
-            "backtest_backend": "rqalpha",
-            "trade_backend": "simulation"
+            "research_backend": "qlib",
+            "backtest_backend": "backtrader",
+            "trade_backend": "gm"
         }
     )
     

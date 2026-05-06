@@ -12,6 +12,7 @@ tags:
   - workflow
 dependencies:
   - a-share-data-engine
+  - qlib-research-engine
   - a-share-factor-engine
   - strategy-model-engine
   - backtest-engine
@@ -95,6 +96,7 @@ result = run(ctx)
 | 阶段 | 对应子Skill |
 |------|------------|
 | 数据获取 | a-share-data-engine |
+| 因子研究 | qlib-research-engine |
 | 因子构建 | a-share-factor-engine |
 | 模型训练 | strategy-model-engine |
 | 回测验证 | backtest-engine |

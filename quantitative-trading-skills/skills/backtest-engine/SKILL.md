@@ -27,7 +27,7 @@ environment_variables:
   - name: BACKTEST_ENGINE
     description: 默认回测引擎 (rqalpha/backtrader/gm)
     required: false
-    default: "rqalpha"
+    default: "backtrader"
   - name: REPORT_DIR
     description: 回测报告存储目录
     required: false

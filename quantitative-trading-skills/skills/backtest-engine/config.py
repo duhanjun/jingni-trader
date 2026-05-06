@@ -9,7 +9,7 @@ class Config:
 
     def __init__(self, **kwargs):
         self.BACKTEST_ENGINE: str = kwargs.get(
-            "BACKTEST_ENGINE", os.environ.get("BACKTEST_ENGINE", "rqalpha")
+            "BACKTEST_ENGINE", os.environ.get("BACKTEST_ENGINE", "backtrader")
         )
         self.REPORT_DIR: str = kwargs.get(
             "REPORT_DIR", os.environ.get("REPORT_DIR", "./reports")

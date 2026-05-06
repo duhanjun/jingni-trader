@@ -26,9 +26,11 @@ try:
     # 导入数据引擎
     sys.path.insert(0, os.path.join(PROJECT_ROOT, 'skills', 'a-share-data-engine'))
     from engine import AShareDataEngine
+    from config import get_config
     
-    # 创建数据引擎
-    engine = AShareDataEngine()
+    # 创建配置和数据引擎
+    config = get_config()
+    engine = AShareDataEngine(config)
     print("✅ 数据引擎初始化成功")
     
     # 获取A股数据
