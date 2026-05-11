@@ -195,8 +195,11 @@ class SimAdapter(BaseTrader):
         
         return {
             "cash": self.cash,
+            "available_cash": self.cash,
             "total_value": total_value,
+            "total_assets": total_value,
             "unrealized_pnl": total_value - self.initial_capital,
+            "realized_pnl": 0,
             "initial_capital": self.initial_capital
         }
     
