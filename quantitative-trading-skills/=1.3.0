@@ -1,0 +1,167 @@
+Collecting pandas
+  Downloading pandas-3.0.3-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl.metadata (79 kB)
+Collecting numpy
+  Downloading numpy-2.4.4-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (6.6 kB)
+Collecting scipy
+  Downloading scipy-1.17.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (62 kB)
+Collecting matplotlib
+  Downloading matplotlib-3.10.9-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (52 kB)
+Collecting pydantic
+  Downloading pydantic-2.13.4-py3-none-any.whl.metadata (109 kB)
+Collecting tushare
+  Using cached tushare-1.4.29-py3-none-any.whl.metadata (3.5 kB)
+Collecting python-dotenv
+  Using cached python_dotenv-1.2.2-py3-none-any.whl.metadata (27 kB)
+Collecting pyarrow
+  Downloading pyarrow-24.0.0-cp311-cp311-manylinux_2_28_x86_64.whl.metadata (3.0 kB)
+Collecting backtrader
+  Downloading backtrader-1.9.78.123-py2.py3-none-any.whl.metadata (6.8 kB)
+Collecting backtrader-plotting
+  Downloading backtrader_plotting-2.0.0-py3-none-any.whl.metadata (3.7 kB)
+Collecting sqlalchemy
+  Downloading sqlalchemy-2.0.49-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (9.5 kB)
+Collecting scikit-learn
+  Downloading scikit_learn-1.8.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (11 kB)
+Collecting python-dateutil>=2.8.2 (from pandas)
+  Downloading python_dateutil-2.9.0.post0-py2.py3-none-any.whl.metadata (8.4 kB)
+Collecting contourpy>=1.0.1 (from matplotlib)
+  Downloading contourpy-1.3.3-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (5.5 kB)
+Collecting cycler>=0.10 (from matplotlib)
+  Downloading cycler-0.12.1-py3-none-any.whl.metadata (3.8 kB)
+Collecting fonttools>=4.22.0 (from matplotlib)
+  Downloading fonttools-4.62.1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (117 kB)
+Collecting kiwisolver>=1.3.1 (from matplotlib)
+  Downloading kiwisolver-1.5.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (5.1 kB)
+Collecting packaging>=20.0 (from matplotlib)
+  Downloading packaging-26.2-py3-none-any.whl.metadata (3.5 kB)
+Collecting pillow>=8 (from matplotlib)
+  Downloading pillow-12.2.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (8.8 kB)
+Collecting pyparsing>=3 (from matplotlib)
+  Downloading pyparsing-3.3.2-py3-none-any.whl.metadata (5.8 kB)
+Collecting annotated-types>=0.6.0 (from pydantic)
+  Downloading annotated_types-0.7.0-py3-none-any.whl.metadata (15 kB)
+Collecting pydantic-core==2.46.4 (from pydantic)
+  Downloading pydantic_core-2.46.4-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (6.6 kB)
+Collecting typing-extensions>=4.14.1 (from pydantic)
+  Downloading typing_extensions-4.15.0-py3-none-any.whl.metadata (3.3 kB)
+Collecting typing-inspection>=0.4.2 (from pydantic)
+  Downloading typing_inspection-0.4.2-py3-none-any.whl.metadata (2.6 kB)
+Collecting requests (from tushare)
+  Downloading requests-2.34.1-py3-none-any.whl.metadata (4.8 kB)
+Collecting lxml (from tushare)
+  Downloading lxml-6.1.0-cp311-cp311-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl.metadata (4.0 kB)
+Collecting simplejson (from tushare)
+  Downloading simplejson-4.1.1-cp311-cp311-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl.metadata (3.8 kB)
+Collecting bs4 (from tushare)
+  Downloading bs4-0.0.2-py2.py3-none-any.whl.metadata (411 bytes)
+Collecting websocket-client>=0.57.0 (from tushare)
+  Downloading websocket_client-1.9.0-py3-none-any.whl.metadata (8.3 kB)
+Collecting tqdm (from tushare)
+  Downloading tqdm-4.67.3-py3-none-any.whl.metadata (57 kB)
+Collecting bokeh~=2.3.0 (from backtrader-plotting)
+  Downloading bokeh-2.3.3.tar.gz (10.7 MB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.7/10.7 MB 24.6 MB/s  0:00:00
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting jinja2 (from backtrader-plotting)
+  Downloading jinja2-3.1.6-py3-none-any.whl.metadata (2.9 kB)
+Collecting markdown2 (from backtrader-plotting)
+  Downloading markdown2-2.5.5-py3-none-any.whl.metadata (2.1 kB)
+Collecting PyYAML>=3.10 (from bokeh~=2.3.0->backtrader-plotting)
+  Downloading pyyaml-6.0.3-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (2.4 kB)
+Collecting tornado>=5.1 (from bokeh~=2.3.0->backtrader-plotting)
+  Downloading tornado-6.5.5-cp39-abi3-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl.metadata (2.8 kB)
+Collecting greenlet>=1 (from sqlalchemy)
+  Downloading greenlet-3.5.0-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl.metadata (3.7 kB)
+Collecting joblib>=1.3.0 (from scikit-learn)
+  Downloading joblib-1.5.3-py3-none-any.whl.metadata (5.5 kB)
+Collecting threadpoolctl>=3.2.0 (from scikit-learn)
+  Downloading threadpoolctl-3.6.0-py3-none-any.whl.metadata (13 kB)
+Collecting MarkupSafe>=2.0 (from jinja2->backtrader-plotting)
+  Downloading markupsafe-3.0.3-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (2.7 kB)
+Collecting six>=1.5 (from python-dateutil>=2.8.2->pandas)
+  Downloading six-1.17.0-py2.py3-none-any.whl.metadata (1.7 kB)
+Collecting beautifulsoup4 (from bs4->tushare)
+  Downloading beautifulsoup4-4.14.3-py3-none-any.whl.metadata (3.8 kB)
+Collecting soupsieve>=1.6.1 (from beautifulsoup4->bs4->tushare)
+  Downloading soupsieve-2.8.3-py3-none-any.whl.metadata (4.6 kB)
+Collecting charset_normalizer<4,>=2 (from requests->tushare)
+  Downloading charset_normalizer-3.4.7-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (40 kB)
+Collecting idna<4,>=2.5 (from requests->tushare)
+  Downloading idna-3.15-py3-none-any.whl.metadata (7.7 kB)
+Collecting urllib3<3,>=1.26 (from requests->tushare)
+  Downloading urllib3-2.7.0-py3-none-any.whl.metadata (6.9 kB)
+Collecting certifi>=2023.5.7 (from requests->tushare)
+  Downloading certifi-2026.4.22-py3-none-any.whl.metadata (2.5 kB)
+Downloading pandas-3.0.3-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (11.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 11.3/11.3 MB 42.9 MB/s  0:00:00
+Downloading numpy-2.4.4-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (16.9 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 16.9/16.9 MB 40.0 MB/s  0:00:00
+Downloading scipy-1.17.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (35.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 35.3/35.3 MB 39.2 MB/s  0:00:00
+Downloading matplotlib-3.10.9-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (8.8 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 8.8/8.8 MB 47.2 MB/s  0:00:00
+Downloading pydantic-2.13.4-py3-none-any.whl (472 kB)
+Downloading pydantic_core-2.46.4-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (2.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.1/2.1 MB 100.6 MB/s  0:00:00
+Downloading tushare-1.4.29-py3-none-any.whl (142 kB)
+Downloading python_dotenv-1.2.2-py3-none-any.whl (22 kB)
+Downloading pyarrow-24.0.0-cp311-cp311-manylinux_2_28_x86_64.whl (48.8 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 48.8/48.8 MB 39.2 MB/s  0:00:01
+Downloading backtrader-1.9.78.123-py2.py3-none-any.whl (419 kB)
+Downloading backtrader_plotting-2.0.0-py3-none-any.whl (60 kB)
+Downloading sqlalchemy-2.0.49-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (3.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.3/3.3 MB 36.8 MB/s  0:00:00
+Downloading scikit_learn-1.8.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (9.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 9.1/9.1 MB 41.5 MB/s  0:00:00
+Downloading annotated_types-0.7.0-py3-none-any.whl (13 kB)
+Downloading contourpy-1.3.3-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (355 kB)
+Downloading cycler-0.12.1-py3-none-any.whl (8.3 kB)
+Downloading fonttools-4.62.1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (5.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 5.1/5.1 MB 49.3 MB/s  0:00:00
+Downloading greenlet-3.5.0-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (615 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 615.2/615.2 kB 66.9 MB/s  0:00:00
+Downloading jinja2-3.1.6-py3-none-any.whl (134 kB)
+Downloading joblib-1.5.3-py3-none-any.whl (309 kB)
+Downloading kiwisolver-1.5.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (1.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.4/1.4 MB 111.5 MB/s  0:00:00
+Downloading markupsafe-3.0.3-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (22 kB)
+Downloading packaging-26.2-py3-none-any.whl (100 kB)
+Downloading pillow-12.2.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (7.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 7.1/7.1 MB 40.4 MB/s  0:00:00
+Downloading pyparsing-3.3.2-py3-none-any.whl (122 kB)
+Downloading python_dateutil-2.9.0.post0-py2.py3-none-any.whl (229 kB)
+Downloading pyyaml-6.0.3-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (806 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 806.6/806.6 kB 70.8 MB/s  0:00:00
+Downloading six-1.17.0-py2.py3-none-any.whl (11 kB)
+Downloading threadpoolctl-3.6.0-py3-none-any.whl (18 kB)
+Downloading tornado-6.5.5-cp39-abi3-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (447 kB)
+Downloading typing_extensions-4.15.0-py3-none-any.whl (44 kB)
+Downloading typing_inspection-0.4.2-py3-none-any.whl (14 kB)
+Downloading websocket_client-1.9.0-py3-none-any.whl (82 kB)
+Downloading bs4-0.0.2-py2.py3-none-any.whl (1.2 kB)
+Downloading beautifulsoup4-4.14.3-py3-none-any.whl (107 kB)
+Downloading soupsieve-2.8.3-py3-none-any.whl (37 kB)
+Downloading lxml-6.1.0-cp311-cp311-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl (5.2 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 5.2/5.2 MB 51.4 MB/s  0:00:00
+Downloading markdown2-2.5.5-py3-none-any.whl (56 kB)
+Downloading requests-2.34.1-py3-none-any.whl (73 kB)
+Downloading charset_normalizer-3.4.7-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (214 kB)
+Downloading idna-3.15-py3-none-any.whl (72 kB)
+Downloading urllib3-2.7.0-py3-none-any.whl (131 kB)
+Downloading certifi-2026.4.22-py3-none-any.whl (135 kB)
+Downloading simplejson-4.1.1-cp311-cp311-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (180 kB)
+Downloading tqdm-4.67.3-py3-none-any.whl (78 kB)
+Building wheels for collected packages: bokeh
+  Building wheel for bokeh (pyproject.toml): started
+  Building wheel for bokeh (pyproject.toml): finished with status 'done'
+  Created wheel for bokeh: filename=bokeh-2.3.3-py3-none-any.whl size=11342852 sha256=7509cde37e1ca1db7317646bfa0f1903549258c822dfbd452d62944ffe25b232
+  Stored in directory: /root/.cache/pip/wheels/dc/8d/37/27b101b47791487eb71a8d2a3bf210e0a2472b7033d61e15e5
+Successfully built bokeh
+Installing collected packages: backtrader, websocket-client, urllib3, typing-extensions, tqdm, tornado, threadpoolctl, soupsieve, six, simplejson, PyYAML, python-dotenv, pyparsing, pyarrow, pillow, packaging, numpy, MarkupSafe, markdown2, lxml, kiwisolver, joblib, idna, greenlet, fonttools, cycler, charset_normalizer, certifi, annotated-types, typing-inspection, sqlalchemy, scipy, requests, python-dateutil, pydantic-core, jinja2, contourpy, beautifulsoup4, scikit-learn, pydantic, pandas, matplotlib, bs4, bokeh, tushare, backtrader-plotting
+
+Successfully installed MarkupSafe-3.0.3 PyYAML-6.0.3 annotated-types-0.7.0 backtrader-1.9.78.123 backtrader-plotting-2.0.0 beautifulsoup4-4.14.3 bokeh-2.3.3 bs4-0.0.2 certifi-2026.4.22 charset_normalizer-3.4.7 contourpy-1.3.3 cycler-0.12.1 fonttools-4.62.1 greenlet-3.5.0 idna-3.15 jinja2-3.1.6 joblib-1.5.3 kiwisolver-1.5.0 lxml-6.1.0 markdown2-2.5.5 matplotlib-3.10.9 numpy-2.4.4 packaging-26.2 pandas-3.0.3 pillow-12.2.0 pyarrow-24.0.0 pydantic-2.13.4 pydantic-core-2.46.4 pyparsing-3.3.2 python-dateutil-2.9.0.post0 python-dotenv-1.2.2 requests-2.34.1 scikit-learn-1.8.0 scipy-1.17.1 simplejson-4.1.1 six-1.17.0 soupsieve-2.8.3 sqlalchemy-2.0.49 threadpoolctl-3.6.0 tornado-6.5.5 tqdm-4.67.3 tushare-1.4.29 typing-extensions-4.15.0 typing-inspection-0.4.2 urllib3-2.7.0 websocket-client-1.9.0
