@@ -5,7 +5,7 @@ import sys
 
 from config import Config, get_config
 from base import BaseBacktestEngine
-from adapters import RQAlphaAdapter, BacktraderAdapter, gmAdapter
+from adapters import BacktraderAdapter, gmAdapter
 from rules import AShareTradingRules, FeeCalculator, SuspensionHandler
 from performance import PerformanceMetrics
 from overfitting import WalkForwardAnalyzer
@@ -38,9 +38,7 @@ class BacktestEngine:
         """
         engine_type = self.config.BACKTEST_ENGINE.lower()
 
-        if engine_type == "rqalpha":
-            return RQAlphaAdapter(self.config)
-        elif engine_type == "backtrader":
+        if engine_type == "backtrader":
             return BacktraderAdapter(self.config)
         elif engine_type == "gm":
             return gmAdapter(self.config)
