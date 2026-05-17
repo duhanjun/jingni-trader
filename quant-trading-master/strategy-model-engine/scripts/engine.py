@@ -144,3 +144,133 @@ class ModelEngine:
 
         logger.info(f"生成 {len(splits)} 个交叉验证分割")
         return splits
+
+    # ── 模型创建 ────────────────────────────
+    def create_model(self, trial: Optional[optuna.Trial] = None) -> Any:
+        """根据配置和 Optuna trial 创建模型"""
+        if MODEL_TYPE == 'lightgbm':
+            if trial is not None:
+                params = {
+                    'n_estimators': trial.suggest_int('n_estimators', 50, 500),
+                    'max_depth': trial.suggest_int('max_depth', 3, 15),
+                    'num_leaves': trial.suggest_int('num_leaves', 20, 300),
+                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+                    'subsample': trial.suggest_float('subsample', 0.5, 1.0),
+                    'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
+                    'reg_alpha': trial.suggest_float('reg_alpha', 1e-8, 10.0, log=True),
+                    'reg_lambda': trial.suggest_float('reg_lambda', 1e-8, 10.0, log=True),
+                    'random_state': 42,
+                    'n_jobs': -1,
+                    'verbosity': -1,
+                }
+            else:
+                params = {'random_state': 42, 'n_jobs': -1, 'verbosity': -1}
+
+            if LABEL_TYPE == 'classification':
+                return lgb.LGBMClassifier(**params)
+            else:
+                return lgb.LGBMRegressor(**params)
+
+        elif MODEL_TYPE == 'catboost':
+            if trial is not None:
+                params = {
+                    'iterations': trial.suggest_int('iterations', 50, 500),
+                    'depth': trial.suggest_int('depth', 3, 12),
+                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+                    'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1e-3, 10.0, log=True),
+                    'random_strength': trial.suggest_float('random_strength', 0.1, 10.0),
+                    'random_seed': 42,
+                    'verbose': False,
+                }
+            else:
+                params = {'random_seed': 42, 'verbose': False}
+
+            if LABEL_TYPE == 'classification':
+                return CatBoostClassifier(**params)
+            else:
+                return CatBoostRegressor(**params)
+
+        elif MODEL_TYPE == 'logistic_regression':
+            if trial is not None:
+                params = {
+                    'C': trial.suggest_float('C', 0.01, 10.0, log=True),
+                    'penalty': trial.suggest_categorical('penalty', ['l1', 'l2']),
+                    'solver': 'saga',
+                    'max_iter': 1000,
+                    'random_state': 42,
+                }
+            else:
+                params = {'max_iter': 1000, 'random_state': 42}
+            return LogisticRegression(**params)
+
+        elif MODEL_TYPE == 'random_forest':
+            if trial is not None:
+                params = {
+                    'n_estimators': trial.suggest_int('n_estimators', 50, 500),
+                    'max_depth': trial.suggest_int('max_depth', 3, 20),
+                    'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
+                    'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 10),
+                    'random_state': 42,
+                    'n_jobs': -1,
+                }
+            else:
+                params = {'random_state': 42, 'n_jobs': -1}
+            if LABEL_TYPE == 'classification':
+                return RandomForestClassifier(**params)
+            else:
+                return RandomForestRegressor(**params)
+        else:
+            raise ValueError(f"不支持的模型类型: {MODEL_TYPE}")
+
+    # ── 超参数优化 ──────────────────────────
+    def optimize_hyperparams(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        dates: pd.Series,
+        n_trials: int = OPTUNA_TRIALS
+    ) -> Dict[str, Any]:
+        """
+        使用 Optuna 进行超参数优化
+
+        返回:
+            最优参数字典
+        """
+        logger.info(f"开始超参数优化 (模型: {MODEL_TYPE}, trials: {n_trials})")
+
+        # 生成一个时序分割用于评估
+        splits = self.purged_group_ts_split(dates, n_splits=3)
+        if not splits:
+            logger.warning("无法生成交叉验证分割，使用默认参数")
+            return {}
+
+        def objective(trial):
+            model = self.create_model(trial)
+            scores = []
+
+            for train_idx, val_idx in splits:
+                X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+                y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+
+                model.fit(X_train, y_train)
+
+                if LABEL_TYPE == 'classification':
+                    score = model.score(X_val, y_val)  # accuracy
+                else:
+                    from sklearn.metrics import mean_squared_error
+                    pred = model.predict(X_val)
+                    score = -mean_squared_error(y_val, pred)
+
+                scores.append(score)
+
+            return np.mean(scores)
+
+        study = optuna.create_study(
+            direction='maximize',
+            sampler=optuna.samplers.TPESampler(seed=42),
+            pruner=optuna.pruners.MedianPruner(n_startup_trials=10),
+        )
+        study.optimize(objective, n_trials=n_trials, timeout=OPTUNA_TIMEOUT)
+
+        logger.info(f"超参数优化完成，最佳分数: {study.best_value}")
+        return study.best_params
