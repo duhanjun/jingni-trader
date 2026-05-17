@@ -20,6 +20,7 @@ from sklearn.model_selection import TimeSeriesSplit
 
 import optuna
 import mlflow
+import joblib
 
 from .config import (
     MODEL_TYPE, MODEL_DIR,
@@ -274,3 +275,307 @@ class ModelEngine:
 
         logger.info(f"超参数优化完成，最佳分数: {study.best_value}")
         return study.best_params
+
+    # ── 训练最终模型 ────────────────────────
+    def train(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        best_params: Dict[str, Any] = None,
+        test_dates: pd.Series = None
+    ) -> Tuple[Any, Dict[str, float], Optional[np.ndarray]]:
+        """
+        训练模型并评估
+
+        参数:
+            X, y: 全部数据
+            best_params: 最优参数
+            test_dates: 测试集日期（用于样本外评估）
+
+        返回:
+            model, metrics, predictions
+        """
+        logger.info("训练最终模型...")
+
+        with mlflow.start_run():
+            # 日志参数
+            mlflow.log_params({
+                "model_type": MODEL_TYPE,
+                "label_type": LABEL_TYPE,
+                "forward_period": FORWARD_PERIOD,
+                "features": ", ".join(X.columns.tolist()),
+            })
+
+            if best_params:
+                mlflow.log_params(best_params)
+
+            # 创建并训练模型
+            model = self.create_model()
+            if best_params:
+                model.set_params(**best_params)
+
+            # 如果指定了测试集日期，则用测试集之前的数据训练
+            if test_dates is not None and len(test_dates) > 0:
+                train_mask = ~X.index.isin(test_dates.index)
+                X_train = X.loc[train_mask]
+                y_train = y.loc[train_mask]
+                X_test = X.loc[~train_mask]
+                y_test = y.loc[~train_mask]
+            else:
+                X_train, y_train = X, y
+                X_test, y_test = None, None
+
+            model.fit(X_train, y_train)
+
+            # 评估
+            metrics = {}
+            predictions = None
+
+            if X_test is not None:
+                predictions = model.predict(X_test)
+
+                if LABEL_TYPE == 'classification':
+                    from sklearn.metrics import accuracy_score, f1_score
+                    metrics['accuracy'] = accuracy_score(y_test, predictions)
+                    metrics['f1'] = f1_score(y_test, predictions, average='weighted')
+                else:
+                    from sklearn.metrics import mean_squared_error, r2_score
+                    metrics['mse'] = mean_squared_error(y_test, predictions)
+                    metrics['rmse'] = np.sqrt(metrics['mse'])
+                    metrics['r2'] = r2_score(y_test, predictions)
+
+                # IC 分析（预测值与实际收益的相关性）
+                pred_series = pd.Series(predictions, index=X_test.index)
+                y_test_aligned = y_test.loc[X_test.index]
+                metrics['ic'] = pred_series.corr(y_test_aligned)
+
+            else:
+                # 在全部训练集上的拟合指标
+                if hasattr(model, 'score'):
+                    metrics['train_score'] = model.score(X_train, y_train)
+
+            mlflow.log_metrics(metrics)
+
+            # 日志特征重要性
+            if hasattr(model, 'feature_importances_'):
+                importance_dict = dict(zip(X.columns, model.feature_importances_))
+                # 保存为JSON
+                with mlflow.start_run(nested=True):
+                    mlflow.log_dict(importance_dict, "feature_importance.json")
+
+            # 保存模型
+            model_path = os.path.join(MODEL_DIR, f"model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pkl")
+            joblib.dump(model, model_path)
+            mlflow.log_artifact(model_path)
+
+            logger.info(f"模型训练完成，指标: {metrics}")
+            return model, metrics, predictions
+
+    # ── 策略模板：规则型策略 ────────────────
+    def generate_rule_based_signal(
+        self,
+        factor_df: pd.DataFrame,
+        strategy_type: str = "single_factor"
+    ) -> pd.DataFrame:
+        """
+        生成基于规则的策略信号（不涉及ML训练）
+
+        参数:
+            factor_df: 因子数据
+            strategy_type: 策略类型
+                - single_factor: 单因子选股（如反转因子）
+                - mean_reversion: 均值回归
+                - trend_following: 趋势跟踪
+
+        返回:
+            信号 DataFrame (code, date, signal)
+        """
+        df = factor_df[['code', 'date']].copy()
+
+        if strategy_type == "single_factor":
+            # 单因子：选因子值最低（或最高）的N只
+            if 'alpha_score' in factor_df.columns:
+                # 使用融合Alpha
+                factor_col = 'alpha_score'
+            elif 'reversal_20d' in factor_df.columns:
+                factor_col = 'reversal_20d'
+            else:
+                factor_col = [c for c in factor_df.columns if c not in ['code', 'date']][0]
+
+            # 每天选因子值最大的前20%做多（简化示例）
+            df['raw_score'] = factor_df[factor_col]
+            df['rank_pct'] = df.groupby('date')['raw_score'].rank(pct=True)
+            df['signal'] = 0
+            df.loc[df['rank_pct'] > 0.8, 'signal'] = 1  # 前20%买入
+            df.loc[df['rank_pct'] < 0.2, 'signal'] = -1  # 后20%卖出（若允许融券）
+            df = df[['code', 'date', 'signal']]
+
+        elif strategy_type == "mean_reversion":
+            # 均值回归：基于价格偏离均线
+            if 'ret_20d' in factor_df.columns:
+                df['signal'] = -np.sign(factor_df['ret_20d'])  # 跌多了买，涨多了卖
+            df = df[['code', 'date', 'signal']]
+
+        elif strategy_type == "trend_following":
+            # 趋势跟踪：基于移动平均交叉
+            if 'ma_20' in factor_df.columns and 'close' in factor_df.columns:
+                df['signal'] = (factor_df['close'] > factor_df['ma_20']).astype(int)
+            df = df[['code', 'date', 'signal']]
+
+        else:
+            raise ValueError(f"未知策略类型: {strategy_type}")
+
+        logger.info(f"规则型策略信号生成完成: {strategy_type}")
+        return df
+
+
+# ── Skill 统一入口 ────────────────────────
+def run(ctx) -> Dict[str, Any]:
+    """
+    strategy-model-engine 的 run 函数
+
+    参数:
+        ctx: Context 对象，需包含:
+            - artifacts['DATA']: 清洗后数据路径
+            - artifacts['FACTOR']: 因子数据路径
+            - strategy_name: 策略类型 (可选)
+            - strategy_params: 策略参数 (可选)
+
+    返回:
+        {
+            "success": bool,
+            "artifact_path": str,     # 模型文件路径 或 信号文件路径
+            "predictions_path": str,  # 预测信号文件路径
+            "metadata": {
+                "model_type": str,
+                "metrics": dict,
+                "feature_importance": dict,
+                ...
+            },
+            "error": str
+        }
+    """
+    try:
+        # 检查依赖产物
+        factor_path = ctx.get_artifact("FACTOR")
+        if not factor_path or not os.path.exists(factor_path):
+            return {
+                "success": False,
+                "artifact_path": "",
+                "metadata": {},
+                "error": "因子产物不存在，请先运行 a-share-factor-engine"
+            }
+
+        # 检查模型产物是否已存在
+        existing = ctx.get_artifact("MODEL")
+        if existing and os.path.exists(existing):
+            return {
+                "success": True,
+                "artifact_path": existing,
+                "metadata": {"source": "cache"},
+                "error": ""
+            }
+
+        engine = ModelEngine()
+
+        # 加载因子数据
+        factor_df = pd.read_parquet(factor_path)
+
+        # 也加载行情数据（用于计算标签）
+        data_path = ctx.get_artifact("DATA")
+        if not data_path or not os.path.exists(data_path):
+            return {"success": False, "artifact_path": "", "metadata": {}, "error": "行情数据不存在"}
+
+        price_df = pd.read_parquet(data_path)
+
+        # 确定策略类型
+        strategy_name = getattr(ctx, 'strategy_name', None) or ctx.strategy_params.get('strategy_type', 'ml')
+
+        if strategy_name in ['ml', 'model', 'lightgbm', 'catboost']:
+            # ML模型训练
+            feature_cols = [c for c in factor_df.columns
+                          if c not in ['code', 'date', 'industry', 'alpha_score']]
+            if 'alpha_score' in factor_df.columns:
+                feature_cols.append('alpha_score')
+
+            X, y, dates = engine.prepare_data(factor_df, price_df, feature_cols)
+
+            # 超参数优化（可选）
+            best_params = engine.optimize_hyperparams(X, y, dates)
+
+            # 训练最终模型
+            model, metrics, predictions = engine.train(X, y, best_params)
+
+            # 保存预测信号
+            if predictions is not None:
+                signal_df = factor_df[['code', 'date']].copy()
+                signal_df['pred'] = predictions
+                signal_path = os.path.join(MODEL_DIR, "predictions.parquet")
+                signal_df.to_parquet(signal_path, index=False)
+            else:
+                signal_path = ""
+
+            model_path = os.path.join(MODEL_DIR, f"model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pkl")
+            joblib.dump(model, model_path)
+
+            return {
+                "success": True,
+                "artifact_path": model_path,
+                "predictions_path": signal_path,
+                "metadata": {
+                    "model_type": MODEL_TYPE,
+                    "metrics": metrics,
+                    "feature_cols": feature_cols,
+                },
+                "error": ""
+            }
+
+        else:
+            # 规则型策略
+            signal_df = engine.generate_rule_based_signal(factor_df, strategy_type=strategy_name)
+
+            # 保存信号
+            signal_path = os.path.join(MODEL_DIR, f"signal_{strategy_name}.parquet")
+            signal_df.to_parquet(signal_path, index=False)
+
+            return {
+                "success": True,
+                "artifact_path": signal_path,
+                "predictions_path": signal_path,
+                "metadata": {
+                    "strategy_type": strategy_name,
+                    "signal_count": len(signal_df),
+                },
+                "error": ""
+            }
+
+    except Exception as e:
+        logger.exception("模型引擎执行失败")
+        return {
+            "success": False,
+            "artifact_path": "",
+            "metadata": {},
+            "error": str(e)
+        }
+
+
+if __name__ == "__main__":
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from quant_trading_master.scripts.context import Context
+
+    if len(sys.argv) > 1:
+        with open(sys.argv[1], 'r', encoding='utf-8') as f:
+            ctx = Context.from_dict(json.load(f))
+    else:
+        ctx = Context(
+            task_id="test_model",
+            stock_pool=[],
+            start_date="2024-01-01",
+            end_date="2024-12-31"
+        )
+        ctx.update_artifact("DATA", "./quant_workspace/data/cleaned_data.parquet")
+        ctx.update_artifact("FACTOR", "./quant_workspace/factors/factor_data.parquet")
+
+    result = run(ctx)
+    print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
