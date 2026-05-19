@@ -46,13 +46,13 @@ STAGE_ORDER = {
 
 # 子 Skill 模块名映射
 SKILL_MODULES = {
-    "DATA": "a_share_data_engine",
-    "FACTOR": "a_share_factor_engine",
-    "MODEL": "strategy_model_engine",
-    "BACKTEST": "backtest_engine",
-    "PORTFOLIO": "portfolio_risk_engine",
-    "EXECUTION": "execution_monitor_engine",
-    "REPORT": "reports_engine",
+    "DATA": "a_share_data_engine.scripts",
+    "FACTOR": "a_share_factor_engine.scripts",
+    "MODEL": "strategy_model_engine.scripts",
+    "BACKTEST": "backtest_engine.scripts",
+    "PORTFOLIO": "portfolio_risk_engine.scripts",
+    "EXECUTION": "execution_monitor_engine.scripts",
+    "REPORT": "reports_engine.scripts",
 }
 
 # 每个阶段的产物文件（用于校验是否存在）
