@@ -19,7 +19,9 @@ def _load_adapter() -> BaseDataProvider:
     elif DATA_BACKEND == "baostock":
         from .adapters.baostock_adapter import BaostockAdapter
         return BaostockAdapter()
-    # 其他后端可扩展
+    elif DATA_BACKEND == "akshare":
+        from .adapters.akshare_adapter import AkshareAdapter
+        return AkshareAdapter()
     else:
         raise ValueError(f"不支持的数据源: {DATA_BACKEND}")
 
