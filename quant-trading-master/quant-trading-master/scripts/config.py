@@ -21,7 +21,7 @@ DATA_BACKEND = os.environ.get("DATA_BACKEND", "tushare")
 # 可选: rqalpha / backtrader / gm
 BACKTEST_BACKEND = os.environ.get("BACKTEST_BACKEND", "rqalpha")
 
-# 可选: xtquant / gm / vnpy
+# 可选: xtquant / gm
 TRADE_BACKEND = os.environ.get("TRADE_BACKEND", "xtquant")
 
 # ── 因子计算后端 ──────────────────────────

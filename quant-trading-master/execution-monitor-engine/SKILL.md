@@ -2,7 +2,7 @@
 name: execution-monitor-engine
 description: >
   A股实盘执行与监控引擎。支持模拟交易(paper)与实盘交易(live)两种模式，
-  可对接 xtquant(miniQMT)、掘金(gm)、VeighNa(vnpy) 等券商接口。
+  可对接 xtquant(miniQMT)、掘金(gm) 等券商接口。
   内置硬风控断路器（单日亏损限制、单笔金额上限、持仓集中度、订单频率限制），
   支持账户查询、订单发送与撤单、仓位同步，所有交易操作完整记录到审计日志。
 trigger_keywords:
@@ -24,12 +24,10 @@ dependencies:
   - sqlalchemy
   - xtquant (可选)
   - gm (可选)
-  - vnpy (可选)
 backends:
   - paper
   - xtquant
   - gm
-  - vnpy
 ---
 
 # execution-monitor-engine

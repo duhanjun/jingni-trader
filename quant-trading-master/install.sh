@@ -57,8 +57,7 @@ install_dependencies() {
     # 组合优化依赖
     pip3 install PyPortfolioOpt riskfolio-lib -q
     
-    # 实盘执行依赖
-    pip3 install vnpy -q
+    # 实盘执行依赖（xtquant 需手动安装，仅限券商渠道）
     
     # 报告可视化依赖
     pip3 install quantstats plotly matplotlib seaborn -q
@@ -120,7 +119,7 @@ backtest:
 
 # 执行配置
 execution:
-  default: "xtquant"  # xtquant, gm, vnpy
+  default: "xtquant"  # xtquant, gm
   mode: "simulate"    # simulate, paper, live
 
 # 因子配置
