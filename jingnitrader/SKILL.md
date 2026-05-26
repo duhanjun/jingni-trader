@@ -1,5 +1,5 @@
 ---
-name: JingniTrader
+name: jingnitrader
 description: >
   A股量化交易全流程主调度器。负责解析用户意图，管理投研阶段状态机，
   维护跨 Skill 的上下文对象，按流程依次调度七个子 Skill 完成从数据
@@ -25,7 +25,7 @@ version: 1.0.0
 author: quant-team
 ---
 
-# JingniTrader
+# jingnitrader
 
 ## 职责
 

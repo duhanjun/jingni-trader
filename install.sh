@@ -79,7 +79,7 @@ install_skills() {
     echo "正在安装 Skills..."
     
     # 复制所有Skill
-    for skill_dir in JingniTrader a-share-data-engine a-share-factor-engine \
+    for skill_dir in jingnitrader a-share-data-engine a-share-factor-engine \
                      strategy-model-engine backtest-engine portfolio-risk-engine \
                      execution-monitor-engine reports-engine; do
         if [ -d "${skill_dir}" ]; then
@@ -155,7 +155,7 @@ main() {
     echo "下一步："
     echo "  1. 复制配置文件: cp ~/.quant-trading/config.yaml.example ~/.quant-trading/config.yaml"
     echo "  2. 编辑配置文件，填入你的API Token"
-    echo "  3. 运行示例: python3 -m JingniTrader.scripts.engine"
+    echo "  3. 运行示例: python3 -m jingnitrader.scripts.engine"
     echo ""
 }
 

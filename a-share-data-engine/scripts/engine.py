@@ -243,7 +243,7 @@ if __name__ == "__main__":
     import sys
     import json
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from JingniTrader.scripts.context import Context
+    from jingnitrader.scripts.context import Context
 
     # 简单模拟 context 输入
     if len(sys.argv) > 1:
