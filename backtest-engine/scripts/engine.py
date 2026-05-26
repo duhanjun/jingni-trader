@@ -238,7 +238,7 @@ def run(ctx) -> Dict[str, Any]:
 if __name__ == "__main__":
     import sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from quant_trading_master.scripts.context import Context
+    from JingniTrader.scripts.context import Context
 
     if len(sys.argv) > 1:
         with open(sys.argv[1], 'r', encoding='utf-8') as f:
