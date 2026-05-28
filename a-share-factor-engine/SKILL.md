@@ -1,10 +1,44 @@
 ---
 name: a-share-factor-engine
-description: >
-  A股阿尔法因子研究与构建引擎。支持定义和计算A股专属的Alpha因子（动量反转、
-  市值、换手率，资金流、事件驱动等），提供因子IC分析（含行业中性化处理）、
-  分层回测、相关性去冗余、多因子融合等功能。底层技术指标计算支持TA-Lib和
-  pandas-ta双后端切换。
+version: 1.0.0
+description: A股阿尔法因子研究与构建引擎。支持定义和计算A股专属的Alpha因子（动量反转、市值、换手率、资金流、事件驱动等），提供因子IC分析（含行业中性化处理）、分层回测、相关性去冗余、多因子融合等功能。底层技术指标计算支持TA-Lib和pandas-ta双后端切换。
+author: quant-team
+license: MIT
+tags:
+  - quant-trading
+  - A股
+  - factor-engine
+  - alpha-factor
+  - talib
+  - pandas-ta
+dependencies:
+  - pandas>=2.0.0
+  - numpy>=1.24.0
+  - scipy>=1.10.0
+  - scikit-learn>=1.3.0
+  - statsmodels>=0.14.0
+  - alphalens>=0.4.0
+  - ta-lib (可选)
+  - pandas-ta (可选)
+environment_variables:
+  - name: FACTOR_BACKEND
+    description: 因子计算后端
+    required: false
+    default: "talib"
+  - name: FACTOR_DIR
+    description: 因子数据存储目录
+    required: false
+    default: "./quant_workspace/factors"
+  - name: IC_TYPE
+    description: IC计算方式
+    required: false
+    default: "spearman"
+language: python
+python_version: "3.9+"
+entry_point: engine.py
+backends:
+  - talib
+  - pandas_ta
 trigger_keywords:
   - 因子
   - 因子研究
@@ -14,33 +48,19 @@ trigger_keywords:
   - 因子中性化
   - 因子相关性
   - 多因子
-version: 1.0.0
-author: quant-team
-dependencies:
-  - pandas
-  - numpy
-  - scipy
-  - scikit-learn
-  - statsmodels
-  - alphalens
-  - ta-lib (可选)
-  - pandas-ta (可选)
-backends:
-  - talib
-  - pandas_ta
 ---
 
 # a-share-factor-engine
 
-## 职责
+## 概述
 
-- 根据Context中的数据和参数计算Alpha因子
-- A股专用因子：1个月反转、市值因子、换手率因子，资金流因子、事件因子
-- 行业中性化处理：对因子进行市值+行业中性回归
-- 单因子IC分析（Spearman Rank IC / Pearson IC）
-- 因子分层回测（按因子值分组，计算各组超额收益）
-- 因子相关性分析与冗余剔除
-- 多因子等权/IC加权融合
+a-share-factor-engine 是 A 股量化投研的**因子研究与构建引擎**，提供：
+
+1. **A股专用Alpha因子**：动量反转、市值、换手率、资金流、波动率等
+2. **行业中性化处理**：市值+行业中性回归
+3. **因子IC分析**：Spearman Rank IC / Pearson IC
+4. **因子相关性分析**：去冗余处理
+5. **多因子融合**：等权/IC加权融合
 
 ## 因子定义体系
 
@@ -54,7 +74,7 @@ backends:
 - `size`: 市值分组
 
 ### 交易因子
-- `turnover_20d`: 20日平均换手率（低换手溢价）
+- `turnover_20d`: 20日平均换手率
 - `volume_ratio`: 量比
 
 ### 资金流因子
@@ -63,8 +83,37 @@ backends:
 ### 质量因子
 - `roe`: ROE
 - `gross_margin`: 毛利率
-- `net_profit_growth`: 净利润增速
 
-## 使用方式
+## 使用示例
 
-由 `quant-trading-master` 调度，调用 `run(ctx)` 函数。
+### Python API
+
+```python
+from engine import run
+from context import Context
+
+ctx = Context(
+    task_id="task_001",
+    user_intent="计算因子",
+    current_stage="IDLE"
+)
+ctx.stock_pool = ["000001.SZ"]
+ctx.start_date = "2021-01-01"
+ctx.end_date = "2024-01-01"
+
+result = run(ctx)
+```
+
+### CLI 运行
+
+```bash
+python engine.py -i "计算反转因子"
+```
+
+## 配置说明
+
+详见 [references/config_guide.md](references/config_guide.md)
+
+## API 文档
+
+详见 [references/api_reference.md](references/api_reference.md)
