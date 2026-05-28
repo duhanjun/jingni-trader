@@ -1,1 +1,1 @@
-"""JingniTrader 主调度器包"""
+"""jingnitrader 主调度器包"""
