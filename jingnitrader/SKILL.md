@@ -34,16 +34,16 @@ language: python
 python_version: "3.9+"
 entry_point: engine.py
 allowed_sub_skills:
-  - a-share-data-engine
-  - a-share-factor-engine
+  - data-engine
+  - factor-engine
   - strategy-model-engine
   - backtest-engine
   - portfolio-risk-engine
   - execution-monitor-engine
   - reports-engine
-included_skills:        # 这些子技能已包含在包内，无需单独安装
-  - skills/a-share-data-engine
-  - skills/a-share-factor-engine
+included_skills:
+  - skills/data-engine
+  - skills/factor-engine
   - skills/strategy-model-engine
   - skills/backtest-engine
   - skills/portfolio-risk-engine

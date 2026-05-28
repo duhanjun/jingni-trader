@@ -1,7 +1,7 @@
 ---
-name: a-share-factor-engine
+name: factor-engine
 version: 1.0.0
-description: A股阿尔法因子研究与构建引擎。支持定义和计算A股专属的Alpha因子（动量反转、市值、换手率、资金流、事件驱动等），提供因子IC分析（含行业中性化处理）、分层回测、相关性去冗余、多因子融合等功能。底层技术指标计算支持TA-Lib和pandas-ta双后端切换。
+description: A股阿尔法因子研究与构建引擎。支持定义和计算A股专属的Alpha因子（动量反转、市值、换手率，资金流、事件驱动等），提供因子IC分析（含行业中性化处理）、分层回测、相关性去冗余、多因子融合等功能。底层技术指标计算支持TA-Lib和pandas-ta双后端切换。
 author: quant-team
 license: MIT
 tags:
@@ -47,11 +47,11 @@ trigger_keywords:
   - 多因子
 ---
 
-# a-share-factor-engine
+# factor-engine
 
 ## 概述
 
-a-share-factor-engine 是 A 股量化投研的**因子研究与构建引擎**，提供：
+factor-engine 是 A 股量化投研的**因子研究与构建引擎**，提供：
 
 1. **A股专用Alpha因子**：动量反转、市值、换手率、资金流、波动率等
 2. **行业中性化处理**：市值+行业中性回归

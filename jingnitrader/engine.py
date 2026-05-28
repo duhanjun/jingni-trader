@@ -44,8 +44,8 @@ STAGE_ORDER = {
 }
 
 SKILL_MODULES = {
-    "DATA": "skills.a-share-data-engine.engine",
-    "FACTOR": "skills.a-share-factor-engine.engine",
+    "DATA": "skills.data-engine.engine",
+    "FACTOR": "skills.factor-engine.engine",
     "MODEL": "skills.strategy-model-engine.engine",
     "BACKTEST": "skills.backtest-engine.engine",
     "PORTFOLIO": "skills.portfolio-risk-engine.engine",

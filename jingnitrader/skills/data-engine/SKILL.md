@@ -1,5 +1,5 @@
 ---
-name: a-share-data-engine
+name: data-engine
 version: 1.0.0
 description: A股数据采集与治理引擎。支持从 Tushare Pro、BaoStock、AkShare、xtquant、掘金(gm) 等多数据源获取日线/分钟线行情、财务、另类数据，完成复权、涨跌停标记、ST过滤、新股剔除、停牌处理等本土化清洗，并持久化到本地数据库或 Parquet 文件。
 author: quant-team
@@ -42,11 +42,11 @@ trigger_keywords:
   - 复权
 ---
 
-# a-share-data-engine
+# data-engine
 
 ## 概述
 
-a-share-data-engine 是 A 股量化投研的**数据源统一引擎**，提供：
+data-engine 是 A 股量化投研的**数据源统一引擎**，提供：
 
 1. **多数据源支持**：Tushare、BaoStock、AkShare、xtquant、掘金量化
 2. **统一接口**：BaseDataProvider 抽象基类，get_daily() 统一返回标准化 DataFrame
