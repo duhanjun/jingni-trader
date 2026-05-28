@@ -3,8 +3,19 @@ A股数据引擎主逻辑
 负责调度适配器、数据清洗、本地存储
 """
 import os
+import sys
 import logging
 from typing import List, Optional, Dict, Any
+
+# 清除模块缓存，避免与主技能 scripts 模块冲突
+for key in list(sys.modules.keys()):
+    if key.startswith('scripts.') or key == 'scripts':
+        del sys.modules[key]
+
+# 设置子技能目录为 sys.path 第一优先级
+_this_file = os.path.abspath(__file__)
+sys.path.insert(0, os.path.dirname(_this_file))
+
 import pandas as pd
 import numpy as np
 

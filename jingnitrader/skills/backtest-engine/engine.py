@@ -37,13 +37,13 @@ class BacktestEngine:
 
     def _load_adapter(self):
         if BACKTEST_BACKEND == "rqalpha":
-            from scripts.adapters.rqalpha_adapter import RQAlphaAdapter
+            from adapters.rqalpha_adapter import RQAlphaAdapter
             return RQAlphaAdapter()
         elif BACKTEST_BACKEND == "backtrader":
-            from scripts.adapters.backtrader_adapter import BacktraderAdapter
+            from adapters.backtrader_adapter import BacktraderAdapter
             return BacktraderAdapter()
         elif BACKTEST_BACKEND == "gm":
-            from scripts.adapters.gm_adapter import GmAdapter
+            from adapters.gm_adapter import GmAdapter
             return GmAdapter()
         else:
             raise ValueError(f"不支持的回测引擎: {BACKTEST_BACKEND}")

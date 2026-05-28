@@ -33,10 +33,10 @@ class FactorEngine:
     def _load_calculator(self):
         """根据配置加载因子计算器"""
         if FACTOR_BACKEND == "talib":
-            from scripts.adapters.talib_calculator import TalibCalculator
+            from adapters.talib_calculator import TalibCalculator
             return TalibCalculator()
         elif FACTOR_BACKEND == "pandas_ta":
-            from scripts.adapters.pandas_ta_calculator import PandasTaCalculator
+            from adapters.pandas_ta_calculator import PandasTaCalculator
             return PandasTaCalculator()
         else:
             raise ValueError(f"不支持的因子后端: {FACTOR_BACKEND}")

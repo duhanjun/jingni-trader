@@ -44,13 +44,13 @@ STAGE_ORDER = {
 }
 
 SKILL_MODULES = {
-    "DATA": "skills.a_share_data_engine.engine",
-    "FACTOR": "skills.a_share_factor_engine.engine",
-    "MODEL": "skills.strategy_model_engine.engine",
-    "BACKTEST": "skills.backtest_engine.engine",
-    "PORTFOLIO": "skills.portfolio_risk_engine.engine",
-    "EXECUTION": "skills.execution_monitor_engine.engine",
-    "REPORT": "skills.reports_engine.engine",
+    "DATA": "skills.a-share-data-engine.engine",
+    "FACTOR": "skills.a-share-factor-engine.engine",
+    "MODEL": "skills.strategy-model-engine.engine",
+    "BACKTEST": "skills.backtest-engine.engine",
+    "PORTFOLIO": "skills.portfolio-risk-engine.engine",
+    "EXECUTION": "skills.execution-monitor-engine.engine",
+    "REPORT": "skills.reports-engine.engine",
 }
 
 EXPECTED_ARTIFACTS = {
@@ -99,6 +99,9 @@ class MasterEngine:
 
         if not target_stages:
             target_stages = ["DATA", "FACTOR", "MODEL", "BACKTEST", "REPORT"]
+
+        if any(s in target_stages for s in ["FACTOR", "MODEL", "BACKTEST", "PORTFOLIO", "REPORT"]) and "DATA" not in target_stages:
+            target_stages.insert(0, "DATA")
 
         target_stages = sorted(target_stages, key=lambda s: STAGE_ORDER.get(s, 99))
         ctx.target_stages = target_stages
@@ -151,7 +154,7 @@ class MasterEngine:
             return False
 
         try:
-            skill_module = importlib.import_module(f"{module_name}.engine")
+            skill_module = importlib.import_module(module_name)
         except ImportError as e:
             error_msg = f"加载子 Skill {module_name} 失败: {e}"
             logger.error(error_msg)
