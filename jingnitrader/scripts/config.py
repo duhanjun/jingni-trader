@@ -5,7 +5,7 @@
 import os
 
 # ── 工作目录 ──────────────────────────────
-WORK_DIR = os.environ.get("QUANT_WORK_DIR", "./quant_workspace")
+WORK_DIR = os.environ.get("QUANT_WORK_DIR", "./jingnitrader_workspace")
 DATA_DIR = os.path.join(WORK_DIR, "data")
 FACTOR_DIR = os.path.join(WORK_DIR, "factors")
 MODEL_DIR = os.path.join(WORK_DIR, "models")
