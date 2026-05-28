@@ -41,6 +41,14 @@ allowed_sub_skills:
   - portfolio-risk-engine
   - execution-monitor-engine
   - reports-engine
+included_skills:        # 这些子技能已包含在包内，无需单独安装
+  - skills/a-share-data-engine
+  - skills/a-share-factor-engine
+  - skills/strategy-model-engine
+  - skills/backtest-engine
+  - skills/portfolio-risk-engine
+  - skills/execution-monitor-engine
+  - skills/reports-engine
 trigger_keywords:
   - 量化
   - 回测

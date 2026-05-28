@@ -44,13 +44,13 @@ STAGE_ORDER = {
 }
 
 SKILL_MODULES = {
-    "DATA": "a_share_data_engine.scripts",
-    "FACTOR": "a_share_factor_engine.scripts",
-    "MODEL": "strategy_model_engine.scripts",
-    "BACKTEST": "backtest_engine.scripts",
-    "PORTFOLIO": "portfolio_risk_engine.scripts",
-    "EXECUTION": "execution_monitor_engine.scripts",
-    "REPORT": "reports_engine.scripts",
+    "DATA": "skills.a_share_data_engine.engine",
+    "FACTOR": "skills.a_share_factor_engine.engine",
+    "MODEL": "skills.strategy_model_engine.engine",
+    "BACKTEST": "skills.backtest_engine.engine",
+    "PORTFOLIO": "skills.portfolio_risk_engine.engine",
+    "EXECUTION": "skills.execution_monitor_engine.engine",
+    "REPORT": "skills.reports_engine.engine",
 }
 
 EXPECTED_ARTIFACTS = {
