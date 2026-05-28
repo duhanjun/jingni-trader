@@ -36,9 +36,6 @@ environment_variables:
 language: python
 python_version: "3.9+"
 entry_point: engine.py
-backends:
-  - pypfopt
-  - riskfolio
 trigger_keywords:
   - 组合优化
   - 风控
