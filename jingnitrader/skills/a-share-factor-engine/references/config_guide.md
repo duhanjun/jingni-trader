@@ -7,7 +7,7 @@
 | 变量名 | 描述 | 必需 | 默认值 |
 |--------|------|------|--------|
 | FACTOR_BACKEND | 因子计算后端 | 否 | "talib" |
-| FACTOR_DIR | 因子数据存储目录 | 否 | "./quant_workspace/factors" |
+| FACTOR_DIR | 因子数据存储目录 | 否 | "./workspace/factors" |
 | IC_TYPE | IC计算方式 | 否 | "spearman" |
 
 ## 配置文件
@@ -18,7 +18,7 @@
 
 ```python
 FACTOR_BACKEND = os.getenv("FACTOR_BACKEND", "talib")
-FACTOR_DIR = os.path.expanduser(os.getenv("FACTOR_DIR", "./quant_workspace/factors"))
+FACTOR_DIR = os.path.expanduser(os.getenv("FACTOR_DIR", "./workspace/factors"))
 IC_TYPE = os.getenv("IC_TYPE", "spearman")
 ```
 

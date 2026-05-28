@@ -28,7 +28,7 @@ environment_variables:
   - name: PORTFOLIO_DIR
     description: 组合数据目录
     required: false
-    default: "./quant_workspace/portfolio"
+    default: "./workspace/portfolio"
   - name: RISK_FREE_RATE
     description: 无风险利率
     required: false

@@ -6,7 +6,7 @@
 
 | 变量名 | 描述 | 必需 | 默认值 |
 |--------|------|------|--------|
-| REPORT_DIR | 报告存储目录 | 否 | "./quant_workspace/reports" |
+| REPORT_DIR | 报告存储目录 | 否 | "./workspace/reports" |
 | REPORT_TITLE | 报告标题 | 否 | "A股量化策略绩效报告" |
 | BENCHMARK | 基准指数 | 否 | "000300.SH" |
 
@@ -17,7 +17,7 @@
 ### 报告配置
 
 ```python
-REPORT_DIR = os.path.expanduser(os.getenv("REPORT_DIR", "./quant_workspace/reports"))
+REPORT_DIR = os.path.expanduser(os.getenv("REPORT_DIR", "./workspace/reports"))
 REPORT_TITLE = os.getenv("REPORT_TITLE", "A股量化策略绩效报告")
 REPORT_FORMAT = os.getenv("REPORT_FORMAT", "html")
 INDUSTRY_STANDARD = "sw"  # sw=申万, zz=中信

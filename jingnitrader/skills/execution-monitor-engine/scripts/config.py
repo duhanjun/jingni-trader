@@ -3,7 +3,7 @@
 """
 import os
 
-EXECUTION_DIR = os.environ.get("EXECUTION_DIR", "./quant_workspace")
+EXECUTION_DIR = os.environ.get("EXECUTION_DIR", "./workspace")
 TRADE_MODE = os.environ.get("TRADE_MODE", "paper")
 TRADE_BACKEND = os.environ.get("TRADE_BACKEND", "paper")
 INIT_CAPITAL = float(os.environ.get("INIT_CAPITAL", 1000000))

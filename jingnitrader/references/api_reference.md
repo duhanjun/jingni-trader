@@ -210,7 +210,7 @@ ctx = Context.from_json(json_str)
 
 1. `result['errors']` - 错误列表
 2. `ctx.errors` - Context 中的错误记录
-3. 日志文件 - 位于 `quant_workspace/logs/` 目录
+3. 日志文件 - 位于 `workspace/logs/` 目录
 
 ## 示例代码
 

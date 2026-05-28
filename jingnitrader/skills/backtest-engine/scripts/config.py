@@ -8,7 +8,7 @@ BACKTEST_BACKEND = os.environ.get("BACKTEST_BACKEND", "rqalpha")
 # 可选: rqalpha, backtrader, gm
 
 # ── 回测结果存储目录 ──────────────────────
-BACKTEST_DIR = os.environ.get("BACKTEST_DIR", "./quant_workspace/backtest_results")
+BACKTEST_DIR = os.environ.get("BACKTEST_DIR", "./workspace/backtest_results")
 
 # ── A股交易费用 ───────────────────────────
 COMMISSION_RATE = float(os.environ.get("COMMISSION_RATE", 0.00025))  # 万2.5

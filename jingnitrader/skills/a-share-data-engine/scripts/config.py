@@ -19,7 +19,7 @@ MAX_WORKERS = int(os.environ.get("DATA_MAX_WORKERS", 4))
 ADJUST_MODE = os.environ.get("ADJUST_MODE", "hfq")  # hfq:后复权, qfq:前复权, None:不复权
 
 # ── 缓存目录 ──────────────────────────────
-CACHE_DIR = os.environ.get("DATA_CACHE_DIR", "./quant_workspace/data_cache")
+CACHE_DIR = os.environ.get("DATA_CACHE_DIR", "./workspace/data_cache")
 
 # ── 股票池默认文件 ─────────────────────────
 STOCK_LIST_FILE = os.environ.get("STOCK_LIST_FILE", "")

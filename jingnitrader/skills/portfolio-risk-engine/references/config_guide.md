@@ -7,7 +7,7 @@
 | 变量名 | 描述 | 必需 | 默认值 |
 |--------|------|------|--------|
 | OPTIMIZATION_METHOD | 优化方法 | 否 | "max_sharpe" |
-| PORTFOLIO_DIR | 组合数据目录 | 否 | "./quant_workspace/portfolio" |
+| PORTFOLIO_DIR | 组合数据目录 | 否 | "./workspace/portfolio" |
 | RISK_FREE_RATE | 无风险利率 | 否 | 0.03 |
 | COVARIANCE_METHOD | 协方差估计方法 | 否 | "ledoit_wolf" |
 
@@ -19,7 +19,7 @@
 
 ```python
 OPTIMIZATION_METHOD = os.getenv("OPTIMIZATION_METHOD", "max_sharpe")
-PORTFOLIO_DIR = os.path.expanduser(os.getenv("PORTFOLIO_DIR", "./quant_workspace/portfolio"))
+PORTFOLIO_DIR = os.path.expanduser(os.getenv("PORTFOLIO_DIR", "./workspace/portfolio"))
 RISK_FREE_RATE = float(os.getenv("RISK_FREE_RATE", "0.03"))
 ```
 

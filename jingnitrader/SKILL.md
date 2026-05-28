@@ -25,7 +25,7 @@ environment_variables:
   - name: DATA_DIR
     description: 数据和工作目录
     required: false
-    default: "./quant_workspace"
+    default: "./workspace"
   - name: LOG_LEVEL
     description: 日志级别
     required: false

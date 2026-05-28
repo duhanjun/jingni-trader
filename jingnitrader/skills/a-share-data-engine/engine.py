@@ -205,7 +205,7 @@ def run(ctx) -> Dict[str, Any]:
                 "error": "未获取到任何有效数据"
             }
 
-        output_dir = os.environ.get("QUANT_DATA_DIR", "./quant_workspace/data")
+        output_dir = os.environ.get("QUANT_DATA_DIR", "./workspace/data")
         os.makedirs(output_dir, exist_ok=True)
         path = os.path.join(output_dir, "cleaned_data.parquet")
         engine.save_data(df, path)

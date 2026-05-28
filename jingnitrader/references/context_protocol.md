@@ -72,7 +72,7 @@ IDLE → DATA → FACTOR → MODEL → BACKTEST → PORTFOLIO → EXECUTION → 
 产物文件应保存在对应的工作目录下：
 
 ```
-quant_workspace/
+workspace/
 ├── data/
 │   └── cleaned_data.parquet      # DATA 阶段产物
 ├── factors/
@@ -213,7 +213,7 @@ ctx.start_date = "2021-01-01"
 ctx.end_date = "2024-12-31"
 
 # 阶段执行后
-ctx.update_artifact("DATA", "quant_workspace/data/cleaned_data.parquet")
+ctx.update_artifact("DATA", "workspace/data/cleaned_data.parquet")
 ctx.metadata["DATA"] = {"record_count": 1000000}
 
 # 错误记录

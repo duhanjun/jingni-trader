@@ -71,7 +71,7 @@ class TestRunFunction:
             user_intent="测试",
             current_stage="IDLE"
         )
-        ctx.update_artifact("PORTFOLIO", "./quant_workspace/portfolio/portfolio_weights.json")
+        ctx.update_artifact("PORTFOLIO", "./workspace/portfolio/portfolio_weights.json")
 
         result = run(ctx)
         assert "success" in result

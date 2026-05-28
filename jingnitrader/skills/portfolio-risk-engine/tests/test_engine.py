@@ -48,7 +48,7 @@ class TestRunFunction:
             user_intent="测试",
             current_stage="IDLE"
         )
-        ctx.update_artifact("DATA", "./quant_workspace/data/cleaned_data.parquet")
+        ctx.update_artifact("DATA", "./workspace/data/cleaned_data.parquet")
 
         result = run(ctx)
         assert "success" in result

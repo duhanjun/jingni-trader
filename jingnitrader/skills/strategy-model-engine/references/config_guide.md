@@ -7,7 +7,7 @@
 | 变量名 | 描述 | 必需 | 默认值 |
 |--------|------|------|--------|
 | MODEL_TYPE | 模型类型 | 否 | "lightgbm" |
-| MODEL_DIR | 模型存储目录 | 否 | "./quant_workspace/models" |
+| MODEL_DIR | 模型存储目录 | 否 | "./workspace/models" |
 | LABEL_TYPE | 标签类型 | 否 | "regression" |
 
 ## 配置文件
@@ -18,7 +18,7 @@
 
 ```python
 MODEL_TYPE = os.getenv("MODEL_TYPE", "lightgbm")
-MODEL_DIR = os.path.expanduser(os.getenv("MODEL_DIR", "./quant_workspace/models"))
+MODEL_DIR = os.path.expanduser(os.getenv("MODEL_DIR", "./workspace/models"))
 LABEL_TYPE = os.getenv("LABEL_TYPE", "regression")
 ```
 

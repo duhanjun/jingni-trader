@@ -23,7 +23,7 @@ environment_variables:
   - name: REPORT_DIR
     description: 报告存储目录
     required: false
-    default: "./quant_workspace/reports"
+    default: "./workspace/reports"
   - name: REPORT_TITLE
     description: 报告标题
     required: false

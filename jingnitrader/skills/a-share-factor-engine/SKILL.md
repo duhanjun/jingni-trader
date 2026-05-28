@@ -28,7 +28,7 @@ environment_variables:
   - name: FACTOR_DIR
     description: 因子数据存储目录
     required: false
-    default: "./quant_workspace/factors"
+    default: "./workspace/factors"
   - name: IC_TYPE
     description: IC计算方式
     required: false
@@ -36,9 +36,6 @@ environment_variables:
 language: python
 python_version: "3.9+"
 entry_point: engine.py
-backends:
-  - talib
-  - pandas_ta
 trigger_keywords:
   - 因子
   - 因子研究

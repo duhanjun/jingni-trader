@@ -32,12 +32,6 @@ environment_variables:
 language: python
 python_version: "3.9+"
 entry_point: engine.py
-backends:
-  - tushare
-  - baostock
-  - akshare
-  - xtquant
-  - gm
 trigger_keywords:
   - 数据获取
   - 行情

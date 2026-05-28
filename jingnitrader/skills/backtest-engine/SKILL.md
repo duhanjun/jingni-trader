@@ -28,7 +28,7 @@ environment_variables:
   - name: BACKTEST_DIR
     description: 回测结果存储目录
     required: false
-    default: "./quant_workspace/backtest_results"
+    default: "./workspace/backtest_results"
   - name: BENCHMARK
     description: 基准指数
     required: false
@@ -36,10 +36,6 @@ environment_variables:
 language: python
 python_version: "3.9+"
 entry_point: engine.py
-backends:
-  - rqalpha
-  - backtrader
-  - gm
 trigger_keywords:
   - 回测
   - 回测引擎

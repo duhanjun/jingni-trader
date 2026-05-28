@@ -7,7 +7,7 @@
 | 变量名 | 描述 | 必需 | 默认值 |
 |--------|------|------|--------|
 | BACKTEST_BACKEND | 回测引擎后端 | 否 | "rqalpha" |
-| BACKTEST_DIR | 回测结果存储目录 | 否 | "./quant_workspace/backtest_results" |
+| BACKTEST_DIR | 回测结果存储目录 | 否 | "./workspace/backtest_results" |
 | BENCHMARK | 基准指数 | 否 | "000300.SH" |
 | INIT_CAPITAL | 初始资金 | 否 | 1000000 |
 | RISK_FREE_RATE | 无风险利率 | 否 | 0.03 |
@@ -30,7 +30,7 @@ SLIPPAGE = 0.0001              # 滑点 万1
 
 ```python
 BACKTEST_BACKEND = os.getenv("BACKTEST_BACKEND", "rqalpha")
-BACKTEST_DIR = os.path.expanduser(os.getenv("BACKTEST_DIR", "./quant_workspace/backtest_results"))
+BACKTEST_DIR = os.path.expanduser(os.getenv("BACKTEST_DIR", "./workspace/backtest_results"))
 INIT_CAPITAL = float(os.getenv("INIT_CAPITAL", "1000000"))
 BENCHMARK = os.getenv("BENCHMARK", "000300.SH")
 RISK_FREE_RATE = float(os.getenv("RISK_FREE_RATE", "0.03"))

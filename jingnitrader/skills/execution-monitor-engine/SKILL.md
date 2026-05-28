@@ -29,14 +29,10 @@ environment_variables:
   - name: EXECUTION_DIR
     description: 执行日志目录
     required: false
-    default: "./quant_workspace/execution"
+    default: "./workspace/execution"
 language: python
 python_version: "3.9+"
 entry_point: engine.py
-backends:
-  - paper
-  - xtquant
-  - gm
 trigger_keywords:
   - 实盘
   - 下单

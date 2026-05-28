@@ -25,14 +25,7 @@ Thumbs.db
 *.swo
 *~
 .quant-trading/
-jingnitrader_workspace/
-jingnitrader/jingnitrader_workspace/
-quant_workspace/
-quant_workspace/data/*.parquet
-quant_workspace/data/*.csv
-quant_workspace/factors/*.parquet
-quant_workspace/models/*.pkl
-quant_workspace/backtest/*.json
-quant_workspace/portfolio/*.json
+workspace/
+jingnitrader/workspace/
 *.db
 *.sqlite

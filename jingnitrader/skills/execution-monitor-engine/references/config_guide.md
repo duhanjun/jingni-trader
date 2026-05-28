@@ -8,7 +8,7 @@
 |--------|------|------|--------|
 | TRADE_MODE | 交易模式 | 否 | "paper" |
 | TRADE_BACKEND | 交易接口后端 | 否 | "xtquant" |
-| EXECUTION_DIR | 执行日志目录 | 否 | "./quant_workspace/execution" |
+| EXECUTION_DIR | 执行日志目录 | 否 | "./workspace/execution" |
 | INIT_CAPITAL | 初始资金 | 否 | 1000000 |
 
 ## 配置文件
@@ -36,7 +36,7 @@ SLIPPAGE = 0.0001                   # 滑点 万1
 ### 路径配置
 
 ```python
-EXECUTION_DIR = os.path.expanduser(os.getenv("EXECUTION_DIR", "./quant_workspace/execution"))
+EXECUTION_DIR = os.path.expanduser(os.getenv("EXECUTION_DIR", "./workspace/execution"))
 AUDIT_LOG_PATH = os.path.join(EXECUTION_DIR, "audit.log")
 ACCOUNT_STATE_PATH = os.path.join(EXECUTION_DIR, "account_state.json")
 ```

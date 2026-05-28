@@ -567,7 +567,7 @@ if __name__ == "__main__":
             start_date="2024-01-01",
             end_date="2024-12-31"
         )
-        ctx.update_artifact("DATA", "./quant_workspace/data/cleaned_data.parquet")
+        ctx.update_artifact("DATA", "./workspace/data/cleaned_data.parquet")
 
     result = run(ctx)
     print(json.dumps(result, indent=2, ensure_ascii=False, default=str))

@@ -3,7 +3,7 @@
 """
 import os
 
-PORTFOLIO_DIR = os.environ.get("PORTFOLIO_DIR", "./quant_workspace/portfolio")
+PORTFOLIO_DIR = os.environ.get("PORTFOLIO_DIR", "./workspace/portfolio")
 OPTIMIZATION_METHOD = os.environ.get("OPTIMIZATION_METHOD", "max_sharpe")
 RISK_FREE_RATE = float(os.environ.get("RISK_FREE_RATE", 0.03))
 ESTIMATION_PERIOD = int(os.environ.get("ESTIMATION_PERIOD", 252))

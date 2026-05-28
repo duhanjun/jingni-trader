@@ -27,7 +27,7 @@ environment_variables:
   - name: MODEL_DIR
     description: 模型存储目录
     required: false
-    default: "./quant_workspace/models"
+    default: "./workspace/models"
   - name: LABEL_TYPE
     description: 标签类型
     required: false
