@@ -1,5 +1,5 @@
 ---
-name: jingnitrader
+name: jingni-trader
 version: 1.0.0
 description: A股量化交易全流程主调度器。负责解析用户意图，管理投研阶段状态机，维护跨 Skill 的上下文对象，按流程依次调度七个子 Skill 完成从数据采集到绩效报告的全链路工作。本身不执行任何量化计算，只做编排。
 author: quant-team
@@ -60,11 +60,11 @@ trigger_keywords:
   - 策略开发
 ---
 
-# jingnitrader
+# jingni-trader
 
 ## 概述
 
-jingnitrader 是量化交易 Skill 套件的**主协调中枢**，负责：
+jingni-trader 是量化交易 Skill 套件的**主协调中枢**，负责：
 
 1. 解析用户自然语言意图，判断当前投研阶段
 2. 管理任务状态机，按流程调度子 Skill
@@ -136,8 +136,8 @@ python engine.py -i "生成上个月实盘绩效报告"
 
 | 阶段 | 对应子 Skill |
 |------|-------------|
-| DATA | a-share-data-engine |
-| FACTOR | a-share-factor-engine |
+| DATA | data-engine |
+| FACTOR | factor-engine |
 | MODEL | strategy-model-engine |
 | BACKTEST | backtest-engine |
 | PORTFOLIO | portfolio-risk-engine |
