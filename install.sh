@@ -4,7 +4,7 @@
 
 set -e
 
-PROJECT_NAME="JingniTrader"
+PROJECT_NAME="jingni-trader"
 INSTALL_DIR="${HOME}/.openclaw/skills"
 
 echo "=========================================="
@@ -73,19 +73,19 @@ install_project() {
     echo "✓ 项目安装完成"
 }
 
-# 复制Skill到OpenClaw目录
+# 复制主Skill到OpenClaw目录
 install_skills() {
     echo ""
     echo "正在安装 Skills..."
     
-    # 复制所有Skill
-    for skill_dir in jingnitrader a-share-data-engine a-share-factor-engine \
-                     strategy-model-engine backtest-engine portfolio-risk-engine \
-                     execution-monitor-engine reports-engine; do
-        if [ -d "${skill_dir}" ]; then
-            cp -r "${skill_dir}" "${INSTALL_DIR}/"
-            echo "  ✓ ${skill_dir}"
-        fi
+    SKILL_DEST="${INSTALL_DIR}/jingni-trader"
+    mkdir -p "${SKILL_DEST}"
+    cp -r SKILL.md engine.py scripts references skills "${SKILL_DEST}/"
+    echo "  ✓ jingni-trader (主技能)"
+    echo "  ✓ 包含 7 个子技能:"
+    for sub in data-engine factor-engine strategy-model-engine backtest-engine \
+               portfolio-risk-engine execution-monitor-engine reports-engine; do
+        echo "    - ${sub}"
     done
     
     echo "✓ Skills 安装完成"
@@ -155,7 +155,7 @@ main() {
     echo "下一步："
     echo "  1. 复制配置文件: cp ~/.quant-trading/config.yaml.example ~/.quant-trading/config.yaml"
     echo "  2. 编辑配置文件，填入你的API Token"
-    echo "  3. 运行示例: python3 -m jingnitrader.scripts.engine"
+    echo "  3. 运行示例: python3 engine.py --input \"帮我用近3年A股数据做一个20日反转因子选股回测\""
     echo ""
 }
 
