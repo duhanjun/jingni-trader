@@ -8,6 +8,9 @@ import json
 import logging
 from typing import Dict, Any, List, Optional, Tuple
 
+for key in list(sys.modules.keys()):
+    if key.startswith('scripts.') or key == 'scripts':
+        del sys.modules[key]
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np

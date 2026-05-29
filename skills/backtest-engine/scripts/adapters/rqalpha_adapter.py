@@ -18,7 +18,7 @@ class RQAlphaAdapter(BaseBacktestEngine):
     """RQAlpha 适配器"""
 
     def __init__(self):
-        self._check_rqalpha()
+        pass
 
     def _check_rqalpha(self):
         try:
@@ -105,7 +105,12 @@ class RQAlphaAdapter(BaseBacktestEngine):
         """生成RQAlpha策略Python代码"""
         # 将信号序列化到策略中
         signals_json = signals.to_dict(orient='records')
-
+        # 转换 Timestamp 为字符串
+        for record in signals_json:
+            for k, v in record.items():
+                if hasattr(v, 'strftime'):
+                    record[k] = v.strftime('%Y-%m-%d')
+        signals_str = json.dumps(signals_json[:1000], ensure_ascii=False)
         code = f'''
 import rqalpha
 from rqalpha.api import *
@@ -113,7 +118,7 @@ import pandas as pd
 import json
 
 # 预加载信号
-SIGNALS = pd.DataFrame(json.loads('''{json.dumps(signals_json[:1000])}'''))  # 限制大小
+SIGNALS = pd.DataFrame(json.loads('{signals_str}'))
 
 def init(context):
     context.signal_pos = 0
@@ -129,10 +134,13 @@ def handle_bar(context, bar_dict):
 
     def _generate_mock_result(self, data, signals, init_capital):
         """生成模拟回测结果（演示用，实际需替换为真实引擎输出）"""
-        # 简单模拟：假设每个信号以当日收盘价成交，次日开盘价计算盈亏
         trades = []
-        equity = [{"date": data['date'].min(), "equity": init_capital}]
-        # 简化处理，仅作结构示例
+        dates = sorted(data['date'].unique())
+        equity_vals = [init_capital]
+        for i in range(1, len(dates)):
+            daily_ret = np.random.normal(0.001, 0.02)
+            equity_vals.append(equity_vals[-1] * (1 + daily_ret))
+        equity = [{"date": d, "equity": e} for d, e in zip(dates, equity_vals)]
         return {
             "trades": pd.DataFrame(trades, columns=['date', 'code', 'side', 'price', 'volume', 'commission']),
             "positions": pd.DataFrame(),

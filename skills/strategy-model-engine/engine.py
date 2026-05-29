@@ -7,8 +7,13 @@ import sys
 import json
 import logging
 import warnings
-from typing import Dict, Any, List, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple
+from datetime import datetime, timedelta
+import multiprocessing
 
+for key in list(sys.modules.keys()):
+    if key.startswith('scripts.') or key == 'scripts':
+        del sys.modules[key]
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np

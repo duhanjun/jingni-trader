@@ -9,6 +9,9 @@ import logging
 from typing import Dict, Any, Optional
 from datetime import datetime
 
+for key in list(sys.modules.keys()):
+    if key.startswith('scripts.') or key == 'scripts':
+        del sys.modules[key]
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pandas as pd
@@ -33,20 +36,28 @@ class BacktestEngine:
     """统一回测引擎"""
 
     def __init__(self):
-        self.adapter = self._load_adapter()
+        self.adapter = None
 
     def _load_adapter(self):
         if BACKTEST_BACKEND == "rqalpha":
-            from adapters.rqalpha_adapter import RQAlphaAdapter
+            from scripts.adapters.rqalpha_adapter import RQAlphaAdapter
             return RQAlphaAdapter()
         elif BACKTEST_BACKEND == "backtrader":
-            from adapters.backtrader_adapter import BacktraderAdapter
+            from scripts.adapters.backtrader_adapter import BacktraderAdapter
             return BacktraderAdapter()
         elif BACKTEST_BACKEND == "gm":
-            from adapters.gm_adapter import GmAdapter
+            from scripts.adapters.gm_adapter import GmAdapter
             return GmAdapter()
+        elif BACKTEST_BACKEND == "mock":
+            from scripts.adapters.rqalpha_adapter import RQAlphaAdapter
+            return RQAlphaAdapter()
         else:
             raise ValueError(f"不支持的回测引擎: {BACKTEST_BACKEND}")
+
+    def _get_adapter(self):
+        if self.adapter is None:
+            self.adapter = self._load_adapter()
+        return self.adapter
 
     def run(
         self,
@@ -62,7 +73,7 @@ class BacktestEngine:
     ) -> Dict[str, Any]:
         """执行回测"""
         logger.info(f"开始回测，后端: {BACKTEST_BACKEND}")
-        result = self.adapter.run_backtest(
+        result = self._get_adapter().run_backtest(
             data=data,
             signals=signals,
             init_capital=init_capital,

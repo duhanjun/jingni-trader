@@ -9,6 +9,9 @@ import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
+for key in list(sys.modules.keys()):
+    if key.startswith('scripts.') or key == 'scripts':
+        del sys.modules[key]
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
@@ -168,7 +171,7 @@ class ReportGenerator:
         if returns.empty:
             return ""
 
-        monthly = returns.resample('M').apply(lambda x: (1 + x).prod() - 1)
+        monthly = returns.resample('ME').apply(lambda x: (1 + x).prod() - 1)
         monthly_df = pd.DataFrame({
             'year': monthly.index.year,
             'month': monthly.index.month,

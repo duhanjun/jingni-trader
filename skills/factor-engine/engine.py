@@ -8,6 +8,9 @@ import logging
 import json
 from typing import List, Dict, Any, Optional, Tuple
 
+for key in list(sys.modules.keys()):
+    if key.startswith('scripts.') or key == 'scripts':
+        del sys.modules[key]
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
@@ -33,10 +36,10 @@ class FactorEngine:
     def _load_calculator(self):
         """根据配置加载因子计算器"""
         if FACTOR_BACKEND == "talib":
-            from adapters.talib_calculator import TalibCalculator
+            from scripts.adapters.talib_calculator import TalibCalculator
             return TalibCalculator()
         elif FACTOR_BACKEND == "pandas_ta":
-            from adapters.pandas_ta_calculator import PandasTaCalculator
+            from scripts.adapters.pandas_ta_calculator import PandasTaCalculator
             return PandasTaCalculator()
         else:
             raise ValueError(f"不支持的因子后端: {FACTOR_BACKEND}")
