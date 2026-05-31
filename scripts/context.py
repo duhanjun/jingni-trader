@@ -35,6 +35,14 @@ class Context:
     artifacts: Dict[str, str] = field(default_factory=dict)
     # 示例: {"data": "/path/to/cleaned.parquet", "factor": "/path/to/factor.parquet", ...}
 
+    # 系统内置工具传入的外部数据
+    external_data: Dict[str, Any] = field(default_factory=dict)
+    # {"daily": DataFrame, "stock_list": DataFrame, "source": "mcp_tushare"}
+
+    # 运行归档目录
+    run_dir: str = ""
+    step_dirs: Dict[str, str] = field(default_factory=dict)
+
     # 元信息
     metadata: Dict[str, Any] = field(default_factory=dict)
     errors: List[str] = field(default_factory=list)

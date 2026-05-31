@@ -22,7 +22,7 @@ environment_variables:
   - name: GM_TOKEN
     description: 掘金量化API Token，用于实盘交易
     required: false
-  - name: DATA_DIR
+  - name: QUANT_WORK_DIR
     description: 数据和工作目录
     required: false
     default: "./workspace"
@@ -71,6 +71,56 @@ jingni-trader 是量化交易 Skill 套件的**主协调中枢**，负责：
 3. 维护会话状态和任务上下文
 4. 输出结构化的量化研究报告
 
+## ⚠️ 数据源优先级策略
+
+**在获取金融数据时，必须按以下优先级选择数据源：**
+
+1. **Agent 系统内置工具（最高优先级）**
+   - 检查当前 Agent 系统是否提供金融数据获取工具（如 MCP 连接器、系统内置插件、其他 Skill）
+   - 常见系统内置工具类型：MCP Server（如 tushare MCP、akshare MCP）、系统级 market-data Skill、数据插件
+   - 如果有系统内置工具可用，**优先使用系统内置工具获取数据**，避免重复安装依赖
+   - 获取数据后通过 Context 对象的 `external_data` 字段传递给 data-engine
+
+2. **环境变量配置的数据源（第二优先级）**
+   - 如果系统内置工具的 Token 未配置或数据获取失败，回退到环境变量 `TUSHARE_TOKEN`、`GM_TOKEN` 等
+   - 使用 data-engine 内置的适配器（tushare、baostock、akshare、xtquant、gm）获取数据
+
+3. **免费离线数据源（兜底方案）**
+   - BaoStock（无需 Token）
+   - AkShare（无需 Token）
+
+**数据源回退流程：**
+```
+系统内置工具 → 环境变量数据源 → 免费离线数据源
+    ↓ 失败          ↓ 失败            ↓ 失败
+  回退下一级      回退下一级        报错退出
+```
+
+## 运行归档机制
+
+**每次运行完整流程时，自动创建归档目录保存所有过程和结果：**
+
+- 在 workspace/archives/ 下创建 `YYYYMMDD_HHMMSS` 格式的运行归档目录
+- 每个子任务在归档目录中创建 `step_N_<阶段名>` 格式的子文件夹
+- 每个步骤保存 `summary.md` 子任务小结报告
+- 全景汇总 `pipeline_summary.md` 保存在归档根目录
+
+归档目录结构：
+```
+workspace/archives/20260529_143025/
+├── pipeline_summary.md
+├── step_1_DATA/
+│   ├── summary.md
+│   └── artifacts/
+├── step_2_FACTOR/
+│   ├── summary.md
+│   └── artifacts/
+├── step_3_MODEL/
+│   ├── summary.md
+│   └── artifacts/
+...
+```
+
 ## 阶段状态机
 
 ```
@@ -98,6 +148,9 @@ jingni-trader 是量化交易 Skill 套件的**主协调中枢**，负责：
 | artifacts | Dict[str, str] | 已完成阶段产物路径 |
 | metadata | Dict[str, Any] | 各阶段元数据 |
 | errors | List[str] | 错误记录 |
+| external_data | Dict[str, Any] | 系统内置工具传入的外部数据 |
+| run_dir | str | 当前运行归档目录路径 |
+| step_dirs | Dict[str, str] | 各步骤归档子目录路径 |
 
 ## 使用示例
 
