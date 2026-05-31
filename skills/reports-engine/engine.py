@@ -168,7 +168,7 @@ class ReportGenerator:
         if returns.empty:
             return ""
 
-        monthly = returns.resample('M').apply(lambda x: (1 + x).prod() - 1)
+        monthly = returns.resample('ME').apply(lambda x: (1 + x).prod() - 1)
         monthly_df = pd.DataFrame({
             'year': monthly.index.year,
             'month': monthly.index.month,

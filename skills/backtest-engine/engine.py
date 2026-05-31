@@ -36,15 +36,19 @@ class BacktestEngine:
         self.adapter = self._load_adapter()
 
     def _load_adapter(self):
+        """根据配置加载回测适配器"""
         if BACKTEST_BACKEND == "rqalpha":
-            from adapters.rqalpha_adapter import RQAlphaAdapter
+            from scripts.adapters.rqalpha_adapter import RQAlphaAdapter
             return RQAlphaAdapter()
         elif BACKTEST_BACKEND == "backtrader":
-            from adapters.backtrader_adapter import BacktraderAdapter
+            from scripts.adapters.backtrader_adapter import BacktraderAdapter
             return BacktraderAdapter()
         elif BACKTEST_BACKEND == "gm":
-            from adapters.gm_adapter import GmAdapter
+            from scripts.adapters.gm_adapter import GmAdapter
             return GmAdapter()
+        elif BACKTEST_BACKEND == "native":
+            from scripts.adapters.native_adapter import NativeAdapter
+            return NativeAdapter()
         else:
             raise ValueError(f"不支持的回测引擎: {BACKTEST_BACKEND}")
 
@@ -168,6 +172,7 @@ def run(ctx) -> Dict[str, Any]:
                 if factor_path:
                     factor_df = pd.read_parquet(factor_path)
                     feature_cols = [c for c in factor_df.columns if c not in ['code', 'date', 'industry']]
+                    feature_cols = [c for c in feature_cols if not factor_df[c].isna().all()]
                     if 'alpha_score' in feature_cols:
                         feature_cols = ['alpha_score'] + [c for c in feature_cols if c != 'alpha_score']
                     X = factor_df[feature_cols].fillna(0)

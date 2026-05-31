@@ -8,10 +8,6 @@ import sys
 import logging
 from typing import List, Optional, Dict, Any
 
-for key in list(sys.modules.keys()):
-    if key.startswith('scripts.') or key == 'scripts':
-        del sys.modules[key]
-
 _this_file = os.path.abspath(__file__)
 sys.path.insert(0, os.path.dirname(_this_file))
 
@@ -151,13 +147,16 @@ class DataEngine:
         initial_rows = len(df)
 
         if exclude_new:
-            stock_info = self.provider.get_stock_list()
-            if not stock_info.empty and 'list_date' in stock_info.columns:
-                stock_info['list_date'] = pd.to_datetime(stock_info['list_date'], format='%Y%m%d', errors='coerce')
-                df = df.merge(stock_info[['code', 'list_date']], on='code', how='left')
-                df['listed_days'] = (df['date'] - df['list_date']).dt.days
-                df = df[df['listed_days'] >= min_listed_days]
-                logger.info(f"剔除新股后剩余 {len(df)} 行 (剔除 {initial_rows - len(df)} 行)")
+            try:
+                stock_info = self.provider.get_stock_list()
+                if not stock_info.empty and 'list_date' in stock_info.columns:
+                    stock_info['list_date'] = pd.to_datetime(stock_info['list_date'], format='%Y%m%d', errors='coerce')
+                    df = df.merge(stock_info[['code', 'list_date']], on='code', how='left')
+                    df['listed_days'] = (df['date'] - df['list_date']).dt.days
+                    df = df[df['listed_days'] >= min_listed_days]
+                    logger.info(f"剔除新股后剩余 {len(df)} 行 (剔除 {initial_rows - len(df)} 行)")
+            except Exception as e:
+                logger.warning(f"获取股票列表失败，跳过新股剔除: {e}")
 
         if not fill_suspend:
             df = df[df['volume'] > 0]
@@ -197,11 +196,14 @@ class DataEngine:
         """标记ST股票"""
         if 'is_st' in df.columns and not df['is_st'].isna().all():
             return df
-        stock_list = self.provider.get_stock_list()
-        if not stock_list.empty and 'is_st' in stock_list.columns:
-            st_codes = stock_list[stock_list['is_st'] == True]['code'].tolist()
-            df['is_st'] = df['code'].isin(st_codes)
-        else:
+        try:
+            stock_list = self.provider.get_stock_list()
+            if not stock_list.empty and 'is_st' in stock_list.columns:
+                st_codes = stock_list[stock_list['is_st'] == True]['code'].tolist()
+                df['is_st'] = df['code'].isin(st_codes)
+            else:
+                df['is_st'] = False
+        except Exception:
             df['is_st'] = False
         return df
 

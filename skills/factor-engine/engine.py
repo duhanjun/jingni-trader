@@ -32,14 +32,18 @@ class FactorEngine:
 
     def _load_calculator(self):
         """根据配置加载因子计算器"""
-        if FACTOR_BACKEND == "talib":
-            from adapters.talib_calculator import TalibCalculator
-            return TalibCalculator()
-        elif FACTOR_BACKEND == "pandas_ta":
-            from adapters.pandas_ta_calculator import PandasTaCalculator
-            return PandasTaCalculator()
-        else:
-            raise ValueError(f"不支持的因子后端: {FACTOR_BACKEND}")
+        try:
+            if FACTOR_BACKEND == "talib":
+                from adapters.talib_calculator import TalibCalculator
+                return TalibCalculator()
+            elif FACTOR_BACKEND == "pandas_ta":
+                from adapters.pandas_ta_calculator import PandasTaCalculator
+                return PandasTaCalculator()
+            else:
+                raise ValueError(f"不支持的因子后端: {FACTOR_BACKEND}")
+        except ImportError:
+            logger.warning(f"因子计算后端 {FACTOR_BACKEND} 不可用，使用内置计算")
+            return None
 
     def compute_a_share_factors(self, data: pd.DataFrame) -> pd.DataFrame:
         """
@@ -66,13 +70,17 @@ class FactorEngine:
         result['reversal_5d'] = -result['ret_5d']
         result['reversal_20d'] = -result['ret_20d']
 
-        if 'amount' in df.columns:
-            result['estimated_mv'] = df['amount'] / df['turnover_rate'].replace(0, np.nan) * 100
-            result['lncap'] = np.log(result['estimated_mv'].replace(0, np.nan))
+        has_amount = 'amount' in df.columns and not df['amount'].isna().all()
+        has_turnover = 'turnover_rate' in df.columns and not df['turnover_rate'].isna().all()
+
+        if has_amount and has_turnover:
+            mv = result['estimated_mv'] = df['amount'] / df['turnover_rate'].replace(0, np.nan) * 100
+            result['lncap'] = mv.replace(0, np.nan).apply(lambda x: np.log(x) if x > 0 else np.nan)
         else:
+            result['estimated_mv'] = np.nan
             result['lncap'] = np.nan
 
-        if 'turnover_rate' in df.columns:
+        if has_turnover:
             result['turnover_20d'] = df.groupby('code')['turnover_rate'].transform(
                 lambda x: x.rolling(20, min_periods=5).mean()
             )
@@ -80,6 +88,10 @@ class FactorEngine:
                 lambda x: x.rolling(5, min_periods=3).mean()
             )
             result['turnover_change'] = result['turnover_5d'] / result['turnover_20d'].replace(0, np.nan) - 1
+        else:
+            result['turnover_20d'] = np.nan
+            result['turnover_5d'] = np.nan
+            result['turnover_change'] = np.nan
 
         result['volatility_20d'] = df.groupby('code')['close'].transform(
             lambda x: x.pct_change().rolling(20, min_periods=10).std()
