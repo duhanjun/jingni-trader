@@ -1,18 +1,17 @@
 """
 A股数据引擎主逻辑
 负责调度适配器、数据清洗、本地存储
+优先使用 Agent 系统内置工具提供的外部数据
 """
 import os
 import sys
 import logging
 from typing import List, Optional, Dict, Any
 
-# 清除模块缓存，避免与主技能 scripts 模块冲突
 for key in list(sys.modules.keys()):
     if key.startswith('scripts.') or key == 'scripts':
         del sys.modules[key]
 
-# 设置子技能目录为 sys.path 第一优先级
 _this_file = os.path.abspath(__file__)
 sys.path.insert(0, os.path.dirname(_this_file))
 
@@ -38,7 +37,7 @@ def _load_adapter() -> BaseDataProvider:
         raise ValueError(f"不支持的数据源: {DATA_BACKEND}")
 
 
-logger = logging.getLogger("a-share-data-engine")
+logger = logging.getLogger("data-engine")
 
 
 class DataEngine:
@@ -46,6 +45,53 @@ class DataEngine:
 
     def __init__(self, provider: Optional[BaseDataProvider] = None):
         self.provider = provider or _load_adapter()
+
+    def try_external_data(self, external_data: Dict[str, Any]) -> Optional[pd.DataFrame]:
+        """
+        尝试从外部数据源获取数据（系统内置工具提供）
+
+        返回清洗后的 DataFrame 或 None
+        """
+        daily = external_data.get("daily")
+        if daily is None:
+            return None
+
+        if not isinstance(daily, pd.DataFrame):
+            logger.info("external_data.daily 不是 DataFrame，跳过外部数据")
+            return None
+
+        if daily.empty:
+            logger.info("external_data.daily 为空，跳过外部数据")
+            return None
+
+        source = external_data.get("source", "external")
+        logger.info(f"使用系统内置工具提供的数据 (来源: {source})，共 {len(daily)} 行")
+
+        required_cols = {"code", "date", "open", "high", "low", "close", "volume"}
+        missing_cols = required_cols - set(daily.columns)
+        if missing_cols:
+            logger.error(f"外部数据缺少必需列: {missing_cols}")
+
+        df = daily.copy()
+        existing_cols = set(df.columns)
+
+        if "code" not in existing_cols and "ts_code" in existing_cols:
+            df["code"] = df["ts_code"]
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"])
+        if "change_pct" not in existing_cols and "close" in existing_cols and "pre_close" in existing_cols:
+            df["change_pct"] = (df["close"] - df["pre_close"]) / df["pre_close"] * 100
+        if "is_st" not in existing_cols:
+            df["is_st"] = False
+        if "is_limit_up" not in existing_cols:
+            if "change_pct" in existing_cols:
+                df["is_limit_up"] = df["change_pct"] >= 9.9
+                df["is_limit_down"] = df["change_pct"] <= -9.9
+            else:
+                df["is_limit_up"] = False
+                df["is_limit_down"] = False
+
+        return df
 
     def fetch_and_clean(
         self,
@@ -56,10 +102,16 @@ class DataEngine:
         exclude_st: bool = True,
         exclude_new: bool = True,
         min_listed_days: int = 60,
-        fill_suspend: bool = False
+        fill_suspend: bool = False,
+        external_data: Optional[Dict[str, Any]] = None
     ) -> pd.DataFrame:
         """
         获取并清洗日线数据
+
+        数据源优先级:
+        1. external_data (系统内置工具提供)
+        2. Tushare/GM (环境变量配置)
+        3. BaoStock/AkShare (免费离线)
 
         参数:
             symbols: 股票代码列表，为空则获取全部A股
@@ -70,10 +122,18 @@ class DataEngine:
             exclude_new: 剔除新股
             min_listed_days: 最少上市天数
             fill_suspend: 停牌是否前向填充
+            external_data: 外部数据源提供的数据
 
         返回:
             清洗后的 DataFrame，包含统一列
         """
+        if external_data:
+            df = self.try_external_data(external_data)
+            if df is not None and not df.empty:
+                logger.info(f"外部数据清洗后 {len(df)} 行")
+                return df.sort_values(['date', 'code']).reset_index(drop=True)
+            logger.info("外部数据不可用，回退到内置适配器")
+
         if not symbols:
             stock_df = self.provider.get_stock_list()
             if stock_df.empty:
@@ -162,7 +222,7 @@ class DataEngine:
 
 def run(ctx) -> Dict[str, Any]:
     """
-    a-share-data-engine 的 run 函数
+    data-engine 的 run 函数
     由 jingnitrader 调度
 
     参数:
@@ -170,6 +230,7 @@ def run(ctx) -> Dict[str, Any]:
             - stock_pool: list
             - start_date: str
             - end_date: str
+            - external_data: dict (可选，系统内置工具提供的数据)
             - 可选: artifacts 已有产物路径可跳过
 
     返回:
@@ -190,12 +251,17 @@ def run(ctx) -> Dict[str, Any]:
                 "error": ""
             }
 
+        external = ctx.external_data if ctx.external_data else None
+        if external and external.get("daily") is not None:
+            logger.info(f"检测到外部数据源: {external.get('source', 'unknown')}")
+
         engine = DataEngine()
         df = engine.fetch_and_clean(
             symbols=ctx.stock_pool,
             start_date=ctx.start_date,
             end_date=ctx.end_date,
-            adjust=ADJUST_MODE
+            adjust=ADJUST_MODE,
+            external_data=external
         )
         if df.empty:
             return {
@@ -210,13 +276,15 @@ def run(ctx) -> Dict[str, Any]:
         path = os.path.join(output_dir, "cleaned_data.parquet")
         engine.save_data(df, path)
 
+        data_source = "external" if external and external.get("daily") is not None else "native"
         return {
             "success": True,
             "artifact_path": path,
             "metadata": {
                 "rows": len(df),
                 "symbols_count": df['code'].nunique(),
-                "date_range": f"{df['date'].min().strftime('%Y-%m-%d')} ~ {df['date'].max().strftime('%Y-%m-%d')}"
+                "date_range": f"{df['date'].min().strftime('%Y-%m-%d')} ~ {df['date'].max().strftime('%Y-%m-%d')}",
+                "data_source": data_source
             },
             "error": ""
         }

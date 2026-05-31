@@ -13,9 +13,11 @@ from datetime import datetime
 
 from scripts.config import (
     WORK_DIR, DATA_DIR, FACTOR_DIR, MODEL_DIR,
-    BACKTEST_DIR, PORTFOLIO_DIR, REPORT_DIR, LOG_DIR
+    BACKTEST_DIR, PORTFOLIO_DIR, REPORT_DIR, LOG_DIR,
+    ARCHIVE_DIR
 )
 from scripts.context import Context
+from scripts.archive import RunArchiver
 
 
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -70,6 +72,7 @@ class MasterEngine:
     def __init__(self):
         self.ctx: Optional[Context] = None
         self._loaded_skills: Dict[str, Any] = {}
+        self.archiver: Optional[RunArchiver] = None
 
     def parse_intent(self, user_input: str) -> Context:
         """解析用户自然语言，提取任务参数，生成 Context"""
@@ -124,9 +127,9 @@ class MasterEngine:
         self.ctx = ctx
         return ctx
 
-    def execute_stage(self, stage: str) -> bool:
+    def execute_stage(self, stage: str, step_num: int) -> bool:
         """执行单个阶段，调用对应子 Skill"""
-        logger.info(f"=== 开始执行阶段: {stage} ===")
+        logger.info(f"=== 开始执行阶段 Step {step_num}: {stage} ===")
 
         artifact_file = EXPECTED_ARTIFACTS.get(stage)
         stage_dir = {
@@ -141,9 +144,16 @@ class MasterEngine:
 
         artifact_path = os.path.join(stage_dir, artifact_file) if artifact_file else None
 
+        if self.archiver:
+            self.archiver.create_step_dir(step_num, stage)
+
         if artifact_path and os.path.exists(artifact_path):
             logger.info(f"阶段 {stage} 产物已存在，跳过: {artifact_path}")
             self.ctx.update_artifact(stage, artifact_path)
+            if self.archiver:
+                self.archiver.record_step_result(stage, {"success": True, "artifact_path": artifact_path, "metadata": {"source": "cache"}})
+                self.archiver.save_artifact_copy(stage, artifact_path)
+                self.archiver.write_step_summary(stage, step_num)
             return True
 
         module_name = SKILL_MODULES.get(stage)
@@ -151,6 +161,9 @@ class MasterEngine:
             error_msg = f"未找到阶段 {stage} 对应的 Skill 模块"
             logger.error(error_msg)
             self.ctx.add_error(error_msg)
+            if self.archiver:
+                self.archiver.record_step_result(stage, {"success": False, "error": error_msg})
+                self.archiver.write_step_summary(stage, step_num)
             return False
 
         try:
@@ -159,25 +172,39 @@ class MasterEngine:
             error_msg = f"加载子 Skill {module_name} 失败: {e}"
             logger.error(error_msg)
             self.ctx.add_error(error_msg)
+            if self.archiver:
+                self.archiver.record_step_result(stage, {"success": False, "error": error_msg})
+                self.archiver.write_step_summary(stage, step_num)
             return False
 
         try:
             result = skill_module.run(self.ctx)
+            if self.archiver:
+                self.archiver.record_step_result(stage, result)
             if result.get("success"):
                 artifact = result.get("artifact_path", "")
                 self.ctx.update_artifact(stage, artifact)
                 self.ctx.metadata[stage] = result.get("metadata", {})
+                if self.archiver:
+                    self.archiver.save_artifact_copy(stage, artifact)
                 logger.info(f"阶段 {stage} 执行成功, 产物: {artifact}")
+                if self.archiver:
+                    self.archiver.write_step_summary(stage, step_num)
                 return True
             else:
                 error_msg = result.get("error", "未知错误")
                 logger.error(f"阶段 {stage} 执行失败: {error_msg}")
                 self.ctx.add_error(f"{stage}: {error_msg}")
+                if self.archiver:
+                    self.archiver.write_step_summary(stage, step_num)
                 return False
         except Exception as e:
             error_msg = f"阶段 {stage} 执行异常: {str(e)}"
             logger.exception(error_msg)
             self.ctx.add_error(error_msg)
+            if self.archiver:
+                self.archiver.record_step_result(stage, {"success": False, "error": error_msg})
+                self.archiver.write_step_summary(stage, step_num)
             return False
 
     def run_pipeline(self, user_input: str = None, ctx: Context = None) -> dict:
@@ -189,10 +216,15 @@ class MasterEngine:
         else:
             return {"success": False, "error": "需要提供 user_input 或 ctx"}
 
-        results = {"success": True, "completed_stages": [], "failed_stages": [], "summary": ""}
+        self.archiver = RunArchiver(ARCHIVE_DIR)
+        run_dir = self.archiver.create_run(self.ctx.task_id)
+        self.ctx.run_dir = run_dir
+        logger.info(f"运行归档目录: {run_dir}")
 
-        for stage in self.ctx.target_stages:
-            success = self.execute_stage(stage)
+        results = {"success": True, "completed_stages": [], "failed_stages": [], "summary": "", "archive_dir": run_dir}
+
+        for step_num, stage in enumerate(self.ctx.target_stages, 1):
+            success = self.execute_stage(stage, step_num)
             if success:
                 results["completed_stages"].append(stage)
             else:
@@ -203,6 +235,17 @@ class MasterEngine:
                     break
 
         results["summary"] = self._generate_summary()
+
+        if self.archiver:
+            self.archiver.write_pipeline_summary(
+                completed=results["completed_stages"],
+                failed=results["failed_stages"],
+                target_stages=self.ctx.target_stages,
+                user_intent=self.ctx.user_intent,
+                task_id=self.ctx.task_id,
+                errors=self.ctx.errors
+            )
+
         results["context"] = self.ctx.to_dict()
 
         return results
@@ -216,6 +259,7 @@ class MasterEngine:
             f"任务ID: {self.ctx.task_id}",
             f"用户意图: {self.ctx.user_intent}",
             f"目标阶段: {' → '.join(self.ctx.target_stages)}",
+            f"归档目录: {self.ctx.run_dir or 'N/A'}",
             f"产物列表:"
         ]
         for stage, path in self.ctx.artifacts.items():
@@ -243,7 +287,8 @@ def run(ctx: Context = None, user_input: str = None) -> dict:
             "completed_stages": [...],
             "failed_stages": [...],
             "summary": str,
-            "context": dict
+            "context": dict,
+            "archive_dir": str
         }
     """
     engine = MasterEngine()

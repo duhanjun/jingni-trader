@@ -13,6 +13,7 @@ BACKTEST_DIR = os.path.join(WORK_DIR, "backtest_results")
 PORTFOLIO_DIR = os.path.join(WORK_DIR, "portfolio")
 REPORT_DIR = os.path.join(WORK_DIR, "reports")
 LOG_DIR = os.path.join(WORK_DIR, "logs")
+ARCHIVE_DIR = os.path.join(WORK_DIR, "archives")
 
 # ── 多后端选择 ────────────────────────────
 # 可选: tushare / baostock / akshare / xtquant / gm
