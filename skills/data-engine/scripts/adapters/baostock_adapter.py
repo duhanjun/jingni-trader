@@ -62,8 +62,8 @@ class BaostockAdapter(BaseDataProvider):
             else:
                 fields = "date,open,high,low,close,preclose,volume,amount,turn,adjustflag,tradestatus,isST"
             # 修改日期格式为 YYYY-MM-DD
-            start = start_date.replace('-', '')
-            end = end_date.replace('-', '')
+            start = start_date
+            end = end_date
             rs = bs.query_history_k_data_plus(
                 bs_code,
                 fields,
@@ -72,7 +72,7 @@ class BaostockAdapter(BaseDataProvider):
                 frequency="d",
                 adjustflag="2" if adjust == "qfq" else "1"  # 1:后复权, 2:前复权
             )
-            if rs.error_code != '0':
+            if rs is None or rs.error_code != '0':
                 continue
             data = []
             while rs.next():

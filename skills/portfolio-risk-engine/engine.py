@@ -8,9 +8,6 @@ import json
 import logging
 from typing import Dict, Any, List, Optional, Tuple
 
-for key in list(sys.modules.keys()):
-    if key.startswith('scripts.') or key == 'scripts':
-        del sys.modules[key]
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
@@ -46,7 +43,10 @@ class PortfolioOptimizer:
 
     def __init__(self):
         if not HAS_PYPFOPT:
-            raise ImportError("PyPortfolioOpt 未安装，请 pip install PyPortfolioOpt")
+            logger.warning("PyPortfolioOpt 未安装，使用等权组合")
+            self._fallback = True
+        else:
+            self._fallback = False
 
     def estimate_expected_returns(
         self,
@@ -69,6 +69,8 @@ class PortfolioOptimizer:
         method: str = COVARIANCE_METHOD
     ) -> pd.DataFrame:
         """估计协方差矩阵"""
+        if self._fallback:
+            return returns.cov()
         if method == "ledoit_wolf":
             return risk_models.CovarianceShrinkage(returns).ledoit_wolf()
         elif method == "sample_cov":
@@ -87,6 +89,11 @@ class PortfolioOptimizer:
         current_weights: Optional[pd.Series] = None,
     ) -> Tuple[pd.Series, Dict[str, float]]:
         """执行组合优化"""
+        if self._fallback:
+            n = len(expected_rets)
+            weights = pd.Series(1.0 / n, index=expected_rets.index)
+            return weights, {"method": "equal_weight", "note": "PyPortfolioOpt 未安装，使用等权"}
+
         if constraints is None:
             constraints = {}
 

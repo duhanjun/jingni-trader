@@ -7,13 +7,8 @@ import sys
 import json
 import logging
 import warnings
-from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime, timedelta
-import multiprocessing
+from typing import Dict, Any, List, Optional, Tuple
 
-for key in list(sys.modules.keys()):
-    if key.startswith('scripts.') or key == 'scripts':
-        del sys.modules[key]
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
@@ -95,14 +90,14 @@ class ModelEngine:
             how='inner'
         )
 
-        data = data.dropna()
-
         if LABEL_TYPE == 'classification':
             threshold = data.groupby('date')['forward_return'].transform('median')
             data['label'] = (data['forward_return'] > threshold).astype(int)
             y_col = 'label'
         else:
             y_col = 'forward_return'
+
+        data = data.dropna(subset=feature_cols + [y_col])
 
         X = data[feature_cols]
         y = data[y_col]
@@ -450,6 +445,8 @@ def run(ctx) -> Dict[str, Any]:
                           if c not in ['code', 'date', 'industry', 'alpha_score']]
             if 'alpha_score' in factor_df.columns:
                 feature_cols.append('alpha_score')
+            # 过滤掉全NaN的列
+            feature_cols = [c for c in feature_cols if not factor_df[c].isna().all()]
 
             X, y, dates = engine.prepare_data(factor_df, price_df, feature_cols)
 

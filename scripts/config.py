@@ -20,14 +20,14 @@ ARCHIVE_DIR = os.path.join(WORK_DIR, "archives")
 DATA_BACKEND = os.environ.get("DATA_BACKEND", "tushare")
 
 # 可选: rqalpha / backtrader / gm
-BACKTEST_BACKEND = os.environ.get("BACKTEST_BACKEND", "rqalpha")
+BACKTEST_BACKEND = os.environ.get("BACKTEST_BACKEND", "native")
 
 # 可选: xtquant / gm
 TRADE_BACKEND = os.environ.get("TRADE_BACKEND", "xtquant")
 
 # ── 因子计算后端 ──────────────────────────
 # 可选: talib / pandas_ta
-FACTOR_BACKEND = os.environ.get("FACTOR_BACKEND", "talib")
+FACTOR_BACKEND = os.environ.get("FACTOR_BACKEND", "pandas_ta")
 
 # ── A股市场配置 ────────────────────────────
 A_SHARE_COMMISSION_RATE = 0.00025    # 佣金 万2.5
@@ -92,6 +92,7 @@ CVAR_CONFIDENCE = 0.95             # CVaR置信度
 BARRA_FACTORS = ["size", "value", "momentum", "quality"]  # Barra风格因子
 MIN_WEIGHT = 0.001                 # 最小持仓权重
 PORTFOLIO_BACKEND = "cvxpy"        # 组合优化后端
+BACKEND = PORTFOLIO_BACKEND          # 兼容旧版引用
 
 # ── 执行监控参数 ──────────────────────────
 EXECUTION_DIR = os.path.join(WORK_DIR, "execution")

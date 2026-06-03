@@ -167,6 +167,9 @@ class MasterEngine:
             return False
 
         try:
+            for key in list(sys.modules.keys()):
+                if key == 'scripts' or key.startswith('scripts.'):
+                    del sys.modules[key]
             skill_module = importlib.import_module(module_name)
         except ImportError as e:
             error_msg = f"加载子 Skill {module_name} 失败: {e}"

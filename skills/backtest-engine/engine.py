@@ -9,9 +9,6 @@ import logging
 from typing import Dict, Any, Optional
 from datetime import datetime
 
-for key in list(sys.modules.keys()):
-    if key.startswith('scripts.') or key == 'scripts':
-        del sys.modules[key]
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pandas as pd
@@ -36,9 +33,10 @@ class BacktestEngine:
     """统一回测引擎"""
 
     def __init__(self):
-        self.adapter = None
+        self.adapter = self._load_adapter()
 
     def _load_adapter(self):
+        """根据配置加载回测适配器"""
         if BACKTEST_BACKEND == "rqalpha":
             from scripts.adapters.rqalpha_adapter import RQAlphaAdapter
             return RQAlphaAdapter()
@@ -48,16 +46,11 @@ class BacktestEngine:
         elif BACKTEST_BACKEND == "gm":
             from scripts.adapters.gm_adapter import GmAdapter
             return GmAdapter()
-        elif BACKTEST_BACKEND == "mock":
-            from scripts.adapters.rqalpha_adapter import RQAlphaAdapter
-            return RQAlphaAdapter()
+        elif BACKTEST_BACKEND == "native":
+            from scripts.adapters.native_adapter import NativeAdapter
+            return NativeAdapter()
         else:
             raise ValueError(f"不支持的回测引擎: {BACKTEST_BACKEND}")
-
-    def _get_adapter(self):
-        if self.adapter is None:
-            self.adapter = self._load_adapter()
-        return self.adapter
 
     def run(
         self,
@@ -73,7 +66,7 @@ class BacktestEngine:
     ) -> Dict[str, Any]:
         """执行回测"""
         logger.info(f"开始回测，后端: {BACKTEST_BACKEND}")
-        result = self._get_adapter().run_backtest(
+        result = self.adapter.run_backtest(
             data=data,
             signals=signals,
             init_capital=init_capital,
@@ -179,6 +172,7 @@ def run(ctx) -> Dict[str, Any]:
                 if factor_path:
                     factor_df = pd.read_parquet(factor_path)
                     feature_cols = [c for c in factor_df.columns if c not in ['code', 'date', 'industry']]
+                    feature_cols = [c for c in feature_cols if not factor_df[c].isna().all()]
                     if 'alpha_score' in feature_cols:
                         feature_cols = ['alpha_score'] + [c for c in feature_cols if c != 'alpha_score']
                     X = factor_df[feature_cols].fillna(0)
