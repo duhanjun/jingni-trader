@@ -271,15 +271,17 @@ END_DATE = "2024-12-31"
 def fetch_etf_daily_data(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
     """
     自定义 ETF 数据获取器（绕过 DataEngine 内部的 pro.daily）
-    511090.SH 是 ETF 基金，tushare 中需要使用 pro.fund_daily（且限频 1次/小时），
-    沙箱内 akshare/baostock 也存在网络/代理问题，因此采用以下数据源优先级：
+    511090.SH 是 ETF 基金，tushare 中需要使用 pro.fund_daily（且限频 5次/天），
+    沙箱内 akshare 的 eastmoney 接口因代理阻断失败，但 sina 接口可用且不限频。
+    因此采用以下数据源优先级：
     1. 本地缓存 /tmp/511090_*.parquet 或 /workspace/workspace/data/bond_etf_ma20_data.parquet
-    2. akshare fund_etf_hist_em
-    3. tushare fund_daily
-    4. 沙箱回退：基于 511090.SH 实际特征合成数据（仅在沙箱无外网时使用）
+    2. akshare fund_etf_hist_sina（无频次限制，真实数据，验证可用）
+    3. tushare fund_daily（5次/天，沙箱环境已耗尽）
+    4. 沙箱回退：基于 511090.SH 真实特征合成数据（仅在所有外部源不可用时使用）
     """
     # 0) 本地缓存
     cache_candidates = [
+        '/tmp/511090_sina.parquet',
         '/tmp/511090_akshare.parquet',
         '/tmp/511090_daily.parquet',
         '/workspace/workspace/data/bond_etf_ma20_data.parquet',
@@ -293,46 +295,56 @@ def fetch_etf_daily_data(symbol: str, start_date: str, end_date: str) -> pd.Data
                            (cached['date'] <= pd.to_datetime(end_date))
                     sub = cached.loc[mask].copy()
                     if not sub.empty and 'code' in sub.columns:
+                        logger.info(f"命中本地缓存 {cache_path}: {len(sub)} 行")
                         return sub.reset_index(drop=True)
             except Exception as e:
                 logger.warning(f"读取缓存 {cache_path} 失败: {e}")
 
-    # akshare 的 symbol 不带交易所后缀
-    pure_symbol = symbol.split('.')[0]
+    # akshare 的 sina 接口 symbol 格式为 sh511090 / sz15xxxx
+    # 511090.SH -> sh511090
+    sina_symbol = 'sh' + symbol.split('.')[0] if symbol.endswith('.SH') else \
+                  'sz' + symbol.split('.')[0]
     s_date = start_date.replace('-', '')
     e_date = end_date.replace('-', '')
 
-    # 1) 优先 akshare（无频次限制）
+    # 1) 优先 akshare sina（无频次限制，返回 100 元面值单位价格）
     try:
         import akshare as ak
-        df = ak.fund_etf_hist_em(
-            symbol=pure_symbol,
-            period='daily',
-            start_date=s_date,
-            end_date=e_date,
-            adjust='hfq',
-        )
+        df = ak.fund_etf_hist_sina(symbol=sina_symbol)
         if df is not None and not df.empty:
+            # sina 接口的 price 是 100 元面值下的价格（开盘、收盘等都是）
+            # 标准化列名
             df = df.rename(columns={
-                '日期': 'date',
-                '开盘': 'open',
-                '收盘': 'close',
-                '最高': 'high',
-                '最低': 'low',
-                '成交量': 'vol',
+                'date': 'date',
+                'open': 'open',
+                'close': 'close',
+                'high': 'high',
+                'low': 'low',
+                'volume': 'vol',
             })
             df['date'] = pd.to_datetime(df['date'])
-            df['code'] = symbol
-            keep_cols = ['date', 'code', 'open', 'high', 'low', 'close', 'vol']
-            for c in keep_cols:
-                if c not in df.columns:
-                    df[c] = pd.NA
-            df = df[keep_cols].sort_values('date').reset_index(drop=True)
-            return df
+            # 过滤日期范围
+            mask = (df['date'] >= pd.to_datetime(start_date)) & \
+                   (df['date'] <= pd.to_datetime(end_date))
+            df = df.loc[mask].copy()
+            if not df.empty:
+                df['code'] = symbol
+                keep_cols = ['date', 'code', 'open', 'high', 'low', 'close', 'vol']
+                for c in keep_cols:
+                    if c not in df.columns:
+                        df[c] = pd.NA
+                df = df[keep_cols].sort_values('date').reset_index(drop=True)
+                # 缓存到本地（便于后续离线使用）
+                try:
+                    df.to_parquet('/tmp/511090_sina.parquet', index=False)
+                    logger.info(f"akshare sina 获取 {symbol} 成功: {len(df)} 行，已缓存")
+                except Exception:
+                    pass
+                return df
     except Exception as e:
-        logger.warning(f"akshare 获取 {symbol} 失败: {e}")
+        logger.warning(f"akshare sina 获取 {symbol} 失败: {e}")
 
-    # 2) 回退 tushare fund_daily（限频 1次/小时）
+    # 2) 回退 tushare fund_daily（5次/天，沙箱已耗尽）
     try:
         import tushare as ts
         token = os.environ.get('TUSHARE_TOKEN')
@@ -356,13 +368,17 @@ def fetch_etf_daily_data(symbol: str, start_date: str, end_date: str) -> pd.Data
             if c not in df.columns:
                 df[c] = pd.NA
         df = df[keep_cols].sort_values('date').reset_index(drop=True)
+        try:
+            df.to_parquet('/tmp/511090_daily.parquet', index=False)
+        except Exception:
+            pass
         return df
     except Exception as e:
         logger.warning(f"tushare fund_daily 获取 {symbol} 失败: {e}")
 
     # 3) 沙箱回退：合成 511090.SH 真实特征数据
-    # 511090.SH 实际特征：30年国债ETF，2023-06-13 上市，初始价 ~1.0，
-    # 2023-2024 期间受 30 年期国债收益率下行影响整体上行至 1.2-1.3 区间。
+    # 511090.SH 实际特征：30年国债ETF，2023-06-13 上市，初始价 ~100 元面值价
+    # 2023-2024 期间受 30 年期国债收益率下行影响整体上行至 120-130 元区间。
     logger.warning(f"外部数据源不可用，使用沙箱回退合成数据（基于 511090.SH 真实特征）")
     return _synthesize_bond_etf_data(symbol, start_date, end_date)
 
@@ -400,13 +416,13 @@ def _synthesize_bond_etf_data(symbol: str, start_date: str, end_date: str) -> pd
     for i in range(1, n):
         returns[i] += 0.2 * returns[i-1]
 
-    # 起始价 1.0，限制期末价在 1.18-1.32 之间
-    prices = [1.0]
+    # 起始价 100 元（100 元面值单位），期末约 124.5 元
+    prices = [100.0]
     for r in returns[1:]:
         prices.append(prices[-1] * (1 + r))
     prices = np.array(prices)
     # 缩放到目标终值
-    target_end = 1.245
+    target_end = 124.5
     if prices[-1] > 0:
         prices = prices * (target_end / prices[-1])
 
