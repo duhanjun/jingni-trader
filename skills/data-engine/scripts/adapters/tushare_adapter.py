@@ -1,14 +1,25 @@
 """
 Tushare Pro 数据源适配器
+
+错误处理策略：
+- 所有 tushare API 调用都会被 _safe_call 包装
+- 异常会被 tushare_error_classifier 归类为 QuotaExceededError / RateLimitError / NetworkError 等
+- 上层 DataEngine 据此判断是否切换到下一个数据源
 """
 import os
 import time
+import logging
 from typing import List, Optional
 import pandas as pd
 import tushare as ts
 
 from ..base.base_data_provider import BaseDataProvider
 from ..config import TUSHARE_TOKEN, MAX_WORKERS
+from ..errors import DataSourceError, QuotaExceededError, RateLimitError, NetworkError
+from ..tushare_error_classifier import classify_tushare_error
+
+
+logger = logging.getLogger("tushare-adapter")
 
 
 class TushareAdapter(BaseDataProvider):
@@ -23,6 +34,8 @@ class TushareAdapter(BaseDataProvider):
         # 用于频率控制
         self._last_call = 0.0
         self._min_interval = 0.2  # 每秒最多5次
+        # 配额/限频错误重试上限：碰到这些错误时不要重试
+        self._non_retriable = (QuotaExceededError, RateLimitError)
 
     def _rate_limit(self):
         """简单频率控制"""
@@ -32,10 +45,27 @@ class TushareAdapter(BaseDataProvider):
             time.sleep(self._min_interval - elapsed)
         self._last_call = time.time()
 
+    def _safe_call(self, func, *args, **kwargs):
+        """
+        包装 tushare API 调用，统一错误处理
+
+        - 限频/积分错误 → 抛出对应异常（不重试）
+        - 其他异常 → 包装为 NetworkError（让上层选择切换或重试）
+        """
+        self._rate_limit()
+        try:
+            return func(*args, **kwargs)
+        except self._non_retriable:
+            raise  # 已经是分类后的异常，直接抛
+        except Exception as e:
+            classified = classify_tushare_error(e)
+            # 重要：把这些错误暴露给上层（DataEngine）来决定是否切换数据源
+            raise classified from e
+
     def get_stock_list(self) -> pd.DataFrame:
         """获取全市场股票列表"""
-        self._rate_limit()
-        df = self.pro.stock_basic(
+        df = self._safe_call(
+            self.pro.stock_basic,
             exchange='',
             list_status='L',
             fields='ts_code,symbol,name,area,industry,list_date'
@@ -48,10 +78,14 @@ class TushareAdapter(BaseDataProvider):
             'list_date': 'list_date'
         }, inplace=True)
         # 获取ST标记
-        self._rate_limit()
-        st_df = self.pro.namechange(
-            fields='ts_code,name,start_date,end_date'
-        )
+        try:
+            st_df = self._safe_call(
+                self.pro.namechange,
+                fields='ts_code,name,start_date,end_date'
+            )
+        except DataSourceError as e:
+            logger.warning(f"获取ST标记失败（{e.message}），跳过")
+            st_df = pd.DataFrame()
         # 简化：当前名称含ST的标记
         # 实际需更复杂逻辑，此处仅示例
         df['is_st'] = df['name'].str.contains('ST', na=False)
@@ -84,9 +118,9 @@ class TushareAdapter(BaseDataProvider):
         """后复权日线（推荐用于收益率计算）"""
         frames = []
         for symbol in symbols:
-            self._rate_limit()
             try:
-                df = self.pro.daily(
+                df = self._safe_call(
+                    self.pro.daily,
                     ts_code=symbol,
                     start_date=start_date,
                     end_date=end_date,
@@ -95,8 +129,8 @@ class TushareAdapter(BaseDataProvider):
                 if df is None or df.empty:
                     continue
                 # 获取复权因子
-                self._rate_limit()
-                adj_df = self.pro.adj_factor(
+                adj_df = self._safe_call(
+                    self.pro.adj_factor,
                     ts_code=symbol,
                     start_date=start_date,
                     end_date=end_date
@@ -115,6 +149,9 @@ class TushareAdapter(BaseDataProvider):
                     for col in ['open', 'high', 'low', 'close']:
                         df[col] = df[col] * (df['adj_factor'] / last_adj)
                 frames.append(df)
+            except DataSourceError as e:
+                # 限频/积分等不可恢复错误：让上层切换数据源
+                raise
             except Exception as e:
                 # 单只股票失败不影响整体
                 print(f"获取 {symbol} 行情失败: {e}")
@@ -143,8 +180,8 @@ class TushareAdapter(BaseDataProvider):
         """不复权日线"""
         frames = []
         for symbol in symbols:
-            self._rate_limit()
-            df = self.pro.daily(
+            df = self._safe_call(
+                self.pro.daily,
                 ts_code=symbol,
                 start_date=start_date,
                 end_date=end_date,
@@ -188,8 +225,8 @@ class TushareAdapter(BaseDataProvider):
         end_date = end_date.replace('-', '')
         frames = []
         for symbol in symbols:
-            self._rate_limit()
-            adj_df = self.pro.adj_factor(
+            adj_df = self._safe_call(
+                self.pro.adj_factor,
                 ts_code=symbol,
                 start_date=start_date,
                 end_date=end_date
@@ -205,8 +242,8 @@ class TushareAdapter(BaseDataProvider):
 
     def get_financial(self, symbols, report_date, fields):
         # 示例仅实现基本调用
-        self._rate_limit()
-        df = self.pro.fina_indicator(
+        df = self._safe_call(
+            self.pro.fina_indicator,
             ts_code=','.join(symbols),
             period=report_date,
             fields=','.join(fields)

@@ -3,11 +3,25 @@
 大部分全局配置从 master 继承，此处仅保留数据引擎特有设置
 """
 import os
-from typing import Optional
+from typing import List, Optional
 
 # ── 数据源选择 ────────────────────────────
 DATA_BACKEND = os.environ.get("DATA_BACKEND", "tushare")
 # 可选: tushare, baostock, akshare, xtquant, gm
+
+# ── 数据源降级链 ──────────────────────────
+# 当主数据源（DATA_BACKEND）遇到以下情况时，自动切换到下一个数据源：
+#   - 积分/权限不足 (QuotaExceededError)
+#   - 访问频率受限 (RateLimitError)
+#   - 网络错误 (NetworkError)
+# 格式：逗号分隔的数据源名列表。留空则不降级
+_default_fallback = "tushare,baostock,akshare" if DATA_BACKEND == "tushare" else \
+                    "baostock,akshare" if DATA_BACKEND == "baostock" else \
+                    "akshare"
+DATA_BACKEND_FALLBACK_CHAIN: List[str] = [
+    s.strip() for s in os.environ.get("DATA_BACKEND_FALLBACK_CHAIN", _default_fallback).split(",")
+    if s.strip()
+]
 
 # ── 数据存储格式 ──────────────────────────
 DATA_FORMAT = os.environ.get("DATA_FORMAT", "parquet")  # parquet / csv / sql

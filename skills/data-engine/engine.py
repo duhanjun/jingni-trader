@@ -14,23 +14,40 @@ from typing import List, Optional, Dict, Any
 import pandas as pd
 import numpy as np
 
-from scripts.config import DATA_BACKEND, DATA_FORMAT, ADJUST_MODE, CACHE_DIR, MAX_MISSING_RATIO
+from scripts.config import (
+    DATA_BACKEND, DATA_FORMAT, ADJUST_MODE, CACHE_DIR, MAX_MISSING_RATIO,
+    DATA_BACKEND_FALLBACK_CHAIN,
+)
 from scripts.base.base_data_provider import BaseDataProvider
+from scripts.errors import (
+    DataSourceError, QuotaExceededError, RateLimitError, NetworkError,
+    InvalidParameterError,
+)
 
 
-def _load_adapter() -> BaseDataProvider:
-    """动态加载适配器"""
-    if DATA_BACKEND == "tushare":
-        from scripts.adapters.tushare_adapter import TushareAdapter
-        return TushareAdapter()
-    elif DATA_BACKEND == "baostock":
-        from scripts.adapters.baostock_adapter import BaostockAdapter
-        return BaostockAdapter()
-    elif DATA_BACKEND == "akshare":
-        from scripts.adapters.akshare_adapter import AkshareAdapter
-        return AkshareAdapter()
-    else:
-        raise ValueError(f"不支持的数据源: {DATA_BACKEND}")
+_ADAPTER_REGISTRY = {
+    "tushare":   ("scripts.adapters.tushare_adapter",   "TushareAdapter"),
+    "baostock":  ("scripts.adapters.baostock_adapter",  "BaostockAdapter"),
+    "akshare":   ("scripts.adapters.akshare_adapter",   "AkshareAdapter"),
+    "xtquant":   ("scripts.adapters.xtquant_adapter",   "XtQuantAdapter"),
+    "gm":        ("scripts.adapters.gm_adapter",        "GmAdapter"),
+}
+
+
+def _load_adapter(backend: str) -> BaseDataProvider:
+    """动态加载指定数据源的适配器"""
+    if backend not in _ADAPTER_REGISTRY:
+        raise ValueError(f"不支持的数据源: {backend}")
+    module_path, class_name = _ADAPTER_REGISTRY[backend]
+    import importlib
+    try:
+        mod = importlib.import_module(module_path)
+    except ImportError as e:
+        raise DataSourceError(backend, f"导入适配器模块失败: {e}") from e
+    cls = getattr(mod, class_name, None)
+    if cls is None:
+        raise DataSourceError(backend, f"适配器 {class_name} 不存在")
+    return cls()
 
 
 logger = logging.getLogger("data-engine")
@@ -39,8 +56,145 @@ logger = logging.getLogger("data-engine")
 class DataEngine:
     """A股数据引擎"""
 
-    def __init__(self, provider: Optional[BaseDataProvider] = None):
-        self.provider = provider or _load_adapter()
+    def __init__(
+        self,
+        provider: Optional[BaseDataProvider] = None,
+        backend: Optional[str] = None,
+        fallback_chain: Optional[List[str]] = None,
+    ):
+        """
+        参数:
+            provider: 自定义适配器（覆盖默认 DATA_BACKEND）
+            backend: 主数据源名（默认取 config.DATA_BACKEND）
+            fallback_chain: 降级链（默认取 config.DATA_BACKEND_FALLBACK_CHAIN）
+        """
+        self.backend = backend or DATA_BACKEND
+        self.fallback_chain = fallback_chain if fallback_chain is not None else list(DATA_BACKEND_FALLBACK_CHAIN)
+        # 确保降级链以主源开头，且不重复
+        if not self.fallback_chain or self.fallback_chain[0] != self.backend:
+            self.fallback_chain = [self.backend] + [
+                b for b in self.fallback_chain if b != self.backend
+            ]
+        self.provider = provider or self._init_provider_with_fallback(self.backend)
+
+    # ------------------------------------------------------------------
+    # 多源降级（核心）
+    # ------------------------------------------------------------------
+
+    def _init_provider_with_fallback(self, primary: str) -> BaseDataProvider:
+        """
+        按降级链顺序尝试初始化 provider；
+        如果某源初始化失败（例如 tushare token 缺失），自动切换到下一个。
+        """
+        last_err: Optional[Exception] = None
+        for backend in self.fallback_chain:
+            try:
+                logger.info(f"尝试加载数据源适配器: {backend}")
+                provider = _load_adapter(backend)
+                logger.info(f"数据源 {backend} 加载成功")
+                if backend != primary:
+                    logger.warning(
+                        f"主数据源 {primary} 初始化失败，已降级到 {backend}（{last_err}）"
+                    )
+                self.backend = backend
+                return provider
+            except Exception as e:
+                last_err = e
+                logger.warning(f"数据源 {backend} 初始化失败: {e}，尝试下一个")
+                continue
+        raise RuntimeError(
+            f"所有数据源都初始化失败。降级链: {self.fallback_chain}，最后错误: {last_err}"
+        )
+
+    def _try_fetch_with_fallback(
+        self,
+        symbols: List[str],
+        start_date: str,
+        end_date: str,
+        adjust: str,
+        exclude_st: bool,
+        exclude_new: bool,
+        min_listed_days: int,
+        fill_suspend: bool,
+    ) -> pd.DataFrame:
+        """
+        尝试拉取数据，按降级链切换：
+        - 限频 (RateLimitError)
+        - 积分 (QuotaExceededError)
+        - 网络 (NetworkError)
+        → 自动切换到下一个数据源
+        - InvalidParameterError → 不切换，直接抛
+        """
+        # 从当前 backend 开始，按链向下找
+        current_idx = self.fallback_chain.index(self.backend) if self.backend in self.fallback_chain else 0
+        tried_backends: List[str] = []
+
+        for idx in range(current_idx, len(self.fallback_chain)):
+            backend = self.fallback_chain[idx]
+            tried_backends.append(backend)
+            # 切换 provider
+            if idx > current_idx:
+                logger.warning(f"降级到数据源: {backend}")
+                try:
+                    self.provider = _load_adapter(backend)
+                    self.backend = backend
+                except Exception as e:
+                    logger.warning(f"切换到 {backend} 失败: {e}，尝试下一个")
+                    continue
+
+            try:
+                logger.info(f"使用数据源 {backend} 获取 {len(symbols)} 只股票的日线数据")
+                df = self.provider.get_daily(symbols, start_date, end_date, adjust=adjust)
+                if idx > 0 and not df.empty:
+                    logger.info(
+                        f"数据源 {backend} 拉取成功 {len(df)} 行（已降级 {idx} 次，链路: {' → '.join(tried_backends)}）"
+                    )
+                return df
+            except (QuotaExceededError, RateLimitError, NetworkError) as e:
+                # 触发降级
+                err_type = type(e).__name__
+                reason = e.message if hasattr(e, "message") else str(e)
+                retry_after = getattr(e, "retry_after", None)
+                if isinstance(e, QuotaExceededError):
+                    logger.warning(
+                        f"数据源 {backend} 触发【积分/权限不足】（{reason}），自动降级"
+                    )
+                elif isinstance(e, RateLimitError):
+                    logger.warning(
+                        f"数据源 {backend} 触发【频率限制】（{reason}），自动降级"
+                        + (f"，建议等待 {retry_after}s" if retry_after else "")
+                    )
+                else:
+                    logger.warning(f"数据源 {backend} 触发【网络错误】（{reason}），自动降级")
+                continue
+            except InvalidParameterError as e:
+                # token/auth 相关参数错误：仍应降级（下一家可能不需要 token）
+                # 其他参数错误（如股票代码格式）：不切换
+                msg = e.message.lower() if hasattr(e, "message") else str(e).lower()
+                is_token_error = any(
+                    kw in msg for kw in (
+                        "token", "认证", "authorization", "登录",
+                    )
+                )
+                if is_token_error:
+                    logger.warning(
+                        f"数据源 {backend} 触发【认证错误】（{e.message}），自动降级"
+                    )
+                    continue
+                logger.error(f"数据源 {backend} 参数错误（{e.message}），不切换")
+                raise
+            except DataSourceError as e:
+                logger.warning(f"数据源 {backend} 错误（{e.message}），尝试下一个")
+                continue
+            except Exception as e:
+                # 未识别的异常，保守切换
+                logger.warning(f"数据源 {backend} 未知异常: {e}，尝试下一个")
+                continue
+
+        raise RuntimeError(
+            f"降级链 {self.fallback_chain} 中所有数据源都失败。"
+            f"已尝试: {' → '.join(tried_backends)}"
+        )
 
     def try_external_data(self, external_data: Dict[str, Any]) -> Optional[pd.DataFrame]:
         """
@@ -138,7 +292,17 @@ class DataEngine:
             symbols = stock_df['code'].tolist()
 
         logger.info(f"开始获取 {len(symbols)} 只股票的日线数据，时间 {start_date} 至 {end_date}")
-        df = self.provider.get_daily(symbols, start_date, end_date, adjust=adjust)
+        # 使用降级链拉取数据
+        df = self._try_fetch_with_fallback(
+            symbols=symbols,
+            start_date=start_date,
+            end_date=end_date,
+            adjust=adjust,
+            exclude_st=exclude_st,
+            exclude_new=exclude_new,
+            min_listed_days=min_listed_days,
+            fill_suspend=fill_suspend,
+        )
         if df.empty:
             logger.error("未获取到任何数据")
             return df
