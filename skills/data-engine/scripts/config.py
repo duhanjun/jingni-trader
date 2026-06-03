@@ -3,39 +3,62 @@
 大部分全局配置从 master 继承，此处仅保留数据引擎特有设置
 """
 import os
-from typing import List, Optional
+import logging
+from typing import List, Optional, Callable
 
-# ── 数据源选择 ────────────────────────────
-DATA_BACKEND = os.environ.get("DATA_BACKEND", "tushare")
-# 可选: tushare, baostock, akshare（通用源，跨域可用）
-#       xtquant（迅投 QMT/xtp，需本地客户端）
-#       gm（掘金商业平台，需 GM_TOKEN）
 
-# ── 数据源降级链 ──────────────────────────
-# 当主数据源（DATA_BACKEND）遇到以下情况时，自动切换到下一个数据源：
-#   - 积分/权限不足 (QuotaExceededError)
-#   - 访问频率受限 (RateLimitError)
-#   - 网络错误 (NetworkError)
-# 格式：逗号分隔的数据源名列表。留空则不降级
+logger = logging.getLogger("data-engine.config")
+
+
+# ── 系统支持的全部数据源 ────────────────────────────
+# 任何时候都可以被启用，只是默认只启用通用免费源
+SUPPORTED_BACKENDS: List[str] = [
+    # 通用免费源（默认启用）
+    "baostock",   # 老虎量化开源项目，无频次限制，复权规范
+    "akshare",    # 聚合库，覆盖 A股/港股/美股/基金/期货等
+    "websearch",  # 终极回退：通过 WebSearch 工具查询具体数据点
+    # 显式 opt-in 源（需用户主动指定）
+    "tushare",    # Tushare Pro（需 TUSHARE_TOKEN，积分/限频）
+    "xtquant",    # 迅投 QMT/xtp（需本地客户端）
+    "gm",         # 掘金量化（需 GM_TOKEN + 付费 SDK）
+]
+
+# ── 默认数据源（按优先级排序）────────────────────────
+# 当用户未指定 DATA_BACKENDS 时，按此顺序自动降级：
+#   1. baostock  - 免费、跨域可用、复权规范
+#   2. akshare   - 覆盖更广，能补 baostock 缺少的字段
+#   3. websearch - 终极回退：特定数据点（如某只票某天收盘价）
 #
-# ⚠️ 设计说明：xtquant/gm 故意不放进默认链
-#   - xtquant：需要本地券商客户端，跨域部署时直接 ImportError
-#   - gm：需付费 SDK + 单独 token，对免费用户是噪音
-# 如确需启用，自行设置环境变量：
-#   export DATA_BACKEND_FALLBACK_CHAIN="tushare,xtquant,gm,baostock,akshare"
-_default_fallback = "tushare,baostock,akshare" if DATA_BACKEND == "tushare" else \
-                    "baostock,akshare" if DATA_BACKEND == "baostock" else \
-                    "akshare"
-DATA_BACKEND_FALLBACK_CHAIN: List[str] = [
-    s.strip() for s in os.environ.get("DATA_BACKEND_FALLBACK_CHAIN", _default_fallback).split(",")
+# ⚠️ 设计原则：
+#   - 默认不启用 tushare/xtquant/gm（这些源需要额外配置/付费）
+#   - 用户显式指定时优先使用用户的配置
+DEFAULT_DATA_SOURCES: List[str] = [
+    s.strip() for s in os.environ.get(
+        "DATA_BACKENDS",
+        "baostock,akshare,websearch"
+    ).split(",")
     if s.strip()
 ]
 
-# ── 特定场景源（默认不参与降级）────────────────
-# 这些源在以下场景可手动加入 DATA_BACKEND_FALLBACK_CHAIN：
-#   - 已有 xtquant 客户端 → 实时行情优先
-#   - 已有 GM_TOKEN     → 商业级数据优先
-SPECIAL_BACKENDS = ["xtquant", "gm"]
+
+# ── 系统支持的付费/特定源（用于友好提示）─────────────
+# 首次启动时告知用户：除了默认源，系统还支持这 3 个源
+PAID_OR_SPECIAL_BACKENDS: List[str] = ["tushare", "xtquant", "gm"]
+PAID_OR_SPECIAL_DESCRIPTIONS = {
+    "tushare": "Tushare Pro（需 TUSHARE_TOKEN，https://tushare.pro）",
+    "xtquant": "迅投 QMT/xtp（需本地券商客户端）",
+    "gm":      "掘金量化（需 GM_TOKEN + 付费 SDK，https://www.myquant.cn）",
+}
+
+
+# ── 兼容性：保留 DATA_BACKEND 单源选择 ───────────────
+# 如果用户只指定了 DATA_BACKEND（单数），则使用它作为唯一源，不降级
+# 推荐使用 DATA_BACKENDS 复数形式
+DATA_BACKEND: Optional[str] = os.environ.get("DATA_BACKEND")
+if DATA_BACKEND and not os.environ.get("DATA_BACKENDS"):
+    DEFAULT_DATA_SOURCES = [DATA_BACKEND]
+    logger.info(f"使用 DATA_BACKEND={DATA_BACKEND}（单源模式，不降级）")
+
 
 # ── 数据存储格式 ──────────────────────────
 DATA_FORMAT = os.environ.get("DATA_FORMAT", "parquet")  # parquet / csv / sql
@@ -61,3 +84,23 @@ GM_TOKEN: Optional[str] = os.environ.get("GM_TOKEN")
 
 # ── 自动创建目录 ──────────────────────────
 os.makedirs(CACHE_DIR, exist_ok=True)
+
+
+def notify_supported_backends() -> None:
+    """
+    首次使用时提示用户：系统支持的数据源全景
+
+    设计意图：让用户知道除了默认的 baostock/akshare/websearch 之外，
+    还有 tushare/xtquant/gm 这 3 个源可以显式启用。
+    """
+    logger.info("=" * 60)
+    logger.info("数据引擎已就绪。当前默认数据源（按优先级降级）：")
+    for i, s in enumerate(DEFAULT_DATA_SOURCES, 1):
+        logger.info(f"  {i}. {s}")
+    logger.info("")
+    logger.info(f"系统还支持以下 {len(PAID_OR_SPECIAL_BACKENDS)} 个源（需显式启用）：")
+    for name in PAID_OR_SPECIAL_BACKENDS:
+        logger.info(f"  • {name}: {PAID_OR_SPECIAL_DESCRIPTIONS[name]}")
+    logger.info("")
+    logger.info("启用方式：export DATA_BACKENDS=tushare,akshare,baostock,websearch")
+    logger.info("=" * 60)

@@ -2,11 +2,17 @@
 A股数据引擎主逻辑
 负责调度适配器、数据清洗、本地存储
 优先使用 Agent 系统内置工具提供的外部数据
+
+数据源架构（v2）：
+- 默认优先级: baostock → akshare → websearch
+- 显式 opt-in 源: tushare / xtquant / gm（需用户通过 DATA_BACKENDS 启用）
+- 任一源遇到积分/限频/网络错误时自动降级
+- websearch 是终极回退：baostock 和 akshare 都没数据时调用
 """
 import os
 import sys
 import logging
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Callable
 
 # 注意：不要在这里 sys.path.insert，会破坏 from scripts.xxx 的包导入
 # 由调用方负责正确设置 sys.path
@@ -15,8 +21,8 @@ import pandas as pd
 import numpy as np
 
 from scripts.config import (
-    DATA_BACKEND, DATA_FORMAT, ADJUST_MODE, CACHE_DIR, MAX_MISSING_RATIO,
-    DATA_BACKEND_FALLBACK_CHAIN,
+    DATA_FORMAT, ADJUST_MODE, CACHE_DIR, MAX_MISSING_RATIO,
+    DEFAULT_DATA_SOURCES, SUPPORTED_BACKENDS, notify_supported_backends,
 )
 from scripts.base.base_data_provider import BaseDataProvider
 from scripts.errors import (
@@ -25,20 +31,28 @@ from scripts.errors import (
 )
 
 
+# 适配器注册表
+# 注意：websearch 适配器需要 web_search_fn 注入，特殊处理
 _ADAPTER_REGISTRY = {
-    "tushare":   ("scripts.adapters.tushare_adapter",   "TushareAdapter"),
-    "baostock":  ("scripts.adapters.baostock_adapter",  "BaostockAdapter"),
-    "akshare":   ("scripts.adapters.akshare_adapter",   "AkshareAdapter"),
-    "xtquant":   ("scripts.adapters.xtquant_adapter",   "XtQuantAdapter"),
-    "gm":        ("scripts.adapters.gm_adapter",        "GmAdapter"),
+    "baostock":  ("scripts.adapters.baostock_adapter",   "BaostockAdapter",  {}),
+    "akshare":   ("scripts.adapters.akshare_adapter",    "AkshareAdapter",   {}),
+    "websearch": ("scripts.adapters.websearch_adapter",  "WebSearchAdapter", {"web_search_fn": None}),
+    "tushare":   ("scripts.adapters.tushare_adapter",    "TushareAdapter",   {}),
+    "xtquant":   ("scripts.adapters.xtquant_adapter",    "XtQuantAdapter",   {}),
+    "gm":        ("scripts.adapters.gm_adapter",         "GmAdapter",        {}),
 }
 
 
-def _load_adapter(backend: str) -> BaseDataProvider:
+def _load_adapter(backend: str, **extra_kwargs) -> BaseDataProvider:
     """动态加载指定数据源的适配器"""
     if backend not in _ADAPTER_REGISTRY:
-        raise ValueError(f"不支持的数据源: {backend}")
-    module_path, class_name = _ADAPTER_REGISTRY[backend]
+        raise ValueError(
+            f"不支持的数据源: {backend}。"
+            f"系统支持的数据源: {', '.join(SUPPORTED_BACKENDS)}"
+        )
+    module_path, class_name, default_kwargs = _ADAPTER_REGISTRY[backend]
+    # 合并默认参数和传入参数
+    merged_kwargs = {**default_kwargs, **extra_kwargs}
     import importlib
     try:
         mod = importlib.import_module(module_path)
@@ -47,10 +61,14 @@ def _load_adapter(backend: str) -> BaseDataProvider:
     cls = getattr(mod, class_name, None)
     if cls is None:
         raise DataSourceError(backend, f"适配器 {class_name} 不存在")
-    return cls()
+    return cls(**merged_kwargs)
 
 
 logger = logging.getLogger("data-engine")
+
+
+# 已通知标记（避免重复打印）
+_NOTIFIED = False
 
 
 class DataEngine:
@@ -59,43 +77,63 @@ class DataEngine:
     def __init__(
         self,
         provider: Optional[BaseDataProvider] = None,
-        backend: Optional[str] = None,
-        fallback_chain: Optional[List[str]] = None,
+        data_sources: Optional[List[str]] = None,
+        web_search_fn: Optional[Callable[[str], str]] = None,
     ):
         """
         参数:
-            provider: 自定义适配器（覆盖默认 DATA_BACKEND）
-            backend: 主数据源名（默认取 config.DATA_BACKEND）
-            fallback_chain: 降级链（默认取 config.DATA_BACKEND_FALLBACK_CHAIN）
+            provider: 自定义适配器（覆盖整个降级链）
+            data_sources: 数据源优先级链（默认取 config.DEFAULT_DATA_SOURCES）
+                         默认: ["baostock", "akshare", "websearch"]
+            web_search_fn: 注入给 websearch 适配器的搜索函数
+                          在 jingni-trader 中由 agent 的 WebSearch 工具提供
         """
-        self.backend = backend or DATA_BACKEND
-        self.fallback_chain = fallback_chain if fallback_chain is not None else list(DATA_BACKEND_FALLBACK_CHAIN)
-        # 确保降级链以主源开头，且不重复
-        if not self.fallback_chain or self.fallback_chain[0] != self.backend:
-            self.fallback_chain = [self.backend] + [
-                b for b in self.fallback_chain if b != self.backend
-            ]
-        self.provider = provider or self._init_provider_with_fallback(self.backend)
+        global _NOTIFIED
+        self.web_search_fn = web_search_fn
+        self.data_sources = data_sources if data_sources is not None else list(DEFAULT_DATA_SOURCES)
+
+        # 校验 data_sources 中所有项都是支持的源
+        unknown = [b for b in self.data_sources if b not in SUPPORTED_BACKENDS]
+        if unknown:
+            raise ValueError(
+                f"data_sources 包含未知源 {unknown}。"
+                f"系统支持: {', '.join(SUPPORTED_BACKENDS)}"
+            )
+
+        # 更新 websearch 默认注入函数
+        if "websearch" in self.data_sources and web_search_fn:
+            self._update_websearch_kwargs(web_search_fn)
+
+        self.provider = provider or self._init_provider_with_fallback()
+
+        # 首次初始化时打印支持的数据源全景
+        if not _NOTIFIED:
+            notify_supported_backends()
+            _NOTIFIED = True
+
+    def _update_websearch_kwargs(self, web_search_fn: Callable):
+        """更新 websearch 适配器默认注入函数"""
+        _ADAPTER_REGISTRY["websearch"] = (
+            _ADAPTER_REGISTRY["websearch"][0],
+            _ADAPTER_REGISTRY["websearch"][1],
+            {"web_search_fn": web_search_fn},
+        )
 
     # ------------------------------------------------------------------
     # 多源降级（核心）
     # ------------------------------------------------------------------
 
-    def _init_provider_with_fallback(self, primary: str) -> BaseDataProvider:
+    def _init_provider_with_fallback(self) -> BaseDataProvider:
         """
-        按降级链顺序尝试初始化 provider；
-        如果某源初始化失败（例如 tushare token 缺失），自动切换到下一个。
+        按 data_sources 顺序尝试初始化 provider；
+        第一个初始化成功的源被选中（不实际拉数据）
         """
         last_err: Optional[Exception] = None
-        for backend in self.fallback_chain:
+        for backend in self.data_sources:
             try:
                 logger.info(f"尝试加载数据源适配器: {backend}")
                 provider = _load_adapter(backend)
                 logger.info(f"数据源 {backend} 加载成功")
-                if backend != primary:
-                    logger.warning(
-                        f"主数据源 {primary} 初始化失败，已降级到 {backend}（{last_err}）"
-                    )
                 self.backend = backend
                 return provider
             except Exception as e:
@@ -103,7 +141,7 @@ class DataEngine:
                 logger.warning(f"数据源 {backend} 初始化失败: {e}，尝试下一个")
                 continue
         raise RuntimeError(
-            f"所有数据源都初始化失败。降级链: {self.fallback_chain}，最后错误: {last_err}"
+            f"所有数据源都初始化失败。降级链: {self.data_sources}，最后错误: {last_err}"
         )
 
     def _try_fetch_with_fallback(
@@ -118,23 +156,21 @@ class DataEngine:
         fill_suspend: bool,
     ) -> pd.DataFrame:
         """
-        尝试拉取数据，按降级链切换：
+        尝试拉取数据，按 data_sources 链切换：
         - 限频 (RateLimitError)
         - 积分 (QuotaExceededError)
         - 网络 (NetworkError)
+        - 认证错误 (InvalidParameterError 中带 token 关键字)
         → 自动切换到下一个数据源
-        - InvalidParameterError → 不切换，直接抛
+        - 其它 InvalidParameterError → 直接抛
         """
-        # 从当前 backend 开始，按链向下找
-        current_idx = self.fallback_chain.index(self.backend) if self.backend in self.fallback_chain else 0
         tried_backends: List[str] = []
 
-        for idx in range(current_idx, len(self.fallback_chain)):
-            backend = self.fallback_chain[idx]
+        for idx, backend in enumerate(self.data_sources):
             tried_backends.append(backend)
             # 切换 provider
-            if idx > current_idx:
-                logger.warning(f"降级到数据源: {backend}")
+            if idx > 0 or self.backend != backend:
+                logger.info(f"切换到数据源: {backend}（链路: {' → '.join(tried_backends)}）")
                 try:
                     self.provider = _load_adapter(backend)
                     self.backend = backend
@@ -145,14 +181,18 @@ class DataEngine:
             try:
                 logger.info(f"使用数据源 {backend} 获取 {len(symbols)} 只股票的日线数据")
                 df = self.provider.get_daily(symbols, start_date, end_date, adjust=adjust)
-                if idx > 0 and not df.empty:
-                    logger.info(
-                        f"数据源 {backend} 拉取成功 {len(df)} 行（已降级 {idx} 次，链路: {' → '.join(tried_backends)}）"
-                    )
-                return df
+                if not df.empty:
+                    if idx > 0:
+                        logger.info(
+                            f"✓ 数据源 {backend} 拉取成功 {len(df)} 行"
+                            f"（链路: {' → '.join(tried_backends)}）"
+                        )
+                    return df
+                else:
+                    logger.warning(f"数据源 {backend} 返回空数据，尝试下一个源")
+                    continue
             except (QuotaExceededError, RateLimitError, NetworkError) as e:
                 # 触发降级
-                err_type = type(e).__name__
                 reason = e.message if hasattr(e, "message") else str(e)
                 retry_after = getattr(e, "retry_after", None)
                 if isinstance(e, QuotaExceededError):
@@ -169,7 +209,6 @@ class DataEngine:
                 continue
             except InvalidParameterError as e:
                 # token/auth 相关参数错误：仍应降级（下一家可能不需要 token）
-                # 其他参数错误（如股票代码格式）：不切换
                 msg = e.message.lower() if hasattr(e, "message") else str(e).lower()
                 is_token_error = any(
                     kw in msg for kw in (
@@ -187,12 +226,11 @@ class DataEngine:
                 logger.warning(f"数据源 {backend} 错误（{e.message}），尝试下一个")
                 continue
             except Exception as e:
-                # 未识别的异常，保守切换
                 logger.warning(f"数据源 {backend} 未知异常: {e}，尝试下一个")
                 continue
 
         raise RuntimeError(
-            f"降级链 {self.fallback_chain} 中所有数据源都失败。"
+            f"data_sources {self.data_sources} 中所有数据源都失败或返回空。"
             f"已尝试: {' → '.join(tried_backends)}"
         )
 
@@ -258,10 +296,11 @@ class DataEngine:
         """
         获取并清洗日线数据
 
-        数据源优先级:
+        数据源优先级（默认）:
         1. external_data (系统内置工具提供)
-        2. Tushare/GM (环境变量配置)
-        3. BaoStock/AkShare (免费离线)
+        2. baostock (默认主源)
+        3. akshare (baostock 失败/缺数据)
+        4. websearch (终极回退，单点查询)
 
         参数:
             symbols: 股票代码列表，为空则获取全部A股
@@ -398,6 +437,8 @@ def run(ctx) -> Dict[str, Any]:
             - end_date: str
             - external_data: dict (可选，系统内置工具提供的数据)
             - 可选: artifacts 已有产物路径可跳过
+            - 可选: data_sources: List[str] (用户自定义降级链)
+            - 可选: web_search_fn: Callable (agent 注入的搜索函数)
 
     返回:
         {
@@ -421,7 +462,16 @@ def run(ctx) -> Dict[str, Any]:
         if external and external.get("daily") is not None:
             logger.info(f"检测到外部数据源: {external.get('source', 'unknown')}")
 
-        engine = DataEngine()
+        # 从 context 获取可选参数
+        data_sources = getattr(ctx, 'data_sources', None)
+        web_search_fn = None
+        if hasattr(ctx, 'external_data') and isinstance(ctx.external_data, dict):
+            web_search_fn = ctx.external_data.get('web_search_fn')
+
+        engine = DataEngine(
+            data_sources=data_sources,
+            web_search_fn=web_search_fn,
+        )
         df = engine.fetch_and_clean(
             symbols=ctx.stock_pool,
             start_date=ctx.start_date,
@@ -450,7 +500,8 @@ def run(ctx) -> Dict[str, Any]:
                 "rows": len(df),
                 "symbols_count": df['code'].nunique(),
                 "date_range": f"{df['date'].min().strftime('%Y-%m-%d')} ~ {df['date'].max().strftime('%Y-%m-%d')}",
-                "data_source": data_source
+                "data_source": data_source,
+                "active_backend": engine.backend,
             },
             "error": ""
         }
