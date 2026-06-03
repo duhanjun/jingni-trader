@@ -8,8 +8,8 @@ import sys
 import logging
 from typing import List, Optional, Dict, Any
 
-_this_file = os.path.abspath(__file__)
-sys.path.insert(0, os.path.dirname(_this_file))
+# 注意：不要在这里 sys.path.insert，会破坏 from scripts.xxx 的包导入
+# 由调用方负责正确设置 sys.path
 
 import pandas as pd
 import numpy as np
