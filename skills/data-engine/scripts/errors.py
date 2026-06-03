@@ -57,3 +57,53 @@ class InvalidParameterError(DataSourceError):
     """参数错误（不应切换数据源，因为下一家也会失败）"""
     def __init__(self, source: str, message: str, original: Optional[Exception] = None):
         super().__init__(source, message, retriable=False, original=original)
+
+
+class BlacklistedError(DataSourceError):
+    """
+    服务器黑名单错误（IP/账号/Token 被禁用）
+
+    典型场景：
+    - 短时间内请求过于频繁，IP 被临时拉黑
+    - Token 长期滥用被永久封禁
+    - GeoIP 限制（境外 IP 访问受限）
+
+    典型消息：
+    - "您的IP访问过于频繁，已被临时限制"
+    - "access denied"
+    - "forbidden"
+    - "IP banned"
+    """
+    def __init__(self, source: str, message: str, original: Optional[Exception] = None):
+        super().__init__(source, message, retriable=False, original=original)
+
+
+class DataNotFoundError(DataSourceError):
+    """
+    标的未覆盖错误（数据源不提供此标的数据）
+
+    典型场景：
+    - Baostock 不支持 ETF/可转债/部分港股
+    - AkShare 的某接口对特定品种未维护
+    - WebSearch 搜索引擎无相关数据
+    - 上市公司已退市/代码错误
+
+    典型消息：
+    - "no data found for symbol XXX"
+    - "该代码不存在"
+    - "no matching record"
+    """
+    def __init__(self, source: str, message: str, original: Optional[Exception] = None):
+        super().__init__(source, message, retriable=False, original=original)
+
+
+# 触发降级到下一源的异常类型集合
+# 凡是该集合内的异常都应触发降级
+FALLBACK_TRIGGERING_ERRORS = (
+    QuotaExceededError,
+    RateLimitError,
+    NetworkError,
+    BlacklistedError,
+    DataNotFoundError,
+    InvalidParameterError,  # token/auth 相关的 InvalidParameterError 也会触发（engine 内部判断）
+)

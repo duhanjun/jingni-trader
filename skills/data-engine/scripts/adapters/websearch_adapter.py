@@ -20,7 +20,7 @@ from typing import List, Callable, Optional
 import pandas as pd
 
 from ..base.base_data_provider import BaseDataProvider
-from ..errors import DataSourceError
+from ..errors import DataSourceError, DataNotFoundError
 
 
 logger = logging.getLogger("websearch-adapter")
@@ -130,11 +130,11 @@ class WebSearchAdapter(BaseDataProvider):
                 result["vol"] = float(m.group(1))
                 break
 
-        # 如果连收盘价都没解析出来，标记失败
+        # 如果连收盘价都没解析出来，标记为 DataNotFoundError
         if "close" not in result:
-            raise DataSourceError(
+            raise DataNotFoundError(
                 "websearch",
-                f"无法从搜索结果中解析出 {symbol} @ {date} 的数据（result: {text[:80]}）"
+                f"无法从搜索结果中解析出 {symbol} @ {date} 的数据（搜索引擎无相关数据或结果无法解析）"
             )
         # 默认值
         for k in ["open", "high", "low", "vol"]:
@@ -148,12 +148,17 @@ class WebSearchAdapter(BaseDataProvider):
 
         ⚠️ 注意：搜索引擎对历史数据覆盖有限，本方法适合"补缺"
         对于大段时间范围，会调用大量搜索请求
+
+        抛出的异常：
+        - DataNotFoundError: 搜索引擎无相关数据
+        - DataSourceError: web_search_fn 未注入
         """
         self._check_available()
         from ..config import MAX_WORKERS
         # 简化实现：逐个标的关键点查询
         # 实际工程中可并发，但搜索请求本身有节流
         rows = []
+        failed_symbols = []
         for symbol in symbols:
             # 取首尾两点作为代表（避免太多搜索请求）
             sample_dates = [start_date, end_date]
@@ -162,13 +167,21 @@ class WebSearchAdapter(BaseDataProvider):
                     query = self._build_query(symbol, d)
                     logger.info(f"WebSearch 查询: {query}")
                     raw = self.web_search_fn(query)
+                    # 检查搜索结果是否包含"未找到"等无数据提示
+                    if any(kw in raw for kw in ["未找到", "无相关", "无搜索结果", "没有找到", "no results", "未搜到"]):
+                        logger.warning(f"WebSearch 未找到 {symbol} @ {d}")
+                        continue
                     parsed = self._parse_search_result(symbol, d, raw)
                     rows.append(parsed)
-                except DataSourceError as e:
+                except DataNotFoundError as e:
                     logger.warning(f"WebSearch 未拿到 {symbol} @ {d}: {e.message}")
                     continue
         if not rows:
-            return pd.DataFrame(columns=['date', 'code', 'open', 'high', 'low', 'close', 'vol'])
+            # 所有查询都失败
+            raise DataNotFoundError(
+                "websearch",
+                f"WebSearch 未能找到 {len(symbols)} 个标的（{', '.join(symbols[:3])}...）的有效数据"
+            )
         return pd.DataFrame(rows)
 
     def get_stock_list(self) -> pd.DataFrame:

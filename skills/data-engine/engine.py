@@ -3,11 +3,15 @@ A股数据引擎主逻辑
 负责调度适配器、数据清洗、本地存储
 优先使用 Agent 系统内置工具提供的外部数据
 
-数据源架构（v2）：
-- 默认优先级: baostock → akshare → websearch
-- 显式 opt-in 源: tushare / xtquant / gm（需用户通过 DATA_BACKENDS 启用）
-- 任一源遇到积分/限频/网络错误时自动降级
-- websearch 是终极回退：baostock 和 akshare 都没数据时调用
+数据源架构（v3）：
+- 默认优先级: tushare → baostock → akshare → websearch
+- 显式 opt-in 源: xtquant / gm / tdxquant（需用户通过 DATA_BACKENDS 启用）
+- 每个源都有明确的降级条件（见 config.DATA_FALLBACK_RULES）：
+    * tushare 积分/权限/限频受限 → baostock
+    * baostock 黑名单/未覆盖 → akshare
+    * akshare 爬虫被限制 → websearch
+    * websearch 搜索不到 → 模拟数据（告知用户）
+- 触发降级的异常类型集中在 errors.FALLBACK_TRIGGERING_ERRORS
 """
 import os
 import sys
@@ -22,25 +26,34 @@ import numpy as np
 
 from scripts.config import (
     DATA_FORMAT, ADJUST_MODE, CACHE_DIR, MAX_MISSING_RATIO,
-    DEFAULT_DATA_SOURCES, SUPPORTED_BACKENDS, notify_supported_backends,
+    DEFAULT_DATA_SOURCES, SUPPORTED_BACKENDS, PAID_OR_SPECIAL_BACKENDS,
+    DATA_FALLBACK_RULES, ALLOW_SYNTHETIC_FALLBACK,
+    notify_supported_backends,
 )
 from scripts.base.base_data_provider import BaseDataProvider
 from scripts.errors import (
     DataSourceError, QuotaExceededError, RateLimitError, NetworkError,
-    InvalidParameterError,
+    InvalidParameterError, BlacklistedError, DataNotFoundError,
+    FALLBACK_TRIGGERING_ERRORS,
 )
 
 
 # 适配器注册表
 # 注意：websearch 适配器需要 web_search_fn 注入，特殊处理
+# tdxquant 是新增的 opt-in 源（通达信量化）
 _ADAPTER_REGISTRY = {
-    "baostock":  ("scripts.adapters.baostock_adapter",   "BaostockAdapter",  {}),
-    "akshare":   ("scripts.adapters.akshare_adapter",    "AkshareAdapter",   {}),
-    "websearch": ("scripts.adapters.websearch_adapter",  "WebSearchAdapter", {"web_search_fn": None}),
-    "tushare":   ("scripts.adapters.tushare_adapter",    "TushareAdapter",   {}),
-    "xtquant":   ("scripts.adapters.xtquant_adapter",    "XtQuantAdapter",   {}),
-    "gm":        ("scripts.adapters.gm_adapter",         "GmAdapter",        {}),
+    "tushare":   ("scripts.adapters.tushare_adapter",   "TushareAdapter",   {}),
+    "baostock":  ("scripts.adapters.baostock_adapter",  "BaostockAdapter",  {}),
+    "akshare":   ("scripts.adapters.akshare_adapter",   "AkshareAdapter",   {}),
+    "websearch": ("scripts.adapters.websearch_adapter", "WebSearchAdapter", {"web_search_fn": None}),
+    "xtquant":   ("scripts.adapters.xtquant_adapter",   "XtQuantAdapter",   {}),
+    "gm":        ("scripts.adapters.gm_adapter",        "GmAdapter",        {}),
+    "tdxquant":  ("scripts.adapters.tdxquant_adapter",  "TdxQuantAdapter",  {}),
 }
+
+
+# 触发降级的异常类型集合（从 errors 导入并复述，方便在引擎内引用）
+_TRIGGERING_ERRORS = FALLBACK_TRIGGERING_ERRORS
 
 
 def _load_adapter(backend: str, **extra_kwargs) -> BaseDataProvider:
@@ -72,7 +85,7 @@ _NOTIFIED = False
 
 
 class DataEngine:
-    """A股数据引擎"""
+    """A股数据引擎（v3：精准降级 + 模拟数据兜底）"""
 
     def __init__(
         self,
@@ -84,7 +97,7 @@ class DataEngine:
         参数:
             provider: 自定义适配器（覆盖整个降级链）
             data_sources: 数据源优先级链（默认取 config.DEFAULT_DATA_SOURCES）
-                         默认: ["baostock", "akshare", "websearch"]
+                         默认: ["tushare", "baostock", "akshare", "websearch"]
             web_search_fn: 注入给 websearch 适配器的搜索函数
                           在 jingni-trader 中由 agent 的 WebSearch 工具提供
         """
@@ -105,6 +118,8 @@ class DataEngine:
             self._update_websearch_kwargs(web_search_fn)
 
         self.provider = provider or self._init_provider_with_fallback()
+        # 用于在 fetch_and_clean 中告知调用方本次是否走了模拟数据
+        self.is_synthetic = False
 
         # 首次初始化时打印支持的数据源全景
         if not _NOTIFIED:
@@ -120,7 +135,7 @@ class DataEngine:
         )
 
     # ------------------------------------------------------------------
-    # 多源降级（核心）
+    # 多源降级（核心 v3）
     # ------------------------------------------------------------------
 
     def _init_provider_with_fallback(self) -> BaseDataProvider:
@@ -144,6 +159,46 @@ class DataEngine:
             f"所有数据源都初始化失败。降级链: {self.data_sources}，最后错误: {last_err}"
         )
 
+    def _should_fallback(self, backend: str, exc: Exception) -> bool:
+        """
+        判断某个异常是否应触发【降级到下一源】
+
+        决策依据：
+        1. 异常类型在 FALLBACK_TRIGGERING_ERRORS 中
+        2. 进一步核对 config.DATA_FALLBACK_RULES 中该源对应的 trigger_errors
+           （防止 tushare 的限频被误判为 baostock 的限频）
+        3. 对 InvalidParameterError 做特殊判断：仅 token/认证类错误才降级
+        """
+        # 1) 类型白名单
+        if not isinstance(exc, _TRIGGERING_ERRORS):
+            return False
+
+        # 2) 对应源的降级规则
+        rule = DATA_FALLBACK_RULES.get(backend, {})
+        trigger_errs_str = rule.get("trigger_errors", "")
+        trigger_err_names = {
+            name.strip() for name in trigger_errs_str.split(",") if name.strip()
+        }
+        exc_type_name = type(exc).__name__
+        if trigger_err_names and exc_type_name not in trigger_err_names:
+            # 该异常类型不在此源允许的降级错误列表里
+            # 例外：InvalidParameterError 永远允许（因为引擎已判定为 token/auth）
+            if exc_type_name != "InvalidParameterError":
+                return False
+
+        # 3) InvalidParameterError 仅在 token/认证场景下才降级
+        if isinstance(exc, InvalidParameterError):
+            msg = exc.message.lower() if hasattr(exc, "message") else str(exc).lower()
+            is_token_error = any(
+                kw in msg for kw in (
+                    "token", "认证", "authorization", "登录", "登录失败",
+                    "access key", "api key", "您的token",
+                )
+            )
+            return is_token_error
+
+        return True
+
     def _try_fetch_with_fallback(
         self,
         symbols: List[str],
@@ -156,15 +211,13 @@ class DataEngine:
         fill_suspend: bool,
     ) -> pd.DataFrame:
         """
-        尝试拉取数据，按 data_sources 链切换：
-        - 限频 (RateLimitError)
-        - 积分 (QuotaExceededError)
-        - 网络 (NetworkError)
-        - 认证错误 (InvalidParameterError 中带 token 关键字)
-        → 自动切换到下一个数据源
-        - 其它 InvalidParameterError → 直接抛
+        尝试拉取数据，按 data_sources 链切换（v3 精准降级）：
+        每个源失败时，依据 DATA_FALLBACK_RULES 中该源对应的 trigger_errors
+        来决定是否降级。
+        走完整个降级链后仍未拿到数据 → 走模拟数据兜底。
         """
         tried_backends: List[str] = []
+        last_errors: Dict[str, str] = {}
 
         for idx, backend in enumerate(self.data_sources):
             tried_backends.append(backend)
@@ -175,6 +228,7 @@ class DataEngine:
                     self.provider = _load_adapter(backend)
                     self.backend = backend
                 except Exception as e:
+                    last_errors[backend] = f"初始化失败: {e}"
                     logger.warning(f"切换到 {backend} 失败: {e}，尝试下一个")
                     continue
 
@@ -187,52 +241,149 @@ class DataEngine:
                             f"✓ 数据源 {backend} 拉取成功 {len(df)} 行"
                             f"（链路: {' → '.join(tried_backends)}）"
                         )
+                    self.is_synthetic = False
                     return df
                 else:
+                    last_errors[backend] = "返回空数据"
                     logger.warning(f"数据源 {backend} 返回空数据，尝试下一个源")
                     continue
-            except (QuotaExceededError, RateLimitError, NetworkError) as e:
-                # 触发降级
-                reason = e.message if hasattr(e, "message") else str(e)
-                retry_after = getattr(e, "retry_after", None)
-                if isinstance(e, QuotaExceededError):
+            except Exception as e:
+                # 统一转字符串、记录
+                msg = getattr(e, "message", str(e))
+                last_errors[backend] = f"{type(e).__name__}: {msg}"
+
+                if self._should_fallback(backend, e):
+                    reason = DATA_FALLBACK_RULES.get(backend, {}).get("downgrade_reason", "")
                     logger.warning(
-                        f"数据源 {backend} 触发【积分/权限不足】（{reason}），自动降级"
-                    )
-                elif isinstance(e, RateLimitError):
-                    logger.warning(
-                        f"数据源 {backend} 触发【频率限制】（{reason}），自动降级"
-                        + (f"，建议等待 {retry_after}s" if retry_after else "")
-                    )
-                else:
-                    logger.warning(f"数据源 {backend} 触发【网络错误】（{reason}），自动降级")
-                continue
-            except InvalidParameterError as e:
-                # token/auth 相关参数错误：仍应降级（下一家可能不需要 token）
-                msg = e.message.lower() if hasattr(e, "message") else str(e).lower()
-                is_token_error = any(
-                    kw in msg for kw in (
-                        "token", "认证", "authorization", "登录",
-                    )
-                )
-                if is_token_error:
-                    logger.warning(
-                        f"数据源 {backend} 触发【认证错误】（{e.message}），自动降级"
+                        f"数据源 {backend} 触发【{reason or type(e).__name__}】（{msg}），自动降级"
                     )
                     continue
-                logger.error(f"数据源 {backend} 参数错误（{e.message}），不切换")
-                raise
-            except DataSourceError as e:
-                logger.warning(f"数据源 {backend} 错误（{e.message}），尝试下一个")
-                continue
-            except Exception as e:
-                logger.warning(f"数据源 {backend} 未知异常: {e}，尝试下一个")
-                continue
 
-        raise RuntimeError(
+                # 不可降级：直接抛
+                if isinstance(e, DataSourceError):
+                    logger.error(f"数据源 {backend} 错误（{msg}），不切换")
+                else:
+                    logger.error(f"数据源 {backend} 未知异常（{msg}），不切换")
+                raise
+
+        # 走完整个降级链仍失败
+        logger.error(
             f"data_sources {self.data_sources} 中所有数据源都失败或返回空。"
             f"已尝试: {' → '.join(tried_backends)}"
         )
+        for k, v in last_errors.items():
+            logger.error(f"  • {k}: {v}")
+
+        # ---- 模拟数据兜底 ----
+        if not ALLOW_SYNTHETIC_FALLBACK:
+            raise RuntimeError(
+                f"所有数据源都失败，且 ALLOW_SYNTHETIC_FALLBACK=False。"
+                f"已尝试: {' → '.join(tried_backends)}，错误: {last_errors}"
+            )
+
+        logger.warning("=" * 60)
+        logger.warning("⚠️  所有外部数据源均不可用，启用【模拟数据 fallback】")
+        logger.warning(
+            "  这意味着回测结果仅供流程验证，"
+            "不能用于真实交易决策。"
+        )
+        logger.warning(
+            f"  降级链: {' → '.join(tried_backends)}"
+        )
+        for k, v in last_errors.items():
+            logger.warning(f"    • {k}: {v}")
+        logger.warning("=" * 60)
+
+        self.is_synthetic = True
+        self.backend = "synthetic"
+        return self._generate_synthetic_data(symbols, start_date, end_date)
+
+    # ------------------------------------------------------------------
+    # 模拟数据生成（v3 兜底）
+    # ------------------------------------------------------------------
+
+    def _generate_synthetic_data(
+        self,
+        symbols: List[str],
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        """
+        生成与真实 A 股日线统计特征近似的模拟数据。
+
+        设计原则：
+        - 仅供【流程跑通】和【集成测试】使用，不可用于真实交易
+        - 满足 schema：date, code, open, high, low, close, vol, is_st, is_limit_up/down
+        - 几何布朗运动 + 微小趋势，让后续回测引擎能正常推进
+        - 每个标的独立一个价格序列
+        """
+        np.random.seed(20240101)
+        s_date = pd.to_datetime(start_date)
+        e_date = pd.to_datetime(end_date)
+        all_dates = pd.bdate_range(start=s_date, end=e_date)
+        n = len(all_dates)
+
+        if n < 5:
+            return pd.DataFrame(columns=[
+                'date', 'code', 'open', 'high', 'low', 'close', 'vol',
+                'is_st', 'is_limit_up', 'is_limit_down', 'change_pct',
+            ])
+
+        rows = []
+        for sym in symbols:
+            # 起始价：股票 10~50 元随机，债券 ETF 100~120 元
+            is_etf = sym.startswith(("5", "1", "15")) and (sym.endswith(".SH") or sym.endswith(".SZ"))
+            if is_etf:
+                start_price = np.random.uniform(95.0, 115.0)
+            else:
+                start_price = np.random.uniform(8.0, 50.0)
+
+            daily_drift = np.random.uniform(-0.0005, 0.0015)
+            daily_vol = np.random.uniform(0.008, 0.020)
+
+            returns = np.random.normal(daily_drift, daily_vol, n)
+            for i in range(1, n):
+                returns[i] += 0.15 * returns[i - 1]
+
+            prices = [start_price]
+            for r in returns[1:]:
+                prices.append(prices[-1] * (1 + r))
+            prices = np.array(prices)
+
+            df_one = pd.DataFrame({
+                'date': all_dates,
+                'code': sym,
+                'close': prices,
+            })
+            df_one['open'] = (
+                df_one['close'].shift(1).fillna(df_one['close'].iloc[0]) *
+                (1 + np.random.normal(0, 0.003, len(df_one)))
+            )
+            intraday_range = np.abs(np.random.normal(0, 0.005, len(df_one)))
+            df_one['high'] = np.maximum(df_one['open'], df_one['close']) * (1 + intraday_range)
+            df_one['low'] = np.minimum(df_one['open'], df_one['close']) * (1 - intraday_range)
+            df_one['vol'] = np.random.lognormal(10, 0.5, len(df_one)).astype(int)
+
+            df_one['pre_close'] = df_one['close'].shift(1).fillna(df_one['close'].iloc[0])
+            df_one['change_pct'] = (df_one['close'] - df_one['pre_close']) / df_one['pre_close'] * 100
+            df_one['is_st'] = False
+            df_one['is_limit_up'] = df_one['change_pct'] >= 9.9
+            df_one['is_limit_down'] = df_one['change_pct'] <= -9.9
+
+            for c in ['open', 'high', 'low', 'close']:
+                df_one[c] = df_one[c].round(4)
+
+            rows.append(df_one)
+
+        if not rows:
+            return pd.DataFrame(columns=[
+                'date', 'code', 'open', 'high', 'low', 'close', 'vol',
+                'is_st', 'is_limit_up', 'is_limit_down', 'change_pct',
+            ])
+
+        df = pd.concat(rows, ignore_index=True)
+        return df[['date', 'code', 'open', 'high', 'low', 'close', 'vol',
+                   'pre_close', 'change_pct', 'is_st', 'is_limit_up', 'is_limit_down']]
 
     def try_external_data(self, external_data: Dict[str, Any]) -> Optional[pd.DataFrame]:
         """
@@ -296,11 +447,13 @@ class DataEngine:
         """
         获取并清洗日线数据
 
-        数据源优先级（默认）:
+        数据源优先级（默认 v3）:
         1. external_data (系统内置工具提供)
-        2. baostock (默认主源)
-        3. akshare (baostock 失败/缺数据)
-        4. websearch (终极回退，单点查询)
+        2. tushare (默认主源)
+        3. baostock (tushare 失败/缺数据)
+        4. akshare (baostock 失败/缺数据)
+        5. websearch (akshare 失败/缺数据)
+        6. synthetic (所有源都失败时用模拟数据兜底)
 
         参数:
             symbols: 股票代码列表，为空则获取全部A股
@@ -324,11 +477,15 @@ class DataEngine:
             logger.info("外部数据不可用，回退到内置适配器")
 
         if not symbols:
-            stock_df = self.provider.get_stock_list()
-            if stock_df.empty:
-                logger.error("无法获取股票列表")
+            try:
+                stock_df = self.provider.get_stock_list()
+                if stock_df.empty:
+                    logger.error("无法获取股票列表")
+                    return pd.DataFrame()
+                symbols = stock_df['code'].tolist()
+            except Exception as e:
+                logger.error(f"获取股票列表失败: {e}，无法获取全市场数据")
                 return pd.DataFrame()
-            symbols = stock_df['code'].tolist()
 
         logger.info(f"开始获取 {len(symbols)} 只股票的日线数据，时间 {start_date} 至 {end_date}")
         # 使用降级链拉取数据
@@ -349,7 +506,9 @@ class DataEngine:
         logger.info("开始数据清洗...")
         initial_rows = len(df)
 
-        if exclude_new:
+        # 模拟数据时跳过【新股剔除】和【停牌剔除】等需要真实 list_date 的清洗
+        # 否则会因为没有 list_date 字段把全部数据剔光
+        if not self.is_synthetic and exclude_new:
             try:
                 stock_info = self.provider.get_stock_list()
                 if not stock_info.empty and 'list_date' in stock_info.columns:
@@ -361,8 +520,8 @@ class DataEngine:
             except Exception as e:
                 logger.warning(f"获取股票列表失败，跳过新股剔除: {e}")
 
-        if not fill_suspend:
-            df = df[df['volume'] > 0]
+        if not self.is_synthetic and not fill_suspend:
+            df = df[df['volume'] > 0] if 'volume' in df.columns else df[df['vol'] > 0]
         else:
             df = df.sort_values(['code', 'date'])
             df = df.set_index(['code', 'date'])
@@ -376,7 +535,7 @@ class DataEngine:
         if 'is_st' not in df.columns or df['is_st'].isna().all():
             df = self._mark_st(df)
 
-        if exclude_st:
+        if exclude_st and not self.is_synthetic:
             st_mask = df['is_st'] == True
             df = df[~st_mask]
 
@@ -502,6 +661,8 @@ def run(ctx) -> Dict[str, Any]:
                 "date_range": f"{df['date'].min().strftime('%Y-%m-%d')} ~ {df['date'].max().strftime('%Y-%m-%d')}",
                 "data_source": data_source,
                 "active_backend": engine.backend,
+                "is_synthetic": engine.is_synthetic,
+                "fallback_chain": engine.data_sources,
             },
             "error": ""
         }
