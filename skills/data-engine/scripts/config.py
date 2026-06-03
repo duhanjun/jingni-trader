@@ -7,7 +7,9 @@ from typing import List, Optional
 
 # ── 数据源选择 ────────────────────────────
 DATA_BACKEND = os.environ.get("DATA_BACKEND", "tushare")
-# 可选: tushare, baostock, akshare, xtquant, gm
+# 可选: tushare, baostock, akshare（通用源，跨域可用）
+#       xtquant（迅投 QMT/xtp，需本地客户端）
+#       gm（掘金商业平台，需 GM_TOKEN）
 
 # ── 数据源降级链 ──────────────────────────
 # 当主数据源（DATA_BACKEND）遇到以下情况时，自动切换到下一个数据源：
@@ -15,6 +17,12 @@ DATA_BACKEND = os.environ.get("DATA_BACKEND", "tushare")
 #   - 访问频率受限 (RateLimitError)
 #   - 网络错误 (NetworkError)
 # 格式：逗号分隔的数据源名列表。留空则不降级
+#
+# ⚠️ 设计说明：xtquant/gm 故意不放进默认链
+#   - xtquant：需要本地券商客户端，跨域部署时直接 ImportError
+#   - gm：需付费 SDK + 单独 token，对免费用户是噪音
+# 如确需启用，自行设置环境变量：
+#   export DATA_BACKEND_FALLBACK_CHAIN="tushare,xtquant,gm,baostock,akshare"
 _default_fallback = "tushare,baostock,akshare" if DATA_BACKEND == "tushare" else \
                     "baostock,akshare" if DATA_BACKEND == "baostock" else \
                     "akshare"
@@ -22,6 +30,12 @@ DATA_BACKEND_FALLBACK_CHAIN: List[str] = [
     s.strip() for s in os.environ.get("DATA_BACKEND_FALLBACK_CHAIN", _default_fallback).split(",")
     if s.strip()
 ]
+
+# ── 特定场景源（默认不参与降级）────────────────
+# 这些源在以下场景可手动加入 DATA_BACKEND_FALLBACK_CHAIN：
+#   - 已有 xtquant 客户端 → 实时行情优先
+#   - 已有 GM_TOKEN     → 商业级数据优先
+SPECIAL_BACKENDS = ["xtquant", "gm"]
 
 # ── 数据存储格式 ──────────────────────────
 DATA_FORMAT = os.environ.get("DATA_FORMAT", "parquet")  # parquet / csv / sql
