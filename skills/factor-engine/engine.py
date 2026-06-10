@@ -21,6 +21,10 @@ from scripts.config import (
     QUANTILES, MIN_IC, MIN_IC_IR, MAX_CORRELATION
 )
 
+# 新增: 表达式引擎和扩展因子库
+from expression import FactorExpressionEngine as ExpressionEngine
+from factors import Alpha158FactorEngine
+
 logger = logging.getLogger("a-share-factor-engine")
 
 
@@ -115,6 +119,46 @@ class FactorEngine:
 
         logger.info(f"A股因子计算完成，共 {len(result.columns) - 2} 个因子")
         return result
+
+    def compute_expression_factors(
+        self, data: pd.DataFrame, expressions: dict = None
+    ) -> pd.DataFrame:
+        """
+        使用表达式引擎计算因子（借鉴 quant-stream）
+        支持声明式因子定义: RANK(DELTA($close, 5))
+
+        参数:
+            data: 含 code, date, close, volume 等列的 DataFrame
+            expressions: {因子名: 表达式} 字典，默认使用预设表达式
+
+        返回:
+            含所有表达式因子的 DataFrame
+        """
+        engine = ExpressionEngine()
+        if expressions is None:
+            return engine.compute_preset(data)
+        result = data[["code", "date"]].copy()
+        for name, expr in expressions.items():
+            factor_result = engine.compute(data, expr, name=name)
+            result = result.merge(factor_result, on=["code", "date"], how="left")
+        return result
+
+    def compute_extended_factors(
+        self, data: pd.DataFrame, factor_names: list = None
+    ) -> pd.DataFrame:
+        """
+        计算扩展因子库（借鉴 Qlib Alpha158）
+        47 个因子，覆盖动量/反转/波动率/成交量/技术指标/资金流向 6 大类
+
+        参数:
+            data: 含 code, date, close, volume, high, low, open 等列的 DataFrame
+            factor_names: 要计算的因子名列表，默认全部
+
+        返回:
+            含所有扩展因子的 DataFrame
+        """
+        engine = Alpha158FactorEngine()
+        return engine.compute(data, factor_names)
 
     def neutralize(
         self,

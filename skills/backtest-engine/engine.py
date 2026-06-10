@@ -22,6 +22,9 @@ from scripts.config import (
 
 logger = logging.getLogger("backtest-engine")
 
+# 新增: 增强回测引擎（借鉴 quant-stream）
+from enhanced import EnhancedBacktestEngine, BacktestConfig as EnhancedBacktestConfig
+
 try:
     import quantstats as qs
     HAS_QS = True
@@ -122,6 +125,35 @@ class BacktestEngine:
         qs.reports.html(returns, output=report_path, title="A股策略回测报告")
         logger.info(f"回测报告已生成: {report_path}")
         return report_path
+
+    def run_enhanced(
+        self,
+        price_data: pd.DataFrame,
+        signals: pd.DataFrame,
+        init_capital: float = INIT_CAPITAL,
+        t_plus_1: bool = True,
+        price_limit: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        使用增强回测引擎执行回测（借鉴 quant-stream）
+
+        相对于传统回测的改进:
+        - 前视偏差防护: 信号在 t, 执行在 t+1
+        - last_known_price: 停牌股票使用最后已知价格
+        - cost_reserve: 资本预留确保覆盖费用
+        - 涨跌停过滤
+        """
+        config = EnhancedBacktestConfig(
+            init_capital=init_capital,
+            commission_rate=COMMISSION_RATE,
+            stamp_tax_rate=STAMP_TAX_RATE,
+            min_commission=MIN_COMMISSION,
+            slippage=SLIPPAGE,
+            t_plus_1=t_plus_1,
+            price_limit=price_limit,
+        )
+        engine = EnhancedBacktestEngine(config)
+        return engine.run(price_data, signals)
 
 
 def run(ctx) -> Dict[str, Any]:

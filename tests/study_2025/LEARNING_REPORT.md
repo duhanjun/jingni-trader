@@ -6,6 +6,78 @@
 
 ---
 
+## 追加：集成验证报告 (2025-06-10)
+
+### 集成概述
+
+基于用户确认，已将三大验证模块正式集成到 jingni-trader 主代码中。所有代码位于 `feature/quant-stream-inspired` 分支。
+
+### 集成内容与文件清单
+
+| 模块 | 新增文件 | 修改文件 |
+|------|---------|---------|
+| 因子表达式引擎 | `skills/factor-engine/expression/__init__.py` | — |
+|  | `skills/factor-engine/expression/operators.py` (OperatorRegistry, 20+算子) | — |
+|  | `skills/factor-engine/expression/parser.py` (FactorExpressionParser) | — |
+|  | `skills/factor-engine/expression/engine.py` (FactorExpressionEngine, 12个预设表达式) | — |
+| 扩展因子库 | `skills/factor-engine/factors/__init__.py` | — |
+|  | `skills/factor-engine/factors/alphafactors.py` (Alpha158FactorEngine, 47个因子) | — |
+| 增强回测引擎 | `skills/backtest-engine/enhanced/__init__.py` | — |
+|  | `skills/backtest-engine/enhanced/calendar.py` (TradingCalendar) | — |
+|  | `skills/backtest-engine/enhanced/price_tracker.py` (PriceTracker) | — |
+|  | `skills/backtest-engine/enhanced/backtest.py` (EnhancedBacktestEngine + BacktestConfig) | — |
+| FactorEngine 集成 | — | `skills/factor-engine/engine.py`: 新增 `compute_expression_factors()` 和 `compute_extended_factors()` 方法 |
+| BacktestEngine 集成 | — | `skills/backtest-engine/engine.py`: 新增 `run_enhanced()` 方法 |
+
+### 集成后 API
+
+```python
+from engine import FactorEngine
+fe = FactorEngine()
+
+# 1. 原有方法（向后兼容）
+factors = fe.compute_a_share_factors(data)
+
+# 2. 新增: 表达式因子
+factors = fe.compute_expression_factors(data)
+factors = fe.compute_expression_factors(data, {"my_factor": "RANK(DELTA($close, 10))"})
+
+# 3. 新增: 扩展因子
+factors = fe.compute_extended_factors(data)
+factors = fe.compute_extended_factors(data, ["momentum_5d", "rsi_14", "bb_position"])
+```
+
+```python
+from engine import BacktestEngine
+be = BacktestEngine()
+
+# 1. 原有方法（向后兼容）
+result = be.run(data, signals)
+
+# 2. 新增: 增强回测
+result = be.run_enhanced(data, signals, t_plus_1=True, price_limit=True)
+```
+
+### 集成测试结果
+
+| 测试项 | 结果 | 详情 |
+|--------|------|------|
+| 表达式引擎导入 | 通过 | 13 列（12 个预设表达式 + code/date） |
+| 扩展因子库导入 | 通过 | 49 列（47 个因子 + code/date） |
+| compute_expression_factors() | 通过 | 与 FactorEngine 无缝集成 |
+| compute_extended_factors() | 通过 | 与 FactorEngine 无缝集成 |
+| 增强回测导入 | 通过 | TradingCalendar + PriceTracker + EnhancedBacktestEngine |
+| run_enhanced() | 通过 | 29 笔交易，Sharpe=1.738，MaxDD=3.31% |
+| 向后兼容 | 通过 | 原有 API 不受影响 |
+
+### 文件数统计
+
+- **新增**: 10 个新文件
+- **修改**: 2 个文件（factor-engine/engine.py, backtest-engine/engine.py）
+- **总计变更**: 12 个文件  
+
+---
+
 ## 一、学习项目清单及核心亮点
 
 ### 1. Microsoft Qlib (44K+ Stars)
