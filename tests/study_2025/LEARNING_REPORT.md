@@ -341,3 +341,73 @@ python tests/study_2025/test_extended_factors.py
 ---
 
 *报告结束。用户可通过确认上述建议来推动优化方案的落地实施。*
+
+---
+
+## 追加：第二批集成 (2025-06-10, #2)
+
+### 集成内容
+
+基于用户确认，新增配置化工作流和 LLM Agent 因子挖掘两个模块：
+
+| 模块 | 新增文件 | 修改文件 |
+|------|---------|---------|
+| Pipeline 流水线引擎 | `scripts/pipeline/__init__.py` | — |
+|  | `scripts/pipeline/runner.py` (PipelineRunner + PipelineConfig) | — |
+|  | `config/pipeline_momentum_factor.yaml` (示例配置) | — |
+| LLM Agent 因子挖掘 | `skills/factor-engine/agent/__init__.py` | — |
+|  | `skills/factor-engine/agent/miner.py` (FactorDiscoveryAgent) | — |
+
+### Pipeline 引擎测试
+
+```
+$ python scripts/pipeline/runner.py config/pipeline_momentum_factor.yaml --stages data,factor,backtest
+
+流水线加载: 20日动量因子选股回测
+  使用表达式引擎计算20日动量因子，结合增强回测引擎验证策略表现
+阶段: ['data', 'factor', 'backtest']
+  [OK] data
+  [OK] factor
+  [OK] backtest
+
+流水线摘要: 20日动量因子选股回测
+  [OK] data
+  [OK] factor
+  [OK] backtest
+完成: 3 个阶段执行
+```
+
+### LLM Agent 因子挖掘测试
+
+```
+总假设: 9
+接受: 6 / 拒绝: 3
+去重后: 6
+  [ACCEPT] agent_reversal_5d_0: IC=0.0644, IR=1.610
+  [ACCEPT] agent_volume_60d_2: IC=0.0656, IR=1.459
+  [ACCEPT] agent_composite_20d_3: IC=0.0302, IR=0.863
+  [ACCEPT] agent_composite_5d_4: IC=0.0551, IR=1.573
+  [ACCEPT] agent_volatility_60d_5: IC=0.0361, IR=0.602
+  [ACCEPT] agent_composite_60d_6: IC=0.0542, IR=1.549
+  [REJECT] agent_reversal_10d_7: IC=0.0139, IR=0.348
+  [REJECT] agent_volatility_10d_8: IC=0.0053, IR=0.089
+  [REJECT] agent_volume_60d_9: IC=0.0039, IR=0.087
+```
+
+### 总计集成文件
+
+| 类别 | 数量 |
+|------|------|
+| 第一批（因子 + 回测） | 12 个文件 (10新建 + 2修改) |
+| 第二批（Pipeline + Agent） | 4 个文件 (4新建) |
+| **合计** | **16 个文件** |
+
+### 五大优化方向全部完成
+
+| 方向 | 借鉴 | 状态 |
+|------|------|------|
+| 因子表达式引擎 | quant-stream | ✅ 已集成 |
+| 增强回测引擎 | quant-stream | ✅ 已集成 |
+| 扩展因子库 | Qlib Alpha158 | ✅ 已集成 |
+| 配置化流水线 | Qlib qrun | ✅ 已集成 |
+| LLM Agent 因子挖掘 | RD-Agent | ✅ 已集成 |
