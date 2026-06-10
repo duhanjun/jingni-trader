@@ -1,0 +1,49 @@
+{
+  "test_type": "point_in_time_validation",
+  "reference": "Microsoft Qlib (PIT Database)",
+  "leakage_demonstration": {
+    "n_safe_records": 80,
+    "n_leaky_records": 80,
+    "n_records_with_diff": 80,
+    "mean_diff": 0.02370626256968866,
+    "max_diff": 0.12785333333333337,
+    "mean_diff_pct": 8.194949507220675,
+    "max_diff_pct": 53.95414263609511,
+    "n_diff": 80,
+    "total_slices": 80,
+    "conclusion": "PIT violation causes factor value differences, check n_diff for count"
+  },
+  "factor_audit": {
+    "findings": [
+      {
+        "check": "pct_change(1)_leakage",
+        "description": "pct_change(1) 在当前日使用 (close_current / close_prev - 1)，",
+        "verdict": "SAFE",
+        "reason": "仅依赖历史数据，无未来泄露"
+      },
+      {
+        "check": "forward_return_as_label",
+        "description": "forward_return_20d 使用未来20天价格（shift(-20)）",
+        "verdict": "EXPECTED",
+        "reason": "作为模型训练的标签(y)，使用未来信息是合法的；但不能作为输入特征(X)"
+      },
+      {
+        "check": "rolling_20d_leakage",
+        "description": "rolling(20) 在当前日使用 t-19..t 的收益率数据",
+        "verdict": "SAFE",
+        "reason": "仅依赖历史数据，无未来泄露"
+      },
+      {
+        "check": "bfill_causes_leakage",
+        "description": "使用 fillna(method='bfill') 会导致未来信息泄露到当前截面",
+        "verdict": "WARNING",
+        "reason": "bfill填充后的因子与原始因子的截面相关性偏差: 1.0000"
+      }
+    ],
+    "summary": "jingni-trader factor-engine 当前实现中，量价因子计算基本安全，但需注意：(1) forward_return 仅用作标签；(2) 避免 bfill/ffill 跨时间填充；(3) 如需引入财务数据因子，必须实现 PIT 逻辑。"
+  },
+  "pit_builder_test": {
+    "pit_builder_test": "passed",
+    "n_records": 35
+  }
+}
