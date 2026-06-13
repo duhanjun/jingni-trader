@@ -1,0 +1,23 @@
+[
+  {
+    "n_stocks": 50,
+    "sequential_time": 1.6833,
+    "vectorized_time": 0.7948,
+    "speedup": 2.1,
+    "equivalent": true
+  },
+  {
+    "n_stocks": 100,
+    "sequential_time": 2.8204,
+    "vectorized_time": 1.5741,
+    "speedup": 1.8,
+    "equivalent": true
+  },
+  {
+    "n_stocks": 200,
+    "sequential_time": 5.0478,
+    "vectorized_time": 3.1935,
+    "speedup": 1.6,
+    "equivalent": true
+  }
+]
