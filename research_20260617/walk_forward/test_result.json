@@ -1,0 +1,68 @@
+{
+  "summary": {
+    "total": 12,
+    "passed": 12,
+    "failed": 0,
+    "all_passed": true
+  },
+  "results": {
+    "basic_splits": [
+      {
+        "name": "生成 >=3 段（实际 8）",
+        "passed": true
+      },
+      {
+        "name": "每段 train 起点 < valid 起点 < test 起点",
+        "passed": true
+      },
+      {
+        "name": "purge gap 生效：valid_start 与 train_end 差 >= 5 天",
+        "passed": true
+      }
+    ],
+    "anchored_vs_rolling": [
+      {
+        "name": "anchored: 所有段 train_start 相同",
+        "passed": true
+      },
+      {
+        "name": "rolling: 相邻段 train_start 不同",
+        "passed": true
+      }
+    ],
+    "aggregate_metrics": [
+      {
+        "name": "avg_sharpe = 0.625",
+        "passed": true
+      },
+      {
+        "name": "consistency = 0.75 (3 段正收益)",
+        "passed": true
+      },
+      {
+        "name": "worst_drawdown = -0.15",
+        "passed": true
+      }
+    ],
+    "end_to_end": [
+      {
+        "name": "段数 >= 2（实际 8）",
+        "passed": true
+      },
+      {
+        "name": "aggregated_metrics 包含 avg_sharpe",
+        "passed": true
+      },
+      {
+        "name": "out_of_sample_equity 非空",
+        "passed": true
+      }
+    ],
+    "short_data": [
+      {
+        "name": "短数据生成 0 段（实际 0）",
+        "passed": true
+      }
+    ]
+  }
+}

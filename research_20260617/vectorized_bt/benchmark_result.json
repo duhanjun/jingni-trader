@@ -1,0 +1,48 @@
+{
+  "scenarios": [
+    {
+      "n_stocks": 50,
+      "n_days": 504,
+      "native_time_s": 0.6940747140006351,
+      "vector_time_s": 0.2608846129996891,
+      "speedup": 2.660466272886175,
+      "native_sharpe": 1.3539786952095936,
+      "vector_sharpe": -5.023523863725565,
+      "native_total_return": 0.12241773417424273,
+      "vector_total_return": -0.26370080982971733,
+      "native_max_drawdown": -0.11323179295252417,
+      "vector_max_drawdown": -0.2637008098297174
+    },
+    {
+      "n_stocks": 200,
+      "n_days": 504,
+      "native_time_s": 1.5507278139994014,
+      "vector_time_s": 0.3206632769997668,
+      "speedup": 4.836000643754817,
+      "native_sharpe": 6.09592170800061,
+      "vector_sharpe": -4.808066397870207,
+      "native_total_return": 0.559720182664726,
+      "vector_total_return": -0.23439796038875582,
+      "native_max_drawdown": -0.029931631371860987,
+      "vector_max_drawdown": -0.23439796038875577
+    },
+    {
+      "n_stocks": 500,
+      "n_days": 504,
+      "native_time_s": 3.7284475750002457,
+      "vector_time_s": 0.4926378379996095,
+      "speedup": 7.568333748255856,
+      "native_sharpe": 3.1550101527742007,
+      "vector_sharpe": -4.857964687989964,
+      "native_total_return": 0.27439356100343937,
+      "vector_total_return": -0.20526064740658734,
+      "native_max_drawdown": -0.042736229501745174,
+      "vector_max_drawdown": -0.2076453577988484
+    }
+  ],
+  "summary": {
+    "avg_speedup": 5.021600221632283,
+    "min_speedup": 2.660466272886175,
+    "max_speedup": 7.568333748255856
+  }
+}
