@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-06-18T18:18:08.355185",
+  "timestamp": "2026-06-18T18:20:04.387156",
   "branch": "feat/quant-opt-20260618",
   "sections": {
     "vectorized_correctness": {
@@ -23,28 +23,28 @@
           "n_stocks": 50,
           "n_days": 252,
           "n_rows": 12600,
-          "loop_ms": 378.78,
-          "vec_ms": 254.32,
-          "speedup": 1.49
+          "loop_ms": 389.54,
+          "vec_ms": 255.58,
+          "speedup": 1.52
         },
         {
           "n_stocks": 200,
           "n_days": 504,
           "n_rows": 100800,
-          "loop_ms": 1599.61,
-          "vec_ms": 1096.11,
-          "speedup": 1.46
+          "loop_ms": 1625.26,
+          "vec_ms": 1097.62,
+          "speedup": 1.48
         },
         {
           "n_stocks": 500,
           "n_days": 1000,
           "n_rows": 500000,
-          "loop_ms": 4208.99,
-          "vec_ms": 2962.49,
-          "speedup": 1.42
+          "loop_ms": 4251.49,
+          "vec_ms": 2982.02,
+          "speedup": 1.43
         }
       ],
-      "avg_speedup": 1.4566666666666668
+      "avg_speedup": 1.4766666666666666
     },
     "purged_cv": {
       "purged_n_splits": 5,
@@ -157,5 +157,5 @@
       "exit_code": 0
     }
   },
-  "elapsed_sec": 36.19
+  "elapsed_sec": 36.43
 }
