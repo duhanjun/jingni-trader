@@ -1,0 +1,162 @@
+{
+  "platform": {
+    "python": "3.12.13",
+    "pandas": "3.0.3",
+    "numpy": "2.4.6"
+  },
+  "data_shape": {
+    "rows": 75000,
+    "stocks": 50,
+    "days": 1500
+  },
+  "T1": {
+    "name": "T1_vectorized_ic",
+    "cases": [
+      {
+        "case": "正确性 (30 stocks × ~600d)",
+        "n_dates": 643,
+        "n_stocks": 30,
+        "t_legacy_s": 0.97,
+        "t_vectorized_s": 0.4462,
+        "speedup": 2.17,
+        "max_abs_diff": 0.0,
+        "mean_abs_diff": 0.0,
+        "n_match": 623,
+        "n_legacy": 623,
+        "n_vectorized": 623,
+        "pass_correctness": true
+      },
+      {
+        "case": "性能 (50 stocks × 1500d)",
+        "t_legacy_s": 2.5583,
+        "t_vectorized_s": 0.8089,
+        "speedup": 3.16,
+        "max_abs_diff": 0.0,
+        "pass_correctness": true
+      },
+      {
+        "case": "多进程 (50 × 1500d, 2 workers)",
+        "t_parallel_s": 1.5274,
+        "max_abs_diff_vs_vectorized": 0.0,
+        "pass_correctness": true
+      },
+      {
+        "case": "边界: 单只股票 (截面 < min_obs)",
+        "n_dates": 1500,
+        "n_ic_returned": 0,
+        "pass_correctness": true
+      },
+      {
+        "case": "边界: factor 全 NaN",
+        "n_ic_returned": 0,
+        "pass_correctness": true
+      },
+      {
+        "case": "边界: 单日截面",
+        "n_ic_returned": 1,
+        "pass_correctness": true
+      }
+    ],
+    "ic_summary": {
+      "ic_mean": 0.016629,
+      "ic_std": 0.147034,
+      "ic_ir": 0.1131,
+      "ic_pos_ratio": 0.545,
+      "ic_t_stat": 4.3494,
+      "n_periods": 1479
+    },
+    "pass": true
+  },
+  "T2": {
+    "name": "T2_learnable_processor",
+    "cases": [
+      {
+        "case": "GlobalZScore fit/train apply/test",
+        "train_factor_mu": 0.007691,
+        "train_factor_sd": 0.089115,
+        "test_factor_mean_after": -0.01,
+        "test_factor_sd_after": 1.0076,
+        "pass_correctness": "True"
+      },
+      {
+        "case": "RollingZScore 窗口期 NaN",
+        "expected_min_nan": 19,
+        "actual_nan": 1982,
+        "pass_correctness": true
+      },
+      {
+        "case": "Pipeline 串联 (GlobalZScore -> CSZScore)",
+        "daily_mean_abs_max": 0.0,
+        "daily_std_mean": 1.0,
+        "daily_std_in_range_ratio": 0.981,
+        "pass_correctness": "True"
+      },
+      {
+        "case": "数据泄露验证 (bad fit on all vs good fit on train)",
+        "mean_abs_diff": 0.003456,
+        "pass_correctness": true
+      },
+      {
+        "case": "边界: 训练集 10 行",
+        "ok": true,
+        "pass_correctness": true
+      },
+      {
+        "case": "边界: 训练期 forward_1d 全 NaN",
+        "learned_sd_fwd": null,
+        "unchanged_in_test": true,
+        "pass_correctness": true
+      }
+    ],
+    "pass": true
+  },
+  "T3": {
+    "name": "T3_walk_forward",
+    "cases": [
+      {
+        "case": "generate_folds 不重叠 (stride=63)",
+        "n_folds": 20,
+        "first_train_days": 352,
+        "first_test_days": 89,
+        "no_test_overlap": true,
+        "pass_correctness": true
+      },
+      {
+        "case": "完整 walk-forward 评估",
+        "n_folds": 20,
+        "n_skipped": 0,
+        "oos_ic_mean": 0.001688,
+        "oos_ic_std": 0.020166,
+        "oos_ir": 0.0837,
+        "oos_ls_spread_mean": 0.000203,
+        "in_sample_ic_mean": 0.011607,
+        "overfit_gap": 0.009919,
+        "pass_correctness": true
+      },
+      {
+        "case": "边界: 数据太短",
+        "raised_value_error": true,
+        "pass_correctness": true
+      },
+      {
+        "case": "边界: stride=train_days (完全无重叠)",
+        "n_folds": 5,
+        "no_test_overlap": true,
+        "no_train_overlap": true,
+        "pass_correctness": true
+      }
+    ],
+    "walk_forward_summary": {
+      "n_folds": 20,
+      "n_skipped": 0,
+      "oos_ic_mean": 0.0016884272718173706,
+      "oos_ic_std": 0.020166172396573607,
+      "oos_ir": 0.08372571842657896,
+      "oos_ls_spread_mean": 0.00020334773450720483,
+      "in_sample_ic_mean": 0.011607341107904689,
+      "overfit_gap": 0.009918913836087319
+    },
+    "pass": true
+  },
+  "overall_pass": true
+}
