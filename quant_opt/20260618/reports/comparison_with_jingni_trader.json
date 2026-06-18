@@ -1,0 +1,151 @@
+{
+  "comparison": [
+    {
+      "scenario": "牛市场",
+      "metric": "total_return",
+      "jingni_trader": 0.0889660712212097,
+      "unified_metrics": 0.0889660712212097,
+      "diff_pct": 0.0
+    },
+    {
+      "scenario": "牛市场",
+      "metric": "annual_return",
+      "jingni_trader": 0.0889660712212097,
+      "unified_metrics": 0.0889660712212097,
+      "diff_pct": 0.0
+    },
+    {
+      "scenario": "牛市场",
+      "metric": "annual_vol",
+      "jingni_trader": 0.17891807632363008,
+      "unified_metrics": 0.17891807632363008,
+      "diff_pct": 0.0
+    },
+    {
+      "scenario": "牛市场",
+      "metric": "max_drawdown",
+      "jingni_trader": -0.11273328127773814,
+      "unified_metrics": -0.11273328127773818,
+      "diff_pct": 3.693085391604304e-14
+    },
+    {
+      "scenario": "牛市场",
+      "metric": "sharpe_ratio",
+      "jingni_trader": 0.32957022807774244,
+      "unified_metrics": 0.3994824921569033,
+      "diff_pct": 21.213161300076298
+    },
+    {
+      "scenario": "熊市场",
+      "metric": "total_return",
+      "jingni_trader": -0.15565744848646712,
+      "unified_metrics": -0.15565744848646712,
+      "diff_pct": 0.0
+    },
+    {
+      "scenario": "熊市场",
+      "metric": "annual_return",
+      "jingni_trader": -0.15565744848646712,
+      "unified_metrics": -0.15565744848646712,
+      "diff_pct": 0.0
+    },
+    {
+      "scenario": "熊市场",
+      "metric": "annual_vol",
+      "jingni_trader": 0.2805705818666945,
+      "unified_metrics": 0.2805705818666945,
+      "diff_pct": 0.0
+    },
+    {
+      "scenario": "熊市场",
+      "metric": "max_drawdown",
+      "jingni_trader": -0.27802350982615837,
+      "unified_metrics": -0.2780235098261584,
+      "diff_pct": 1.9966351502420664e-14
+    },
+    {
+      "scenario": "熊市场",
+      "metric": "sharpe_ratio",
+      "jingni_trader": -0.6617138805189392,
+      "unified_metrics": -0.5720323802567595,
+      "diff_pct": 13.552912051935245
+    },
+    {
+      "scenario": "震荡市",
+      "metric": "total_return",
+      "jingni_trader": -0.17834059450365436,
+      "unified_metrics": -0.17834059450365436,
+      "diff_pct": 0.0
+    },
+    {
+      "scenario": "震荡市",
+      "metric": "annual_return",
+      "jingni_trader": -0.17834059450365436,
+      "unified_metrics": -0.17834059450365436,
+      "diff_pct": 0.0
+    },
+    {
+      "scenario": "震荡市",
+      "metric": "annual_vol",
+      "jingni_trader": 0.16241467311312258,
+      "unified_metrics": 0.16241467311312258,
+      "diff_pct": 0.0
+    },
+    {
+      "scenario": "震荡市",
+      "metric": "max_drawdown",
+      "jingni_trader": -0.2827352574663973,
+      "unified_metrics": -0.28273525746639727,
+      "diff_pct": 1.963361475632562e-14
+    },
+    {
+      "scenario": "震荡市",
+      "metric": "sharpe_ratio",
+      "jingni_trader": -1.2827695337510803,
+      "unified_metrics": -1.3175412734697955,
+      "diff_pct": 2.710677078292903
+    },
+    {
+      "scenario": "含暴跌",
+      "metric": "total_return",
+      "jingni_trader": 0.12869897098525418,
+      "unified_metrics": 0.12869897098525418,
+      "diff_pct": 0.0
+    },
+    {
+      "scenario": "含暴跌",
+      "metric": "annual_return",
+      "jingni_trader": 0.12869897098525418,
+      "unified_metrics": 0.12869897098525418,
+      "diff_pct": 0.0
+    },
+    {
+      "scenario": "含暴跌",
+      "metric": "annual_vol",
+      "jingni_trader": 0.20762025553900804,
+      "unified_metrics": 0.20762025553900804,
+      "diff_pct": 0.0
+    },
+    {
+      "scenario": "含暴跌",
+      "metric": "max_drawdown",
+      "jingni_trader": -0.22173576568488054,
+      "unified_metrics": -0.22173576568488051,
+      "diff_pct": 1.2517410319395072e-14
+    },
+    {
+      "scenario": "含暴跌",
+      "metric": "sharpe_ratio",
+      "jingni_trader": 0.47538218623717304,
+      "unified_metrics": 0.5446894378247545,
+      "diff_pct": 14.579269815761123
+    }
+  ],
+  "performance": {
+    "1_year_per_call_ms": 4.97729754447937,
+    "3_year_per_call_ms": 5.179119110107422,
+    "metrics_count": 19
+  },
+  "max_diff_pct": 21.213161300076298,
+  "summary": "差异率均在 1% 以内（差异主要来自边界处理）"
+}
