@@ -1,5 +1,5 @@
 
-========== factor_expression: PASS (elapsed 0.64s) ==========
+========== factor_expression: PASS (elapsed 0.63s) ==========
 [PASS] test_operator_registry
 [PASS] test_basic_ts_operators
 [PASS] test_nested_expression
@@ -32,7 +32,7 @@
 所有扩展指标测试通过 ✓
 
 
-========== vectorized_backtest: PASS (elapsed 0.73s) ==========
+========== vectorized_backtest: PASS (elapsed 0.74s) ==========
 [PASS] test_basic_vectorized_run: 83 trades, final equity = 966048
 [PASS] test_no_transaction_when_weights_zero
 [PASS] test_adapter_interface
@@ -40,11 +40,11 @@
   native final = 999763, vbt final = 974014, ratio = 0.974
 [PASS] test_consistency_with_native
   规模: 10 stocks × 100 days
-  native 耗时 = 10.4 ms
-  vectorized 耗时 = 47.6 ms
+  native 耗时 = 10.6 ms
+  vectorized 耗时 = 48.6 ms
   加速比 = 0.22x
 [PASS] test_perf_vs_native
-  规模: 30 stocks × 200 days → 101.7 ms, 3772 trades
+  规模: 30 stocks × 200 days → 99.4 ms, 3772 trades
 [PASS] test_perf_scaling
   涨停处理后, 交易数 = 38
 [PASS] test_limit_up_handling
@@ -57,8 +57,8 @@
 ============================================================
 TEST RUN SUMMARY
 ============================================================
-  [OK] factor_expression           0.64s
+  [OK] factor_expression           0.63s
   [OK] extended_metrics            0.36s
-  [OK] vectorized_backtest         0.73s
+  [OK] vectorized_backtest         0.74s
 
 Overall: ALL PASS
