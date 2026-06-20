@@ -1,0 +1,275 @@
+{
+  "timestamp": "2026-06-20T08:17:43.539749",
+  "total": 43,
+  "passed": 43,
+  "failed": 0,
+  "results": [
+    {
+      "name": "解析 'Close'",
+      "passed": true,
+      "detail": "ast=('ident', 'Close')",
+      "extra": {}
+    },
+    {
+      "name": "解析 '123'",
+      "passed": true,
+      "detail": "ast=('num', 123.0)",
+      "extra": {}
+    },
+    {
+      "name": "解析 '-1'",
+      "passed": true,
+      "detail": "ast=('neg', ('num', 1.0))",
+      "extra": {}
+    },
+    {
+      "name": "解析 'Rank(Close)'",
+      "passed": true,
+      "detail": "ast=('func', 'Rank', [('ident', 'Close')])",
+      "extra": {}
+    },
+    {
+      "name": "解析 'Ts_Mean(Close, 20)'",
+      "passed": true,
+      "detail": "ast=('func', 'Ts_Mean', [('ident', 'Close'), ('num', 20.0)])",
+      "extra": {}
+    },
+    {
+      "name": "解析 '-1 * Correlation(Open, Volume, 10)'",
+      "passed": true,
+      "detail": "ast=('binop', '*', ('neg', ('num', 1.0)), ('func', 'Correlation', [('ident', 'Open'), ('ident', 'Volume'), ('num', 10.0)]))",
+      "extra": {}
+    },
+    {
+      "name": "Ts_Mean(Close,20) vs rolling.mean",
+      "passed": true,
+      "detail": "匹配点数=710",
+      "extra": {}
+    },
+    {
+      "name": "Rank(Close) vs groupby.rank(pct)",
+      "passed": true,
+      "detail": "",
+      "extra": {}
+    },
+    {
+      "name": "Delta(Close,1) vs diff(1)",
+      "passed": true,
+      "detail": "",
+      "extra": {}
+    },
+    {
+      "name": "Delay(Close,5) vs shift(5)",
+      "passed": true,
+      "detail": "",
+      "extra": {}
+    },
+    {
+      "name": "复合公式 -1*Correlation(Open,Volume,10)",
+      "passed": true,
+      "detail": "匹配点数=760",
+      "extra": {}
+    },
+    {
+      "name": "Open / Close 逐元素除法",
+      "passed": true,
+      "detail": "",
+      "extra": {}
+    },
+    {
+      "name": "嵌套 Rank(Ts_Mean(Close,20))",
+      "passed": true,
+      "detail": "",
+      "extra": {}
+    },
+    {
+      "name": "Alpha101 alpha003",
+      "passed": true,
+      "detail": "非空值=1361/1500",
+      "extra": {}
+    },
+    {
+      "name": "Alpha101 alpha004",
+      "passed": true,
+      "detail": "非空值=1455/1500",
+      "extra": {}
+    },
+    {
+      "name": "Alpha101 alpha006",
+      "passed": true,
+      "detail": "非空值=1440/1500",
+      "extra": {}
+    },
+    {
+      "name": "Alpha101 alpha012",
+      "passed": true,
+      "detail": "非空值=1485/1500",
+      "extra": {}
+    },
+    {
+      "name": "Alpha101 alpha023_simple",
+      "passed": true,
+      "detail": "非空值=1470/1500",
+      "extra": {}
+    },
+    {
+      "name": "Alpha101 alpha033",
+      "passed": true,
+      "detail": "非空值=1500/1500",
+      "extra": {}
+    },
+    {
+      "name": "Alpha101 alpha052_simple",
+      "passed": true,
+      "detail": "非空值=1485/1500",
+      "extra": {}
+    },
+    {
+      "name": "Alpha101 reversal_20d",
+      "passed": true,
+      "detail": "非空值=1365/1500",
+      "extra": {}
+    },
+    {
+      "name": "Alpha101 price_volume_divergence",
+      "passed": true,
+      "detail": "非空值=1365/1500",
+      "extra": {}
+    },
+    {
+      "name": "性能 Rank(Ts_Mean(Close,20))",
+      "passed": true,
+      "detail": "引擎=67.4ms, 手动=59.9ms, 加速比=0.89x",
+      "extra": {
+        "engine_ms": 67.40742300007696,
+        "manual_ms": 59.926259000045924,
+        "speedup": 0.8890157245735014,
+        "rows": 12500
+      }
+    },
+    {
+      "name": "空数据 Rank(Close)",
+      "passed": true,
+      "detail": "",
+      "extra": {}
+    },
+    {
+      "name": "单只股票 Ts_Mean",
+      "passed": true,
+      "detail": "",
+      "extra": {}
+    },
+    {
+      "name": "窗口>数据长度",
+      "passed": true,
+      "detail": "非空数=0",
+      "extra": {}
+    },
+    {
+      "name": "含NaN数据 Ts_Mean",
+      "passed": true,
+      "detail": "",
+      "extra": {}
+    },
+    {
+      "name": "未知字段应报错",
+      "passed": true,
+      "detail": "正确抛出 KeyError",
+      "extra": {}
+    },
+    {
+      "name": "语法错误应报错",
+      "passed": true,
+      "detail": "正确抛出 SyntaxError",
+      "extra": {}
+    },
+    {
+      "name": "修订前查询=原始值",
+      "passed": true,
+      "detail": "got=100.0",
+      "extra": {}
+    },
+    {
+      "name": "修订后查询=修订值",
+      "passed": true,
+      "detail": "got=120.0",
+      "extra": {}
+    },
+    {
+      "name": "发布前查询=None",
+      "passed": true,
+      "detail": "got=None",
+      "extra": {}
+    },
+    {
+      "name": "泄漏检测生效",
+      "passed": true,
+      "detail": "泄漏次数=32, 总数=132, 比例=24.24%",
+      "extra": {}
+    },
+    {
+      "name": "修订链 发布前",
+      "passed": true,
+      "detail": "expect=None, got=None",
+      "extra": {}
+    },
+    {
+      "name": "修订链 快报后",
+      "passed": true,
+      "detail": "expect=0.5, got=0.5",
+      "extra": {}
+    },
+    {
+      "name": "修订链 年报后",
+      "passed": true,
+      "detail": "expect=0.55, got=0.55",
+      "extra": {}
+    },
+    {
+      "name": "修订链 修订后",
+      "passed": true,
+      "detail": "expect=0.58, got=0.58",
+      "extra": {}
+    },
+    {
+      "name": "Q2发布前取Q1",
+      "passed": true,
+      "detail": "got=300.0",
+      "extra": {}
+    },
+    {
+      "name": "Q2发布后取Q2",
+      "passed": true,
+      "detail": "got=350.0",
+      "extra": {}
+    },
+    {
+      "name": "面板查询形状",
+      "passed": true,
+      "detail": "shape=(394, 3)",
+      "extra": {}
+    },
+    {
+      "name": "面板有非空值",
+      "passed": true,
+      "detail": "",
+      "extra": {}
+    },
+    {
+      "name": "存储统计",
+      "passed": true,
+      "detail": "stats={'fields': 1, 'total_records': 9}",
+      "extra": {}
+    },
+    {
+      "name": "PIT 面板查询性能",
+      "passed": true,
+      "detail": "50股票 x 522天, 耗时=51.7ms, 记录数=400",
+      "extra": {
+        "elapsed_ms": 51.674549000381376,
+        "rows": 26100,
+        "records": 400
+      }
+    }
+  ]
+}
