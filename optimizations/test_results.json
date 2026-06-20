@@ -1,0 +1,152 @@
+{
+  "test_timestamp": "2026-06-20T14:21:43.297891",
+  "tests": [
+    {
+      "name": "回测终值一致性",
+      "passed": "True",
+      "details": {
+        "vectorized_final_equity": 1407450.567383457,
+        "loop_final_equity": 1402380.1090425611,
+        "abs_diff": 5070.458340895828,
+        "rel_diff": 0.003615609140632744,
+        "vectorized_n_trades": 1255,
+        "loop_n_trades": 1255
+      }
+    },
+    {
+      "name": "回测性能提升",
+      "passed": true,
+      "details": {
+        "vectorized_median_time_s": 0.17033644399998593,
+        "loop_median_time_s": 0.5080192529999294,
+        "speedup_x": 2.9824460407308457,
+        "vectorized_n_trades": 1255,
+        "loop_n_trades": 1255
+      }
+    },
+    {
+      "name": "空数据处理",
+      "passed": true,
+      "details": {
+        "vectorized_empty": true,
+        "loop_empty": true
+      }
+    },
+    {
+      "name": "单股票单日",
+      "passed": true,
+      "details": {
+        "vectorized_records": 1,
+        "loop_records": 1
+      }
+    },
+    {
+      "name": "涨停限制买入",
+      "passed": true,
+      "details": {
+        "n_trades_when_limit_up": 0
+      }
+    },
+    {
+      "name": "增强指标完整性",
+      "passed": true,
+      "details": {
+        "basic_metrics_count": 7,
+        "enhanced_metrics_count": 22,
+        "new_metrics_count": 15,
+        "new_metrics": [
+          "alpha",
+          "avg_trade_pnl",
+          "best_month",
+          "beta",
+          "downside_deviation",
+          "information_ratio",
+          "max_drawdown_duration_days",
+          "n_trades",
+          "positive_month_ratio",
+          "profit_factor",
+          "sortino_ratio",
+          "tracking_error",
+          "turnover_per_year",
+          "win_loss_ratio",
+          "worst_month"
+        ],
+        "basic_consistent": true
+      }
+    },
+    {
+      "name": "Sortino >= Sharpe 关系",
+      "passed": true,
+      "details": {
+        "sharpe": 1.064706005127111,
+        "sortino": 1.0915049874076392,
+        "downside_dev": 0.0793312783206023,
+        "volatility": 0.08132807134305892
+      }
+    },
+    {
+      "name": "Beta/Alpha 计算",
+      "passed": true,
+      "details": {
+        "beta": 0.1355166618097915,
+        "alpha": 0.10830834413424097,
+        "information_ratio": 0.4539856381818338,
+        "tracking_error": 0.1641372164996722
+      }
+    },
+    {
+      "name": "IC 均值一致性",
+      "passed": true,
+      "details": {
+        "max_diff": 0.0,
+        "mean_diff": 0.0,
+        "n_compared": 12
+      }
+    },
+    {
+      "name": "factor_0 IC 显著性",
+      "passed": true,
+      "details": {
+        "ic_mean": 0.437605,
+        "ic_t_stat": 54.6212,
+        "ic_ir": 4.4598
+      }
+    },
+    {
+      "name": "IC 性能提升",
+      "passed": true,
+      "details": {
+        "vectorized_median_time_s": 1.033846234000066,
+        "loop_median_time_s": 6.920000737999999,
+        "speedup_x": 6.693452575849453,
+        "max_ic_diff": 0.0,
+        "n_factors": 5,
+        "n_stocks": 300,
+        "n_dates": 250
+      }
+    },
+    {
+      "name": "IC 空数据",
+      "passed": true,
+      "details": {
+        "vectorized_empty": true,
+        "loop_empty": true
+      }
+    },
+    {
+      "name": "IC 样本不足保护",
+      "passed": true,
+      "details": {
+        "result_keys": [
+          "ret_forward_1d"
+        ]
+      }
+    }
+  ],
+  "summary": {
+    "total": 13,
+    "passed": 13,
+    "failed": 0,
+    "pass_rate": 1.0
+  }
+}
