@@ -1,0 +1,201 @@
+{
+  "correctness": {
+    "new_metrics": {
+      "total_return": 0.321183,
+      "annual_return": 0.582098,
+      "benchmark_return": 0.215374,
+      "excess_return": 0.105809,
+      "volatility": 0.384226,
+      "sharpe_ratio": 1.3154,
+      "sortino_ratio": 2.2641,
+      "calmar_ratio": 3.3783,
+      "max_drawdown": -0.172304,
+      "win_rate": 0.0,
+      "total_trades": 19,
+      "alpha": 0.5812,
+      "beta": -0.0897,
+      "elapsed_sec": 0.3061
+    },
+    "old_metrics": {
+      "total_return": 0.32118325403032255,
+      "annual_return": 0.5820976152904562,
+      "volatility": 0.38422608496331967,
+      "sharpe_ratio": 1.3154025341751385,
+      "max_drawdown": -0.17230350258693142,
+      "calmar_ratio": 3.3783272339270844,
+      "sortino_ratio": 2.2641239441989813,
+      "win_rate": 0.0,
+      "total_trades": 19,
+      "calculation_time": "2026-06-20 16:21:27"
+    },
+    "checks": {
+      "equity_curve_non_empty": true,
+      "initial_equity_close_to_1m": "True",
+      "trades_non_empty": true,
+      "benchmark_column_exists": true,
+      "volume_limit_respected": true,
+      "positions_recorded": true
+    },
+    "passed": 6,
+    "total": 6,
+    "new_trades_count": 19,
+    "old_trades_count": 19
+  },
+  "performance": [
+    {
+      "n_stocks": 10,
+      "n_days": 782,
+      "n_signals": 779,
+      "new_engine_sec": 0.6794,
+      "old_engine_sec": 0.8537,
+      "speedup": 1.26
+    },
+    {
+      "n_stocks": 30,
+      "n_days": 782,
+      "n_signals": 2395,
+      "new_engine_sec": 1.162,
+      "old_engine_sec": 1.6161,
+      "speedup": 1.39
+    },
+    {
+      "n_stocks": 50,
+      "n_days": 782,
+      "n_signals": 3910,
+      "new_engine_sec": 1.3095,
+      "old_engine_sec": 1.8985,
+      "speedup": 1.45
+    }
+  ],
+  "factor_expression": {
+    "n_factors": 12,
+    "elapsed_sec": 0.2767,
+    "output_shape": [
+      39100,
+      14
+    ],
+    "factors": [
+      "momentum_20d",
+      "reversal_5d",
+      "ma5",
+      "ma20",
+      "ma_diff",
+      "vol_20d",
+      "turnover_20d",
+      "volume_ratio",
+      "rsi_proxy",
+      "price_zscore",
+      "high_low_range",
+      "vwap_deviation"
+    ],
+    "vs_original_corr": 1.0,
+    "correctness_ok": "True"
+  },
+  "factor_layered": {
+    "elapsed_sec": 4.785,
+    "ic_analysis": {
+      "1d": {
+        "ic_mean": 0.024781,
+        "ic_std": 0.152666,
+        "ic_ir": 0.1623,
+        "ic_t_stat": 4.4779,
+        "ic_positive_ratio": 0.5611,
+        "n_obs": 761
+      },
+      "5d": {
+        "ic_mean": 0.010067,
+        "ic_std": 0.158072,
+        "ic_ir": 0.0637,
+        "ic_t_stat": 1.7523,
+        "ic_positive_ratio": 0.5297,
+        "n_obs": 757
+      },
+      "10d": {
+        "ic_mean": 0.008978,
+        "ic_std": 0.153301,
+        "ic_ir": 0.0586,
+        "ic_t_stat": 1.606,
+        "ic_positive_ratio": 0.5439,
+        "n_obs": 752
+      },
+      "20d": {
+        "ic_mean": -0.002973,
+        "ic_std": 0.147877,
+        "ic_ir": -0.0201,
+        "ic_t_stat": -0.5476,
+        "ic_positive_ratio": 0.4852,
+        "n_obs": 742
+      },
+      "decay": {
+        "periods": [
+          1,
+          5,
+          10,
+          20
+        ],
+        "ic_means": [
+          0.024781,
+          0.010067,
+          0.008978,
+          -0.002973
+        ],
+        "decay_ratio": -0.12
+      }
+    },
+    "monotonicity": {
+      "1d": {
+        "spearman_rho": 1.0,
+        "p_value": 0.0,
+        "linear_corr": 0.9216,
+        "is_monotonic": "True",
+        "direction": "positive"
+      },
+      "5d": {
+        "spearman_rho": 0.2,
+        "p_value": 0.7471,
+        "linear_corr": 0.5332,
+        "is_monotonic": "False",
+        "direction": "positive"
+      },
+      "10d": {
+        "spearman_rho": 0.1,
+        "p_value": 0.8729,
+        "linear_corr": 0.2451,
+        "is_monotonic": "False",
+        "direction": "positive"
+      },
+      "20d": {
+        "spearman_rho": 0.1,
+        "p_value": 0.8729,
+        "linear_corr": -0.1703,
+        "is_monotonic": "False",
+        "direction": "positive"
+      }
+    },
+    "summary": {
+      "total_score": 31.92,
+      "grade": "D",
+      "scores": {
+        "ic_ir": 5.1,
+        "monotonicity": 6.0,
+        "turnover": 5.83,
+        "coverage": 15.0
+      },
+      "interpretation": "较弱因子，谨慎使用"
+    },
+    "quantile_returns_count": 20,
+    "long_short_count": 4
+  },
+  "edge_cases": {
+    "checks": {
+      "empty_data": true,
+      "single_stock": true,
+      "price_limit_respected": true,
+      "t_plus_1_strict": true,
+      "malicious_expression_blocked": true,
+      "unknown_field_handles_gracefully": "True"
+    },
+    "passed": 6,
+    "total": 6
+  }
+}
