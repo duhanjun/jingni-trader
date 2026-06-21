@@ -17,7 +17,7 @@
       "sortino_ratio": -5.745026834516348,
       "win_rate": 0.25301204819277107,
       "total_trades": 83,
-      "calculation_time": "2026-06-21 04:23:21"
+      "calculation_time": "2026-06-21 04:27:03"
     },
     "vec_metrics": {
       "total_return": -0.09748327019224967,
@@ -29,43 +29,43 @@
       "sortino_ratio": -5.833494686984487,
       "win_rate": 0.25301204819277107,
       "total_trades": 83,
-      "calculation_time": "2026-06-21 04:23:21"
+      "calculation_time": "2026-06-21 04:27:03"
     },
     "name": "backtest_correctness",
-    "elapsed": 0.15771235000011075,
+    "elapsed": 0.1845867410002029,
     "status": "PASS"
   },
   {
     "passed": true,
-    "detail": "3 scenarios, avg speedup=20.65x",
+    "detail": "3 scenarios, avg speedup=19.85x",
     "scenarios": [
       {
         "n_codes": 10,
         "n_days": 60,
         "n_rows": 600,
-        "t_native": 0.0867,
-        "t_vectorized": 0.0095,
-        "speedup": 9.16
+        "t_native": 0.1706,
+        "t_vectorized": 0.0267,
+        "speedup": 6.38
       },
       {
         "n_codes": 50,
         "n_days": 120,
         "n_rows": 6000,
-        "t_native": 0.3627,
-        "t_vectorized": 0.0165,
-        "speedup": 22.0
+        "t_native": 0.3659,
+        "t_vectorized": 0.0162,
+        "speedup": 22.62
       },
       {
         "n_codes": 100,
         "n_days": 200,
         "n_rows": 20000,
-        "t_native": 0.9985,
-        "t_vectorized": 0.0324,
-        "speedup": 30.8
+        "t_native": 0.9844,
+        "t_vectorized": 0.0322,
+        "speedup": 30.56
       }
     ],
     "name": "backtest_performance",
-    "elapsed": 2.096874588999526,
+    "elapsed": 2.0815374189996874,
     "status": "PASS"
   },
   {
@@ -78,7 +78,7 @@
       "all_limit_up": true
     },
     "name": "backtest_edge_cases",
-    "elapsed": 0.041085900999860314,
+    "elapsed": 0.04045622800003912,
     "status": "PASS"
   },
   {
@@ -95,7 +95,7 @@
       "(Close + Open) / 2": "Div(Add(Field(Close),Field(Open)),Const(2.0))"
     },
     "name": "expression_parser",
-    "elapsed": 0.0003232400003980729,
+    "elapsed": 0.0003692580003189505,
     "status": "PASS"
   },
   {
@@ -117,20 +117,20 @@
       7
     ],
     "name": "expression_calculation",
-    "elapsed": 0.053921663999972225,
+    "elapsed": 0.05262186399977509,
     "status": "PASS"
   },
   {
     "passed": true,
-    "detail": "ic_max_diff=6.94e-17 speedup=3.28x (orig 110 periods, vec 110 periods)",
+    "detail": "ic_max_diff=6.94e-17 speedup=3.22x (orig 110 periods, vec 110 periods)",
     "ic_max_diff": 6.938893903907228e-17,
-    "t_original": 0.1522,
-    "t_vectorized": 0.0463,
-    "speedup": 3.28,
+    "t_original": 0.1497,
+    "t_vectorized": 0.0466,
+    "speedup": 3.22,
     "n_periods_orig": 110,
     "n_periods_vec": 110,
     "name": "vectorized_ic",
-    "elapsed": 0.3122622519995275,
+    "elapsed": 0.3067203629998403,
     "status": "PASS"
   }
 ]
