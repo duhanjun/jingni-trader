@@ -1,37 +1,36 @@
 """
-向量化回测引擎（Vectorized Backtest Adapter）
+向量化回测引擎（验证原型）
 
 借鉴来源：
-- VectorBT (https://vectorbt.dev) ：将策略 / 持仓 / 现金表示为多维数组，
-  用 numpy 向量化代替 Python 逐 bar 循环，性能提升 100-1000x。
-- jingni-trader 既有 native_adapter.py：保留 A 股 T+1、涨跌停、印花税等
-  市场规则，但用矩阵运算替换 pandas iterrows / DataFrame 过滤。
+- VectorBT (https://vectorbt.dev): 将回测逻辑表示为 NumPy 数组运算，
+  避免逐 bar 的 Python 循环，性能提升 100-1000 倍。
+- AKQuant (https://github.com/akfamily/akquant): Rust + Python 混合，
+  Zero-Copy 数据架构。
 
-核心优化点（对照 native_adapter.py）：
-1. 预先把 data / signals pivot 为 (date × code) 矩阵，避免每个交易日
-   重复执行 `df[df['date']==dt]` 这种 O(n) 全表扫描。
-2. positions / cash 用 numpy 数组维护，按 code 索引；买卖预算分配、
-   涨跌停过滤、市值计算全部向量化。
-3. 保留 T+1（买入当日不可卖）与涨跌停限制，确保结果与 native 一致。
+优化目标：
+jingni-trader 现有 skills/backtest-engine/scripts/adapters/native_adapter.py
+使用 `for dt in dates: signals[signals['date'] == dt]` 的逐日循环 +
+DataFrame 过滤，复杂度 O(n_days * n_rows)，在大数据量下极慢。
 
-兼容性：实现 BaseBacktestEngine.run_backtest 同名方法，返回结构一致，
-可作为 backtest-engine 的新 adapter 注册到 config.BACKTEST_BACKEND。
+本模块通过以下手段优化：
+1. 一次性 pivot 为宽表（date × code 矩阵），消除重复过滤
+2. 将核心模拟循环操作在 NumPy 数组上进行（避免 pandas 索引开销）
+3. 信号 / 涨跌停 / 收盘价全部预对齐为同形状矩阵
+4. 保留 A 股 T+1、涨跌停、印花税、滑点等业务规则
+
+注意：回测本质存在路径依赖（cash/position 随时间变化），
+完全向量化困难，因此采用「数据预对齐 + 紧凑 NumPy 循环」的混合策略，
+这与 VectorBT 用 Numba 编译内核的思路一致。
 """
 from __future__ import annotations
-
-from typing import Dict, Any, List
-
+from typing import Dict, Any
+import time
 import numpy as np
 import pandas as pd
 
 
-class VectorizedBacktestAdapter:
-    """
-    向量化回测适配器
-
-    与 native_adapter.NativeAdapter 接口完全一致，但内部使用 numpy
-    矩阵运算，避免 Python 逐行循环。
-    """
+class VectorizedBacktest:
+    """向量化回测引擎（A 股规则）"""
 
     def run_backtest(
         self,
@@ -48,238 +47,159 @@ class VectorizedBacktestAdapter:
         if data.empty or signals.empty:
             return self._empty_result()
 
-        # ---- 1. 预处理：构建 (date × code) 矩阵 ----
+        # ---- 1. 数据预对齐：pivot 为宽表 (date × code) ----
+        # 一次 pivot 替代原实现里每个日期都做一次 df[df['date']==dt] 的 O(n) 过滤
         data = data.sort_values(['date', 'code']).reset_index(drop=True)
         signals = signals.sort_values(['date', 'code']).reset_index(drop=True)
 
-        # 统一 date 类型，避免 datetime vs str 比较出错
-        data['date'] = pd.to_datetime(data['date'])
-        signals['date'] = pd.to_datetime(signals['date'])
+        close_wide = data.pivot(index='date', columns='code', values='close')
+        # 对齐 signals 到 close_wide 的行列
+        signal_wide = signals.pivot(index='date', columns='code', values='signal')
+        signal_wide = signal_wide.reindex(index=close_wide.index, columns=close_wide.columns).fillna(0.0)
 
-        # 仅保留同时出现在 data 和 signals 中的 (date, code) 范围
-        # 但允许某些 (date, code) 在 data 中存在而 signals 中无信号（视为 signal=0）
-        all_dates = sorted(data['date'].unique())
-        all_codes = sorted(data['code'].unique())
+        # 涨跌停标记（可选列）
+        if 'is_limit_up' in data.columns:
+            limit_up_wide = data.pivot(index='date', columns='code', values='is_limit_up') \
+                .reindex(index=close_wide.index, columns=close_wide.columns).fillna(False).astype(bool)
+        else:
+            limit_up_wide = pd.DataFrame(False, index=close_wide.index, columns=close_wide.columns)
 
-        if not all_dates:
-            return self._empty_result()
+        if 'is_limit_down' in data.columns:
+            limit_down_wide = data.pivot(index='date', columns='code', values='is_limit_down') \
+                .reindex(index=close_wide.index, columns=close_wide.columns).fillna(False).astype(bool)
+        else:
+            limit_down_wide = pd.DataFrame(False, index=close_wide.index, columns=close_wide.columns)
 
-        code_to_idx: Dict[str, int] = {c: i for i, c in enumerate(all_codes)}
-        n_codes = len(all_codes)
-        n_dates = len(all_dates)
-        date_to_idx = {d: i for i, d in enumerate(all_dates)}
+        # ---- 2. 转为 NumPy 数组，进入紧凑循环 ----
+        dates = close_wide.index.values
+        codes = close_wide.columns.values
+        close_arr = close_wide.values.astype(float)          # (T, N)
+        signal_arr = signal_wide.values.astype(float)        # (T, N)
+        limit_up_arr = limit_up_wide.values                  # (T, N) bool
+        limit_down_arr = limit_down_wide.values              # (T, N) bool
 
-        # pivot close / limit flags —— 一次性构建，O(n log n)
-        close_mat = self._pivot(data, 'close', all_dates, all_codes, date_to_idx, code_to_idx)
-        is_limit_up_mat = self._pivot_bool(data, 'is_limit_up', all_dates, all_codes, date_to_idx, code_to_idx)
-        is_limit_down_mat = self._pivot_bool(data, 'is_limit_down', all_dates, all_codes, date_to_idx, code_to_idx)
+        n_dates, n_codes = close_arr.shape
+        # 用 NaN 表示当日无行情
+        close_arr = np.where(np.isfinite(close_arr), close_arr, np.nan)
 
-        # pivot signals -> signal_mat (1 buy, -1 sell, 0 hold)
-        sig_mat = np.zeros((n_dates, n_codes), dtype=np.int8)
-        # 向量化构建：用 pivot 代替逐行 iterrows
-        sig_pivot = signals.copy()
-        sig_pivot['date'] = pd.to_datetime(sig_pivot['date'])
-        # 仅保留在 data 范围内的 (date, code)
-        sig_pivot = sig_pivot[
-            sig_pivot['date'].isin(date_to_idx) & sig_pivot['code'].isin(code_to_idx)
-        ]
-        if not sig_pivot.empty:
-            sig_pivot['_didx'] = sig_pivot['date'].map(date_to_idx)
-            sig_pivot['_cidx'] = sig_pivot['code'].map(code_to_idx)
-            sig_val = sig_pivot['signal'].values
-            sig_d = sig_pivot['_didx'].values.astype(np.int64)
-            sig_c = sig_pivot['_cidx'].values.astype(np.int64)
-            # 向量化赋值
-            valid_mask = np.isfinite(sig_val.astype(float))
-            for i in np.where(valid_mask)[0]:
-                v = float(sig_val[i])
-                if v > 0:
-                    sig_mat[sig_d[i], sig_c[i]] = 1
-                elif v < 0:
-                    sig_mat[sig_d[i], sig_c[i]] = -1
-
-        # ---- 2. 主循环：逐日推进，但日内全部向量化 ----
+        # ---- 3. 模拟核心：紧凑 NumPy 循环（无 pandas 开销）----
         cash = float(init_capital)
-        positions = np.zeros(n_codes, dtype=np.float64)        # 持仓股数
-        buy_today = np.zeros(n_codes, dtype=bool)              # T+1：今日买入标记
-        equity_records: List[Dict[str, Any]] = []
-        trades: List[Dict[str, Any]] = []
+        positions = np.zeros(n_codes, dtype=np.float64)      # 持仓股数
+        # T+1: 记录当日买入的股票，次日才能卖
+        bought_today = np.zeros(n_codes, dtype=bool) if t_plus_1 else None
+
+        equity_curve = np.zeros(n_dates, dtype=np.float64)
+        cash_curve = np.zeros(n_dates, dtype=np.float64)
+        mv_curve = np.zeros(n_dates, dtype=np.float64)
+        pos_count_curve = np.zeros(n_dates, dtype=np.int64)
+
+        trades = []  # list of dict
 
         for t in range(n_dates):
-            buy_today[:] = False
-            close_t = close_mat[t]
-            limit_up_t = is_limit_up_mat[t]
-            limit_down_t = is_limit_down_mat[t]
-            sig_t = sig_mat[t]
+            close_t = close_arr[t]
+            sig_t = signal_arr[t]
+            lu_t = limit_up_arr[t]
+            ld_t = limit_down_arr[t]
 
-            # ---- 2a. 卖出（先卖后买，释放资金）----
-            sell_mask = (sig_t == -1) & (positions > 0)
-            if price_limit:
-                # 涨跌停限制：跌停无法卖出
-                sell_mask = sell_mask & (~limit_down_t)
-            # 用 np.nan 表示缺失行情的标的，卖出时跳过
-            sellable = sell_mask & (~np.isnan(close_t))
-            if sellable.any():
-                shares = positions[sellable].copy()
-                prices = close_t[sellable]
-                amounts = shares * prices
-                commissions = np.maximum(amounts * commission_rate, 5.0)
-                taxes = amounts * stamp_tax_rate
-                net = amounts - commissions - taxes
-                cash += float(net.sum())
-                # 记录每笔成交
-                sell_codes_idx = np.where(sellable)[0]
-                for k in sell_codes_idx:
-                    trades.append({
-                        'date': all_dates[t],
-                        'code': all_codes[k],
-                        'action': 'sell',
-                        'price': float(prices[k]),
-                        'shares': float(shares[k]),
-                        'amount': float(amounts[k]),
-                        'commission': float(commissions[k]),
-                        'tax': float(taxes[k]),
-                        'pnl': float(amounts[k] - commissions[k] - taxes[k]),
-                    })
-                positions[sellable] = 0.0
+            # 当日有行情的股票
+            has_quote = np.isfinite(close_t)
 
-            # ---- 2b. 买入（等权分配可用资金）----
-            # 与 native_adapter 行为一致：budget_per_stock 基于当日初始 cash 计算，
-            # 但逐标的检查 cost > cash（现金随买入递减），不足时降级或跳过。
-            # 此处保留 per-day 内的逐标的循环（n_buy 通常远小于 n_codes），
-            # 既保证与 native 行为完全一致，又避免了 native 中每日 DataFrame 过滤的开销。
-            buy_mask = (sig_t == 1)
-            if price_limit:
-                buy_mask = buy_mask & (~limit_up_t)
-            buy_mask = buy_mask & (~np.isnan(close_t))
+            # ---- 卖出（signal < 0）----
+            sell_mask = (sig_t < 0) & (positions > 0) & has_quote
+            if t_plus_1:
+                sell_mask = sell_mask & (~bought_today)
+            sell_mask = sell_mask & (~ld_t)  # 跌停不能卖
 
-            buy_codes_idx = np.where(buy_mask)[0]
-            n_buy = len(buy_codes_idx)
-            if n_buy > 0:
-                budget_per_stock = cash * 0.95 / n_buy
-                for code_idx in buy_codes_idx:
-                    price = float(close_t[code_idx]) * (1 + slippage)
+            sell_idx = np.where(sell_mask)[0]
+            for i in sell_idx:
+                price = float(close_t[i])
+                shares = float(positions[i])
+                if shares <= 0:
+                    continue
+                amount = price * shares
+                commission = max(amount * commission_rate, 5.0)
+                tax = amount * stamp_tax_rate
+                cash += amount - commission - tax
+                positions[i] = 0.0
+                trades.append({
+                    'date': dates[t], 'code': codes[i], 'action': 'sell',
+                    'price': price, 'shares': int(shares), 'amount': amount,
+                    'commission': commission, 'tax': tax,
+                    'pnl': amount - commission - tax,
+                })
+
+            # ---- 买入（signal > 0）----
+            buy_mask = (sig_t > 0) & has_quote & (~lu_t)  # 涨停不能买
+            buy_idx = np.where(buy_mask)[0]
+            if len(buy_idx) > 0:
+                budget_per_stock = cash * 0.95 / len(buy_idx)
+                for i in buy_idx:
+                    price = float(close_t[i]) * (1.0 + slippage)
+                    if not np.isfinite(price) or price <= 0:
+                        continue
                     shares = int(budget_per_stock / price / 100) * 100
                     if shares <= 0:
                         continue
-                    buy_amount = price * shares
-                    commission = max(buy_amount * commission_rate, 5.0)
-                    cost = buy_amount + commission
+                    amount = price * shares
+                    commission = max(amount * commission_rate, 5.0)
+                    cost = amount + commission
                     if cost > cash:
                         shares = int((cash * 0.98) / price / 100) * 100
                         if shares <= 0:
                             continue
-                        buy_amount = price * shares
-                        commission = max(buy_amount * commission_rate, 5.0)
-                        cost = buy_amount + commission
+                        amount = price * shares
+                        commission = max(amount * commission_rate, 5.0)
+                        cost = amount + commission
                     cash -= cost
-                    positions[code_idx] += shares
-                    buy_today[code_idx] = True
+                    positions[i] += shares
+                    if t_plus_1:
+                        bought_today[i] = True
                     trades.append({
-                        'date': all_dates[t],
-                        'code': all_codes[code_idx],
-                        'action': 'buy',
-                        'price': float(price),
-                        'shares': float(shares),
-                        'amount': float(buy_amount),
-                        'commission': float(commission),
-                        'tax': 0.0,
-                        'pnl': float(-buy_amount - commission),
+                        'date': dates[t], 'code': codes[i], 'action': 'buy',
+                        'price': price, 'shares': int(shares), 'amount': amount,
+                        'commission': commission, 'tax': 0.0,
+                        'pnl': -amount - commission,
                     })
 
-            # ---- 2c. 当日市值与净值 ----
-            held = positions > 0
-            market_value = 0.0
-            if held.any():
-                held_close = close_t[held]
-                held_shares = positions[held]
-                # 缺失行情的标的用前一日收盘价（向前填充）—— 简化处理：
-                # 若当日无行情，则该标的市值按 0 计入（与 native 行为接近：
-                # native 在 day_data_map 找不到 code 时直接跳过）
-                valid_prices = held_close[~np.isnan(held_close)]
-                valid_shares = held_shares[~np.isnan(held_close)]
-                market_value = float((valid_prices * valid_shares).sum())
+            # ---- 结算当日净值 ----
+            market_value = float(np.nansum(positions * np.where(has_quote, close_t, 0.0)))
+            equity_curve[t] = cash + market_value
+            cash_curve[t] = cash
+            mv_curve[t] = market_value
+            pos_count_curve[t] = int(np.sum(positions > 0))
 
-            total_equity = cash + market_value
-            equity_records.append({
-                'date': all_dates[t],
-                'equity': total_equity,
-                'cash': cash,
-                'market_value': market_value,
-                'position_count': int((positions > 0).sum()),
-            })
+            # T+1: 次日清空 bought_today
+            if t_plus_1:
+                bought_today[:] = False
 
-        equity_curve = pd.DataFrame(equity_records)
-        trades_df = pd.DataFrame(trades)
-
-        if equity_curve.empty:
-            return self._empty_result()
-
-        # ---- 3. 计算绩效（复用既有 BaseBacktestMetrics 公式，自包含实现）----
-        from .backtest_engine_compat import calc_all_metrics_compat
-        eq_series = equity_curve.set_index('date')['equity']
-        metrics = calc_all_metrics_compat(eq_series, trades_df)
-
-        positions_df = pd.DataFrame({
-            'code': all_codes,
-            'shares': positions,
+        # ---- 4. 组装结果 ----
+        equity_df = pd.DataFrame({
+            'date': dates,
+            'equity': equity_curve,
+            'cash': cash_curve,
+            'market_value': mv_curve,
+            'position_count': pos_count_curve,
         })
-        positions_df = positions_df[positions_df['shares'] > 0].reset_index(drop=True)
+
+        trades_df = pd.DataFrame(trades)
+        positions_df = pd.DataFrame({'code': codes, 'shares': positions})
+
+        eq_series = pd.Series(equity_curve, index=dates)
+        # 复用现有指标计算（保持与原实现一致）
+        # 注意：skills/backtest-engine 目录含连字符无法直接 import，
+        # 这里内联等价实现，避免对原包路径的硬依赖
+        metrics = _calc_all_metrics(eq_series, trades_df)
 
         return {
             "trades": trades_df,
             "positions": positions_df,
-            "equity_curve": equity_curve,
+            "equity_curve": equity_df,
             "metrics": metrics,
             "report_path": "",
         }
 
-    # ------------------------------------------------------------------
-    # 辅助：pivot 构建矩阵（向量化版本，避免逐行 itertuples）
-    # ------------------------------------------------------------------
     @staticmethod
-    def _pivot(
-        df: pd.DataFrame, col: str,
-        all_dates: List[Any], all_codes: List[str],
-        date_to_idx: Dict[Any, int], code_to_idx: Dict[str, int],
-    ) -> np.ndarray:
-        """将 df[col] pivot 为 (n_dates × n_codes) 矩阵，缺失填 NaN"""
-        mat = np.full((len(all_dates), len(all_codes)), np.nan, dtype=np.float64)
-        sub = df[['date', 'code', col]].dropna(subset=[col])
-        if sub.empty:
-            return mat
-        # 向量化：用 map 把 date/code 转为矩阵索引，然后一次性赋值
-        d_idx = sub['date'].map(date_to_idx).values
-        c_idx = sub['code'].map(code_to_idx).values
-        vals = sub[col].values
-        valid = (~pd.isna(d_idx)) & (~pd.isna(c_idx))
-        if valid.any():
-            mat[d_idx[valid].astype(int), c_idx[valid].astype(int)] = vals[valid]
-        return mat
-
-    @staticmethod
-    def _pivot_bool(
-        df: pd.DataFrame, col: str,
-        all_dates: List[Any], all_codes: List[str],
-        date_to_idx: Dict[Any, int], code_to_idx: Dict[str, int],
-    ) -> np.ndarray:
-        """将 df[col] pivot 为 (n_dates × n_codes) 布尔矩阵，缺失填 False"""
-        mat = np.zeros((len(all_dates), len(all_codes)), dtype=bool)
-        if col not in df.columns:
-            return mat
-        sub = df[['date', 'code', col]].dropna(subset=[col])
-        if sub.empty:
-            return mat
-        d_idx = sub['date'].map(date_to_idx).values
-        c_idx = sub['code'].map(code_to_idx).values
-        vals = sub[col].values
-        valid = (~pd.isna(d_idx)) & (~pd.isna(c_idx))
-        if valid.any():
-            mat[d_idx[valid].astype(int), c_idx[valid].astype(int)] = vals[valid]
-        return mat
-
-    @staticmethod
-    def _empty_result() -> Dict[str, Any]:
+    def _empty_result():
         return {
             "trades": pd.DataFrame(),
             "positions": pd.DataFrame(),
@@ -287,3 +207,91 @@ class VectorizedBacktestAdapter:
             "metrics": {},
             "report_path": "",
         }
+
+
+def run_backtest_timed(engine, data, signals, **kwargs) -> Dict[str, Any]:
+    """带计时包装的回测，便于性能对比"""
+    t0 = time.perf_counter()
+    result = engine.run_backtest(data, signals, **kwargs)
+    elapsed = time.perf_counter() - t0
+    result["elapsed_seconds"] = elapsed
+    return result
+
+
+# ---------------- 绩效指标计算（与 BaseBacktestMetrics 等价） ----------------
+
+def _calc_all_metrics(equity_curve: pd.Series, trades: pd.DataFrame,
+                      risk_free: float = 0.03, trading_days: int = 252) -> Dict[str, Any]:
+    """与 skills/backtest-engine base_backtest.py 中 calc_all_metrics 等价的实现"""
+    from datetime import datetime
+
+    def _total_return(eq):
+        if len(eq) < 2:
+            return 0.0
+        return float(eq.iloc[-1] / eq.iloc[0] - 1)
+
+    def _annual_return(eq):
+        if len(eq) < 2:
+            return 0.0
+        total = eq.iloc[-1] / eq.iloc[0]
+        n_years = len(eq) / trading_days
+        if n_years <= 0:
+            return 0.0
+        return float(total ** (1 / n_years) - 1)
+
+    def _volatility(returns):
+        if len(returns) < 2:
+            return 0.0
+        return float(returns.std() * np.sqrt(trading_days))
+
+    def _sharpe(returns):
+        vol = _volatility(returns)
+        if vol == 0:
+            return 0.0
+        ann = returns.mean() * trading_days
+        return float((ann - risk_free) / vol)
+
+    def _max_drawdown(eq):
+        if len(eq) < 2:
+            return 0.0
+        cummax = eq.cummax()
+        dd = (eq - cummax) / cummax
+        return float(dd.min())
+
+    def _calmar(eq):
+        ann = _annual_return(eq)
+        mdd = abs(_max_drawdown(eq))
+        if mdd == 0:
+            return 0.0
+        return float(ann / mdd)
+
+    def _win_rate(tr):
+        if tr.empty:
+            return 0.0
+        winning = (tr["pnl"] > 0).sum()
+        total = len(tr)
+        return float(winning / total) if total > 0 else 0.0
+
+    def _sortino(returns):
+        neg = returns[returns < 0]
+        if len(neg) < 2:
+            return 0.0
+        downside = neg.std() * np.sqrt(trading_days)
+        if downside == 0:
+            return 0.0
+        ann = returns.mean() * trading_days
+        return float((ann - risk_free) / downside)
+
+    returns = equity_curve.pct_change().dropna()
+    return {
+        "total_return": _total_return(equity_curve),
+        "annual_return": _annual_return(equity_curve),
+        "volatility": _volatility(returns),
+        "sharpe_ratio": _sharpe(returns),
+        "max_drawdown": _max_drawdown(equity_curve),
+        "calmar_ratio": _calmar(equity_curve),
+        "sortino_ratio": _sortino(returns),
+        "win_rate": _win_rate(trades),
+        "total_trades": len(trades),
+        "calculation_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
