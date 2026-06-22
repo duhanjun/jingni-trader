@@ -1,7 +1,7 @@
 # jingni-trader 量化优化验证报告
 
 **执行日期**: 2026-06-22
-**分支**: `feat/quant-opt-20260622`
+**分支**: `feat/quant-opt-20260622-v2`（因远程已有同名分支，加 -v2 后缀）
 **执行人**: 自动化优化流程
 
 ---
@@ -195,7 +195,7 @@ optimizations/
 
 ```bash
 # 切换到优化分支
-git checkout feat/quant-opt-20260622
+git checkout feat/quant-opt-20260622-v2
 
 # 运行全部测试
 python optimizations/tests/test_vectorized_ic.py
