@@ -53,7 +53,7 @@
     {
       "name": "向量化回测快于原生事件驱动",
       "status": "PASS",
-      "detail": "向量化=1.230s, 原生=12.681s, 加速比=10.3x"
+      "detail": "向量化=1.219s, 原生=12.615s, 加速比=10.3x"
     },
     {
       "name": "内置因子已注册",
@@ -108,7 +108,7 @@
     {
       "name": "向量化 IC 快于原循环",
       "status": "PASS",
-      "detail": "向量化=0.0803s, 原循环=0.4226s, 加速比=5.3x"
+      "detail": "向量化=0.0780s, 原循环=0.4216s, 加速比=5.4x"
     },
     {
       "name": "向量化中性化与原循环高度相关",
@@ -123,12 +123,12 @@
     {
       "name": "向量化中性化快于原循环",
       "status": "PASS",
-      "detail": "向量化=0.0155s, 原循环=0.5342s, 加速比=34.5x"
+      "detail": "向量化=0.0146s, 原循环=0.5283s, 加速比=36.3x"
     }
   ],
   "summary": {
-    "backtest_vec_time": 1.23,
-    "backtest_native_time": 12.681,
+    "backtest_vec_time": 1.219,
+    "backtest_native_time": 12.615,
     "backtest_speedup": 10.3,
     "backtest_vec_metrics": {
       "total_return": -0.00610852652842897,
@@ -140,17 +140,17 @@
       "sortino_ratio": -1.295648692356749,
       "win_rate": 0.41134751773049644,
       "total_trades": 282,
-      "calculation_time": "2026-06-23 04:14:08"
+      "calculation_time": "2026-06-23 04:17:28"
     },
-    "ic_vec_time": 0.0803,
-    "ic_loop_time": 0.4226,
-    "ic_speedup": 5.3,
-    "neut_vec_time": 0.0155,
-    "neut_loop_time": 0.5342,
-    "neut_speedup": 34.5,
+    "ic_vec_time": 0.078,
+    "ic_loop_time": 0.4216,
+    "ic_speedup": 5.4,
+    "neut_vec_time": 0.0146,
+    "neut_loop_time": 0.5283,
+    "neut_speedup": 36.3,
     "total": 25,
     "passed": 25,
     "failed": 0,
-    "timestamp": "2026-06-23T04:14:23.058901"
+    "timestamp": "2026-06-23T04:17:43.003027"
   }
 }
