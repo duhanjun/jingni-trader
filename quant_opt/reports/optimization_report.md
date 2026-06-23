@@ -1,7 +1,7 @@
 # jingni-trader 量化优化报告
 
 > **执行日期**: 2026-06-23
-> **分支**: `feat/quant-opt-20260623`
+> **分支**: `feat/quant-opt-20260623-r2` (远程已存在 `feat/quant-opt-20260623`，按仓库既有命名惯例加 `-r2` 后缀避免冲突，未 force-push)
 > **状态**: 验证完成，待用户确认是否合并到 main
 
 ---
@@ -197,7 +197,7 @@ quant_opt/
 
 ## 五、约束遵守说明
 
-- ✅ 所有新代码位于 `feat/quant-opt-20260623` 分支的 `quant_opt/` 目录
+- ✅ 所有新代码位于 `feat/quant-opt-20260623-r2` 分支的 `quant_opt/` 目录
 - ✅ **未修改 main 分支任何代码** (legacy_backtest.py 是 main 逻辑的复刻，用于对比)
 - ✅ 仅执行 `git push`，**未执行 git merge / PR**
 - ✅ 等待用户明确确认后方可合并到 main
@@ -208,7 +208,7 @@ quant_opt/
 
 ```bash
 # 切换到优化分支
-git checkout feat/quant-opt-20260623
+git checkout feat/quant-opt-20260623-r2
 
 # 安装依赖 (若未安装)
 pip install numpy pandas scipy scikit-learn
