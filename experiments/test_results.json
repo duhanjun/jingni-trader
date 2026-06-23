@@ -1,0 +1,156 @@
+{
+  "run_at": "2026-06-23T00:34:47.820436",
+  "branch": "feat/quant-opt-20260623",
+  "modules": [
+    {
+      "optimization": "向量化因子中性化",
+      "borrowed_from": "Microsoft Qlib 数据处理管道 + vectorbt 向量化哲学",
+      "correctness": {
+        "max_abs_diff_vectorized_vs_baseline": 0.0,
+        "max_abs_diff_batch_vs_baseline": 0.0,
+        "tolerance": 1e-06,
+        "passed": true
+      },
+      "performance": {
+        "small": {
+          "scale": "50日 x 100股 x 3因子",
+          "baseline_sec": 0.8651,
+          "vectorized_sec": 0.1015,
+          "batch_numpy_sec": 0.0206,
+          "speedup_vectorized": 8.53,
+          "speedup_batch_numpy": 42.0
+        },
+        "medium": {
+          "scale": "120日 x 300股 x 5因子",
+          "baseline_sec": 2.5708,
+          "vectorized_sec": 0.2743,
+          "batch_numpy_sec": 0.0977,
+          "speedup_vectorized": 9.37,
+          "speedup_batch_numpy": 26.3
+        },
+        "large": {
+          "scale": "250日 x 500股 x 8因子",
+          "baseline_sec": 6.4789,
+          "vectorized_sec": 0.594,
+          "batch_numpy_sec": 0.332,
+          "speedup_vectorized": 10.91,
+          "speedup_batch_numpy": 19.52
+        }
+      },
+      "boundary": {
+        "empty_data": {
+          "passed": true,
+          "note": "空 DataFrame 不报错"
+        },
+        "small_group_skip": {
+          "passed": true,
+          "note": "样本<30 时原样返回"
+        },
+        "missing_industry": {
+          "passed": true,
+          "note": "仅市值中性化时正常工作"
+        },
+        "nan_values": {
+          "passed": true,
+          "note": "因子含 NaN 时不崩溃"
+        },
+        "all_passed": true
+      }
+    },
+    {
+      "optimization": "表达式驱动因子框架",
+      "borrowed_from": "Microsoft Qlib Alpha158 表达式引擎 + 因子注册表",
+      "extensibility": {
+        "initial_factors": 8,
+        "after_register": 9,
+        "new_factor_registered": true,
+        "passed": true,
+        "note": "新增因子只需 register()，无需修改引擎代码（开闭原则）"
+      },
+      "correctness": {
+        "ret_5d_max_diff": 0.0,
+        "reversal_5d_max_diff": 0.0,
+        "volatility_20d_max_diff": 0.0,
+        "price_to_ma20_max_diff": 0.0,
+        "momentum_accel_max_diff": 0.0,
+        "tolerance": 1e-08,
+        "passed": true
+      },
+      "performance": {
+        "data_scale": "24000 rows, 9 factors, 3 rounds",
+        "no_cache_sec": 1.3219,
+        "with_cache_sec": 0.4556,
+        "cache_speedup": 2.9,
+        "passed": true
+      }
+    },
+    {
+      "optimization": "Point-in-Time 防泄漏检测器",
+      "borrowed_from": "Microsoft Qlib Point-in-Time 数据系统 + nautilus_trader 确定性时间模型",
+      "correctness": {
+        "total_detected": 5,
+        "leaked_detected": 2,
+        "expected_leaked": [
+          "leaked_future_ret_1d",
+          "partial_leak"
+        ],
+        "expected_clean": [
+          "clean_reversal_5d",
+          "clean_volatility_20d",
+          "clean_weak"
+        ],
+        "leaked_correctly_identified": true,
+        "clean_correctly_identified": true,
+        "passed": true,
+        "factor_details": {
+          "clean_reversal_5d": {
+            "leakage_score": 0.0924,
+            "is_leaked": false,
+            "max_future_ic": 0.0462
+          },
+          "clean_volatility_20d": {
+            "leakage_score": 0.0941,
+            "is_leaked": false,
+            "max_future_ic": 0.0471
+          },
+          "leaked_future_ret_1d": {
+            "leakage_score": 1.0,
+            "is_leaked": true,
+            "max_future_ic": 1.0
+          },
+          "partial_leak": {
+            "leakage_score": 1.0,
+            "is_leaked": true,
+            "max_future_ic": 0.9108
+          },
+          "clean_weak": {
+            "leakage_score": 0.0421,
+            "is_leaked": false,
+            "max_future_ic": 0.021
+          }
+        }
+      },
+      "boundary": {
+        "empty_data": {
+          "passed": true,
+          "note": "空数据不报错"
+        },
+        "single_stock": {
+          "passed": true,
+          "note": "截面不足时 IC 为 0，不崩溃"
+        },
+        "all_nan_factor": {
+          "passed": true,
+          "note": "全 NaN 因子判定为干净（无信息）"
+        },
+        "all_passed": true
+      },
+      "performance": {
+        "data_scale": "60000 rows, 500 stocks",
+        "elapsed_sec": 2.0085,
+        "passed": true,
+        "note": "500只股票 x 120日检测应在30秒内完成"
+      }
+    }
+  ]
+}
