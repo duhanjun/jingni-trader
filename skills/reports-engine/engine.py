@@ -507,58 +507,47 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------------
-# 优化模块可选入口（来自 skills/quant_optimizations/）
-# 使用方式: from skills.reports_engine.engine import optimizations
+# 优化模块入口（已整合到 scripts/optimizations/）
+# 使用方式: from engine import optimizations
 # ---------------------------------------------------------------------------
-try:
-    from skills.quant_optimizations.quant_opt_20260615_trae.brinson_attribution import (
-        brinson_fachler as _brinson_fachler,
-        brinson_by_industry as _brinson_by_industry,
-        brinson_attribution_summary as _brinson_attribution_summary,
-    )
-    from skills.quant_optimizations.quant_opt_20260619_m3.extended_metrics.metrics import (
-        omega_ratio as _omega_ratio,
-        ulcer_index as _ulcer_index,
-        ulcer_performance_index as _ulcer_performance_index,
-        deflated_sharpe_ratio as _deflated_sharpe_ratio,
-    )
+from scripts.optimizations.brinson_attribution import (
+    brinson_fachler as _brinson_fachler,
+    brinson_by_industry as _brinson_by_industry,
+    brinson_attribution_summary as _brinson_attribution_summary,
+)
+from scripts.optimizations.extended_metrics import (
+    omega_ratio as _omega_ratio,
+    ulcer_index as _ulcer_index,
+    ulcer_performance_index as _ulcer_performance_index,
+    deflated_sharpe_ratio as _deflated_sharpe_ratio,
+)
 
-    class optimizations:
-        """报告引擎优化模块集合"""
-        brinson_fachler = _brinson_fachler
-        brinson_by_industry = _brinson_by_industry
-        brinson_attribution_summary = _brinson_attribution_summary
-        omega_ratio = _omega_ratio
-        ulcer_index = _ulcer_index
-        ulcer_performance_index = _ulcer_performance_index
-        deflated_sharpe_ratio = _deflated_sharpe_ratio
 
-        @staticmethod
-        def get_attribution_modules():
-            """返回所有可用的归因分析模块"""
-            return {
-                "brinson_fachler": _brinson_fachler,
-                "brinson_by_industry": _brinson_by_industry,
-                "brinson_attribution_summary": _brinson_attribution_summary,
-            }
+class optimizations:
+    """报告引擎优化模块集合"""
+    brinson_fachler = _brinson_fachler
+    brinson_by_industry = _brinson_by_industry
+    brinson_attribution_summary = _brinson_attribution_summary
+    omega_ratio = _omega_ratio
+    ulcer_index = _ulcer_index
+    ulcer_performance_index = _ulcer_performance_index
+    deflated_sharpe_ratio = _deflated_sharpe_ratio
 
-        @staticmethod
-        def get_extended_metrics_modules():
-            """返回所有可用的扩展指标模块"""
-            return {
-                "omega_ratio": _omega_ratio,
-                "ulcer_index": _ulcer_index,
-                "ulcer_performance_index": _ulcer_performance_index,
-                "deflated_sharpe_ratio": _deflated_sharpe_ratio,
-            }
+    @staticmethod
+    def get_attribution_modules():
+        """返回所有可用的归因分析模块"""
+        return {
+            "brinson_fachler": _brinson_fachler,
+            "brinson_by_industry": _brinson_by_industry,
+            "brinson_attribution_summary": _brinson_attribution_summary,
+        }
 
-except ImportError:
-    class optimizations:
-        """优化模块不可用"""
-        brinson_fachler = None
-        brinson_by_industry = None
-        brinson_attribution_summary = None
-        omega_ratio = None
-        ulcer_index = None
-        ulcer_performance_index = None
-        deflated_sharpe_ratio = None
+    @staticmethod
+    def get_extended_metrics_modules():
+        """返回所有可用的扩展指标模块"""
+        return {
+            "omega_ratio": _omega_ratio,
+            "ulcer_index": _ulcer_index,
+            "ulcer_performance_index": _ulcer_performance_index,
+            "deflated_sharpe_ratio": _deflated_sharpe_ratio,
+        }
