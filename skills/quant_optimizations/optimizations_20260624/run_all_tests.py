@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 # 确保能 import 现有 main 分支的代码做对比
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 
 from skills.quant_optimizations.optimizations_20260624.vectorized_backtest.vectorized_adapter import (
     VectorizedBacktester, signals_to_target_weights,

@@ -20,8 +20,8 @@ import json
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from brinson_attribution import (
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+from skills.quant_optimizations.quant_opt_20260615_trae.brinson_attribution import (
     brinson_fachler,
     brinson_by_industry,
     brinson_attribution_summary,

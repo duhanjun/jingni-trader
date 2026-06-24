@@ -17,7 +17,7 @@ sys.path.insert(0, _OPT_DIR)
 _OPT_ROOT = os.path.abspath(os.path.join(_OPT_DIR, ".."))
 sys.path.insert(0, _OPT_ROOT)
 
-_REPO_ROOT = os.path.abspath(os.path.join(_OPT_DIR, "..", ".."))  # /workspace
+_REPO_ROOT = os.path.abspath(os.path.join(_OPT_DIR, "..", "..", "..", ".."))  # /workspace
 
 
 def _load_module_from_path(name: str, path: str):
@@ -71,8 +71,8 @@ def native_adapter():
 
 @pytest.fixture
 def vectorized_adapter():
-    from vectorized_backtest import VectorizedAdapter
-    return VectorizedAdapter()
+    from vectorized_backtest import VectorizedBacktester
+    return VectorizedBacktester()
 
 
 @pytest.fixture(scope="session")

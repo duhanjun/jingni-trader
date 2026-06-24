@@ -18,14 +18,14 @@ import os
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from risk.circuit_breaker_v2 import CircuitBreakerV2
-from risk.portfolio_optimizer_v2 import PortfolioOptimizerV2
+from skills.quant_optimizations.optimizations_20260624.risk.circuit_breaker_v2 import CircuitBreakerV2
+from skills.quant_optimizations.optimizations_20260624.risk.portfolio_optimizer_v2 import PortfolioOptimizerV2
 
 
 # ---------------------------------------------------------------------------

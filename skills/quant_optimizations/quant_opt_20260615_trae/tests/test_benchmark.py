@@ -20,8 +20,8 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from vectorized_backtest import VectorizedBacktester
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+from skills.quant_optimizations.quant_opt_20260615_trae.vectorized_backtest import VectorizedBacktester
 
 
 def make_synth(n_dates=504, n_stocks=50, seed=42):

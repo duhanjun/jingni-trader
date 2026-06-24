@@ -17,8 +17,8 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from expr_engine import (
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+from skills.quant_optimizations.quant_opt_20260615_trae.expr_engine import (
     ExpressionEvaluator,
     evaluate_by_code,
     FactorExpressionError,
@@ -98,7 +98,7 @@ def test_temporal_ops():
 # ---------------------------------------------------------------------------
 def test_cross_sectional():
     print("\n[1.2] 横截面算子: Rank / ZScore / Normalize")
-    from expr_engine import Rank, ZScore, Normalize, Quantile
+    from skills.quant_optimizations.quant_opt_20260615_trae.expr_engine import Rank, ZScore, Normalize, Quantile
     rng = np.random.default_rng(1)
     n = 500
     s = pd.Series(rng.normal(size=n))

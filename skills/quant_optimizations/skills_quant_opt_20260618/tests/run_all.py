@@ -8,7 +8,7 @@ import os
 import time
 import importlib
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))))
 sys.path.insert(0, ROOT)
 
 TEST_DIR = os.path.dirname(os.path.abspath(__file__))

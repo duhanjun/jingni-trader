@@ -22,8 +22,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# 确保能 import optimizations_20260621_r2 模块
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# 确保能 import skills.quant_optimizations 模块
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 from skills.quant_optimizations.optimizations_20260621_r2.vectorized_factor import (
     compute_factors_vectorized,

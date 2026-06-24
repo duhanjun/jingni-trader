@@ -19,10 +19,10 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from expr_engine import evaluate_by_code
-from vectorized_backtest import VectorizedBacktester
-from brinson_attribution import brinson_fachler, brinson_attribution_summary
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+from skills.quant_optimizations.quant_opt_20260615_trae.expr_engine import evaluate_by_code
+from skills.quant_optimizations.quant_opt_20260615_trae.vectorized_backtest import VectorizedBacktester
+from skills.quant_optimizations.quant_opt_20260615_trae.brinson_attribution import brinson_fachler, brinson_attribution_summary
 
 
 def make_synth():

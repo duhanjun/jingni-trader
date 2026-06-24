@@ -18,19 +18,19 @@ import os
 import sys
 
 # 将 optimizations 目录加入 path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from backtest.native_adapter_v2 import (
+from skills.quant_optimizations.optimizations_20260624.backtest.native_adapter_v2 import (
     NativeAdapterV2,
     CloseSlippageFillModel,
     AShareFeeModel,
     Position,
 )
-from skills.quant_optimizations.tests_20260624.conftest_data import make_synthetic_panel, make_signals
+from skills.quant_optimizations.optimizations_20260624.tests.conftest_data import make_synthetic_panel, make_signals
 
 
 # ---------------------------------------------------------------------------

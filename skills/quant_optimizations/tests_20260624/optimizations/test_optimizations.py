@@ -22,14 +22,14 @@ import pandas as pd
 from scipy import stats
 
 # 将项目根目录加入路径
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "skills", "backtest-engine"))
 
 from scripts.adapters.native_adapter import NativeAdapter
-from scripts.optimizations.vectorized_adapter import VectorizedAdapter
-from scripts.optimizations.extended_metrics import ExtendedMetrics
-from scripts.optimizations.vectorized_ic import VectorizedIC
+from skills.quant_optimizations.skills_backtest_opt_20260624.vectorized_adapter import VectorizedAdapter
+from skills.quant_optimizations.skills_backtest_opt_20260624.extended_metrics import ExtendedMetrics
+from skills.quant_optimizations.skills_backtest_opt_20260624.vectorized_ic import VectorizedIC
 
 
 # ── 测试数据生成 ─────────────────────────────────────────

@@ -24,7 +24,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))))
 
 from skills.quant_optimizations.quant_opt_20260619.alpha_expression_engine import compute_factors, list_builtin_factors
 from skills.quant_optimizations.quant_opt_20260619.metrics import full_report

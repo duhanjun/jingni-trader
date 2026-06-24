@@ -15,13 +15,13 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from factor.factor_registry_v2 import (
+from skills.quant_optimizations.optimizations_20260624.factor.factor_registry_v2 import (
     FactorRegistry,
     Neutralizer,
     build_default_registry,

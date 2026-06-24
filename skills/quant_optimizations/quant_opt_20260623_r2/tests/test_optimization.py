@@ -36,7 +36,7 @@ from scipy import stats
 from sklearn.linear_model import LinearRegression
 
 # 确保能导入 quant_opt 包
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 
 from skills.quant_optimizations.quant_opt_20260623_r2.core.vectorized_backtest import VectorizedBacktestEngine
 from skills.quant_optimizations.quant_opt_20260623_r2.core.factor_expression import FactorExpressionEngine, PRESET_FACTORS
@@ -45,7 +45,7 @@ from skills.quant_optimizations.quant_opt_20260623_r2.tests.synthetic_data impor
 from skills.quant_optimizations.quant_opt_20260623_r2.tests.legacy_backtest import LegacyBacktestAdapter
 
 
-REPORT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "reports")
+REPORT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "reports")
 os.makedirs(REPORT_DIR, exist_ok=True)
 
 

@@ -14,10 +14,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "factor_expression_engine"))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "topk_dropout_strategy"))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "walk_forward_validation"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "factor_expression_engine"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "topk_dropout_strategy"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "walk_forward_validation"))
 
 from factor_expression_engine import FactorExpressionEngine
 from topk_dropout_strategy import TopKDropoutStrategy

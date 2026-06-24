@@ -110,7 +110,7 @@ def test_perf_vs_native_adapter(panel):
     import sys, os
     # native_adapter 用的是相对 import（from ..base import ...），
     # 所以需要把 skills/backtest-engine 目录加到 sys.path
-    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
     bt_path = os.path.join(project_root, "skills", "backtest-engine")
     if bt_path not in sys.path:
         sys.path.insert(0, bt_path)
