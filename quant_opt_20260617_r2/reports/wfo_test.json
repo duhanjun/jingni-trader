@@ -1,0 +1,30 @@
+{
+  "timestamp": "2026-06-17T16:16:25.502586",
+  "python": "3.12.13 (main, Apr 17 2026, 10:44:24) [GCC 13.3.0]",
+  "tests": {
+    "split_rolling": {
+      "passed": true
+    },
+    "split_anchored": {
+      "passed": true
+    },
+    "no_lookahead": {
+      "passed": true
+    },
+    "split_data_too_short": {
+      "passed": true
+    },
+    "wfo_end_to_end": {
+      "n_segments": 4,
+      "oos_total_return": 0.02882158344092578,
+      "oos_sharpe": 0.36550884612341383,
+      "oos_max_drawdown": -0.028622272074258714
+    },
+    "wfo_vs_static": {
+      "static_total_return": 0.03165223129774564,
+      "wfo_total_return": 0.02882158344092578,
+      "static_max_drawdown": -0.04043356687624722,
+      "wfo_max_drawdown": -0.028622272074258714
+    }
+  }
+}
