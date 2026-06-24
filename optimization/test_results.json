@@ -1,0 +1,38 @@
+{
+  "correctness": "PASS",
+  "performance": [
+    {
+      "n_codes": 20,
+      "n_days": 125,
+      "native_sec": 0.0809,
+      "native_ok": true,
+      "vectorized_sec": 0.0078,
+      "speedup": 10.4,
+      "vec_total_return": -11.66,
+      "vec_sharpe": -5.768
+    },
+    {
+      "n_codes": 50,
+      "n_days": 250,
+      "native_sec": 0.1818,
+      "native_ok": true,
+      "vectorized_sec": 0.0084,
+      "speedup": 21.7,
+      "vec_total_return": -11.95,
+      "vec_sharpe": -2.59
+    },
+    {
+      "n_codes": 100,
+      "n_days": 500,
+      "native_sec": 0.495,
+      "native_ok": true,
+      "vectorized_sec": 0.0098,
+      "speedup": 50.4,
+      "vec_total_return": -32.87,
+      "vec_sharpe": -4.855
+    }
+  ],
+  "factor_registry": "PASS",
+  "enhanced_metrics": "PASS",
+  "boundary": "PASS"
+}
