@@ -27,8 +27,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "skills", "backtest-engine"))
 
-from walk_forward.wfo import WalkForwardOptimizer, WFOConfig
-from backtest.vectorized_engine import VectorizedBacktestEngine, VectorizedBacktestConfig
+from quant_opt_20260617_r2.walk_forward.wfo import WalkForwardOptimizer, WFOConfig
+from quant_opt_20260617_r2.backtest.vectorized_engine import VectorizedBacktestEngine, VectorizedBacktestConfig
 
 
 # ======================================================================

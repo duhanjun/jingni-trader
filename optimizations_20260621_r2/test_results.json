@@ -9,21 +9,21 @@
       "category": "正确性",
       "status": "PASS",
       "detail": "公共列数=18, 最大绝对误差=0.00e+00",
-      "duration_sec": 0.1331
+      "duration_sec": 0.1986
     },
     {
       "name": "IC 分析数值一致（Spearman）",
       "category": "正确性",
       "status": "PASS",
       "detail": "最大绝对误差=0.00e+00",
-      "duration_sec": 5.9658
+      "duration_sec": 9.634
     },
     {
       "name": "回测权益曲线一致",
       "category": "正确性",
       "status": "PASS",
       "detail": "最终净值 base=838139.54, opt=838139.54, 最大误差=0.000000",
-      "duration_sec": 1.5826
+      "duration_sec": 2.5705
     },
     {
       "name": "回测交易笔数一致",
@@ -78,22 +78,22 @@
       "name": "因子计算性能",
       "category": "性能",
       "status": "PASS",
-      "detail": "base=0.316s, opt=0.224s, 加速比=1.41x",
-      "duration_sec": 0.2238
+      "detail": "base=0.515s, opt=0.381s, 加速比=1.35x",
+      "duration_sec": 0.3812
     },
     {
       "name": "IC 分析性能",
       "category": "性能",
       "status": "PASS",
-      "detail": "base=20.498s, opt=2.066s, 加速比=9.92x",
-      "duration_sec": 2.0664
+      "detail": "base=28.238s, opt=2.067s, 加速比=13.66x",
+      "duration_sec": 2.0675
     },
     {
       "name": "回测性能",
       "category": "性能",
       "status": "PASS",
-      "detail": "base=5.332s, opt=2.253s, 加速比=2.37x",
-      "duration_sec": 2.253
+      "detail": "base=5.394s, opt=2.228s, 加速比=2.42x",
+      "duration_sec": 2.2277
     },
     {
       "name": "因子计算-空数据",

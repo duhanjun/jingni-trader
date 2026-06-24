@@ -8,9 +8,9 @@
       "pass_rate": 1.0
     },
     "perf": {
-      "vectorized_sec": 0.0113,
-      "native_loop_sec": 0.0971,
-      "speedup": 8.6
+      "vectorized_sec": 0.0189,
+      "native_loop_sec": 0.1872,
+      "speedup": 9.9
     },
     "details": [
       {
@@ -34,9 +34,9 @@
         "info": "实际=2"
       },
       {
-        "name": "向量化更快 (加速比 8.6x)",
+        "name": "向量化更快 (加速比 9.9x)",
         "status": "PASS",
-        "info": "vec=0.0113s vs native=0.0971s"
+        "info": "vec=0.0189s vs native=0.1872s"
       },
       {
         "name": "两引擎终值同量级 (差异<30%)",
@@ -74,10 +74,10 @@
       "pass_rate": 1.0
     },
     "perf": {
-      "ic_decay_sec": 0.0332,
-      "native_ic_sec": 0.1019,
-      "vectorized_ic_sec": 0.0139,
-      "ic_speedup": 7.3
+      "ic_decay_sec": 0.0659,
+      "native_ic_sec": 0.1333,
+      "vectorized_ic_sec": 0.0133,
+      "ic_speedup": 10.0
     },
     "details": [
       {
@@ -131,9 +131,9 @@
         "info": "top=0.0482 > bottom=-0.0402"
       },
       {
-        "name": "向量化 IC 更快 (加速比 7.3x)",
+        "name": "向量化 IC 更快 (加速比 10.0x)",
         "status": "PASS",
-        "info": "vec=0.0139s vs native=0.1019s"
+        "info": "vec=0.0133s vs native=0.1333s"
       },
       {
         "name": "向量化 IC 与循环 IC 均值一致 (差<0.01)",
@@ -156,7 +156,7 @@
       "pass_rate": 1.0
     },
     "perf": {
-      "walk_forward_run_sec": 0.0806,
+      "walk_forward_run_sec": 0.1535,
       "single_train_ic": -0.1689,
       "rolling_train_ic": 0.8334
     },

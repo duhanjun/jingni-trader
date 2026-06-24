@@ -24,9 +24,9 @@
       "passed": "True",
       "detail": "最大相对误差 0.0306%",
       "metrics": {
-        "legacy_time_s": 0.0419,
-        "vec_time_s": 0.0278,
-        "speedup": 1.51
+        "legacy_time_s": 0.0905,
+        "vec_time_s": 0.0567,
+        "speedup": 1.6
       }
     },
     {
@@ -82,64 +82,64 @@
       "category": "performance",
       "name": "回测性能 small (20股×120天)",
       "passed": true,
-      "detail": "加速比 1.85x",
+      "detail": "加速比 2.21x",
       "metrics": {
         "scenario": "small",
         "n_stocks": 20,
         "n_days": 120,
-        "legacy_s": 0.0414,
-        "vec_s": 0.0224,
-        "speedup": 1.85
+        "legacy_s": 0.0835,
+        "vec_s": 0.0377,
+        "speedup": 2.21
       }
     },
     {
       "category": "performance",
       "name": "回测性能 medium (50股×250天)",
       "passed": true,
-      "detail": "加速比 3.41x",
+      "detail": "加速比 4.98x",
       "metrics": {
         "scenario": "medium",
         "n_stocks": 50,
         "n_days": 250,
-        "legacy_s": 0.1551,
-        "vec_s": 0.0454,
-        "speedup": 3.41
+        "legacy_s": 0.2658,
+        "vec_s": 0.0534,
+        "speedup": 4.98
       }
     },
     {
       "category": "performance",
       "name": "回测性能 large (100股×500天)",
       "passed": true,
-      "detail": "加速比 5.32x",
+      "detail": "加速比 5.36x",
       "metrics": {
         "scenario": "large",
         "n_stocks": 100,
         "n_days": 500,
-        "legacy_s": 0.5354,
-        "vec_s": 0.1006,
-        "speedup": 5.32
+        "legacy_s": 0.9246,
+        "vec_s": 0.1726,
+        "speedup": 5.36
       }
     },
     {
       "category": "performance",
       "name": "IC 分析向量化加速",
       "passed": true,
-      "detail": "加速比 8.75x",
+      "detail": "加速比 5.78x",
       "metrics": {
-        "loop_s": 0.2688,
-        "vec_s": 0.0307,
-        "speedup": 8.75
+        "loop_s": 0.3419,
+        "vec_s": 0.0592,
+        "speedup": 5.78
       }
     },
     {
       "category": "performance",
       "name": "因子表达式引擎开销",
       "passed": true,
-      "detail": "表达式 0.218s vs 手写 0.240s, 开销 0.91x",
+      "detail": "表达式 0.349s vs 手写 0.350s, 开销 1.00x",
       "metrics": {
-        "expr_s": 0.2185,
-        "manual_s": 0.2402,
-        "overhead_x": 0.91
+        "expr_s": 0.3492,
+        "manual_s": 0.3499,
+        "overhead_x": 1.0
       }
     },
     {
@@ -199,5 +199,5 @@
       "metrics": {}
     }
   ],
-  "timestamp": "2026-06-23T02:16:43.562401"
+  "timestamp": "2026-06-24T09:55:09.952136"
 }

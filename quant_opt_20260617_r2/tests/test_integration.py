@@ -28,9 +28,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "quant_opt_20260617"))
 
-from factor_lib.alpha158_lib import AlphaEngine
-from walk_forward.wfo import WalkForwardOptimizer, WFOConfig
-from backtest.vectorized_engine import VectorizedBacktestEngine, VectorizedBacktestConfig
+from quant_opt_20260617_r2.factor_lib.alpha158_lib import AlphaEngine
+from quant_opt_20260617_r2.walk_forward.wfo import WalkForwardOptimizer, WFOConfig
+from quant_opt_20260617_r2.backtest.vectorized_engine import VectorizedBacktestEngine, VectorizedBacktestConfig
 
 
 def make_data(n_stocks=30, n_days=800, seed=42) -> pd.DataFrame:

@@ -24,7 +24,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "quant_opt_20260617"))
 
-from factor_lib.alpha158_lib import (
+from quant_opt_20260617_r2.factor_lib.alpha158_lib import (
     AlphaEngine, AlphaRegistry, AlphaExpression,
     validate_pit, check_pit_leakage,
 )
