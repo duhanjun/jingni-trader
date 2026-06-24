@@ -247,3 +247,51 @@ if __name__ == "__main__":
 
     result = run(ctx)
     print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+
+
+# ---------------------------------------------------------------------------
+# 优化模块可选入口（来自 skills/quant_optimizations/）
+# 使用方式: from skills.backtest_engine.engine import optimizations
+# ---------------------------------------------------------------------------
+try:
+    from skills.quant_optimizations.skills_backtest_opt_20260624.vectorized_adapter import (
+        VectorizedAdapter as _VectorizedAdapter,
+    )
+    from skills.quant_optimizations.skills_backtest_opt_20260624.extended_metrics import (
+        ExtendedMetrics as _ExtendedMetrics,
+    )
+    from skills.quant_optimizations.skills_backtest_opt_20260624.vectorized_ic import (
+        VectorizedIC as _VectorizedIC,
+    )
+    from skills.quant_optimizations.optimizations_20260624.backtest.native_adapter_v2 import (
+        NativeAdapterV2 as _NativeAdapterV2,
+    )
+    from skills.quant_optimizations.optimizations_20260624.walk_forward.walk_forward_validator import (
+        WalkForwardValidator as _WalkForwardValidator,
+    )
+
+    class optimizations:
+        """回测引擎优化模块集合（懒加载，不可用时不会报错）"""
+        VectorizedAdapter = _VectorizedAdapter
+        NativeAdapterV2 = _NativeAdapterV2
+        ExtendedMetrics = _ExtendedMetrics
+        VectorizedIC = _VectorizedIC
+        WalkForwardValidator = _WalkForwardValidator
+
+        @staticmethod
+        def get_vectorized_backtest_engines():
+            """返回所有可用的向量化回测引擎类"""
+            engines = {
+                "vectorized_adapter": _VectorizedAdapter,
+                "native_adapter_v2": _NativeAdapterV2,
+            }
+            return engines
+
+except ImportError:
+    class optimizations:
+        """优化模块不可用（skills.quant_optimizations 未安装或路径未配置）"""
+        VectorizedAdapter = None
+        NativeAdapterV2 = None
+        ExtendedMetrics = None
+        VectorizedIC = None
+        WalkForwardValidator = None

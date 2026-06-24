@@ -479,3 +479,113 @@ if __name__ == "__main__":
 
     result = run(ctx)
     print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+
+
+# ---------------------------------------------------------------------------
+# 优化模块可选入口（来自 skills/quant_optimizations/）
+# 使用方式: from skills.factor_engine.engine import optimizations
+# ---------------------------------------------------------------------------
+try:
+    from skills.quant_optimizations.quant_opt_20260618.expression_dsl.evaluator import (
+        Evaluator as _FactorDSLEvaluator,
+    )
+    from skills.quant_optimizations.quant_opt_20260618.expression_dsl.parser import (
+        Parser as _FactorDSLParser,
+    )
+    from skills.quant_optimizations.quant_opt_20260618_r3.factor_dsl import (
+        FactorEngine as _FactorEngine,
+    )
+    from skills.quant_optimizations.quant_opt_20260618_r3.lookahead_detector import (
+        detect_in_code as _detect_lookahead_in_code,
+        detect_in_dataframe as _detect_lookahead_in_dataframe,
+    )
+    from skills.quant_optimizations.quant_opt_20260617_r2.factor_lib.alpha158_lib import (
+        AlphaEngine as _AlphaEngine,
+        AlphaRegistry as _AlphaRegistry,
+    )
+    from skills.quant_optimizations.quant_opt_20260618.factor_validator import (
+        validate_factor as _validate_factor,
+        FactorVerdict as _FactorVerdict,
+    )
+    from skills.quant_optimizations.quant_opt_20260618.ic_vectorized import (
+        ic_analysis_batch as _ic_analysis_batch,
+        ic_summary as _ic_summary,
+    )
+    from skills.quant_optimizations.skills_quant_opt_20260618.ic_analysis.ic_decay import (
+        ICDecayAnalyzer as _ICDecayAnalyzer,
+    )
+    from skills.quant_optimizations.optimizations_20260624.factor.factor_registry_v2 import (
+        FactorRegistry as _FactorRegistryV2,
+        Neutralizer as _NeutralizerV2,
+    )
+    from skills.quant_optimizations.optimizations_20260622_v2.vectorized_neutralize import (
+        neutralize_factor as _neutralize_factor,
+        neutralize_factors_batch as _neutralize_factors_batch,
+    )
+    from skills.quant_optimizations.optimizations_20260622_v2.vectorized_ic import (
+        calc_ic_series as _calc_ic_series,
+        calc_ic_stats as _calc_ic_stats,
+    )
+
+    class optimizations:
+        """因子引擎优化模块集合"""
+        FactorDSLEvaluator = _FactorDSLEvaluator
+        FactorDSLParser = _FactorDSLParser
+        FactorEngine = _FactorEngine
+        detect_lookahead_in_code = _detect_lookahead_in_code
+        detect_lookahead_in_dataframe = _detect_lookahead_in_dataframe
+        AlphaEngine = _AlphaEngine
+        AlphaRegistry = _AlphaRegistry
+        validate_factor = _validate_factor
+        FactorVerdict = _FactorVerdict
+        ic_analysis_batch = _ic_analysis_batch
+        ic_summary = _ic_summary
+        ICDecayAnalyzer = _ICDecayAnalyzer
+        FactorRegistryV2 = _FactorRegistryV2
+        NeutralizerV2 = _NeutralizerV2
+        neutralize_factor = _neutralize_factor
+        neutralize_factors_batch = _neutralize_factors_batch
+        calc_ic_series = _calc_ic_series
+        calc_ic_stats = _calc_ic_stats
+
+        @staticmethod
+        def get_factor_dsl_engines():
+            """返回所有可用的因子DSL引擎"""
+            return {
+                "factor_engine": _FactorEngine,
+                "expression_dsl_evaluator": _FactorDSLEvaluator,
+                "expression_dsl_parser": _FactorDSLParser,
+                "alpha_engine": _AlphaEngine,
+            }
+
+        @staticmethod
+        def get_ic_analyzers():
+            """返回所有可用的IC分析器"""
+            return {
+                "ic_analysis_batch": _ic_analysis_batch,
+                "ic_decay_analyzer": _ICDecayAnalyzer,
+                "calc_ic_series": _calc_ic_series,
+                "calc_ic_stats": _calc_ic_stats,
+            }
+
+except ImportError:
+    class optimizations:
+        """优化模块不可用"""
+        FactorDSLEvaluator = None
+        FactorDSLParser = None
+        FactorEngine = None
+        detect_lookahead_in_code = None
+        detect_lookahead_in_dataframe = None
+        AlphaEngine = None
+        AlphaRegistry = None
+        validate_factor = None
+        FactorVerdict = None
+        ic_analysis_batch = None
+        ic_summary = None
+        ICDecayAnalyzer = None
+        FactorRegistryV2 = None
+        NeutralizerV2 = None
+        neutralize_factor = None
+        neutralize_factors_batch = None
+        calc_ic_series = None
+        calc_ic_stats = None

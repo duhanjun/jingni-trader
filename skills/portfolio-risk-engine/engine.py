@@ -455,3 +455,53 @@ if __name__ == "__main__":
 
     result = run(ctx)
     print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+
+
+# ---------------------------------------------------------------------------
+# 优化模块可选入口（来自 skills/quant_optimizations/）
+# 使用方式: from skills.portfolio_risk_engine.engine import optimizations
+# ---------------------------------------------------------------------------
+try:
+    from skills.quant_optimizations.optimizations_20260624.risk.circuit_breaker_v2 import (
+        CircuitBreakerV2 as _CircuitBreakerV2,
+    )
+    from skills.quant_optimizations.optimizations_20260624.risk.portfolio_optimizer_v2 import (
+        PortfolioOptimizerV2 as _PortfolioOptimizerV2,
+    )
+    from skills.quant_optimizations.quant_opt_20260619.risk_engine import (
+        RiskEngine as _RiskEngine,
+    )
+    from skills.quant_optimizations.quant_opt_20260618_r3.walk_forward import (
+        WalkForwardValidator as _WalkForwardValidator,
+    )
+
+    class optimizations:
+        """风控引擎优化模块集合"""
+        CircuitBreakerV2 = _CircuitBreakerV2
+        PortfolioOptimizerV2 = _PortfolioOptimizerV2
+        RiskEngine = _RiskEngine
+        WalkForwardValidator = _WalkForwardValidator
+
+        @staticmethod
+        def get_risk_modules():
+            """返回所有可用的风控优化模块"""
+            return {
+                "circuit_breaker_v2": _CircuitBreakerV2,
+                "portfolio_optimizer_v2": _PortfolioOptimizerV2,
+                "risk_engine": _RiskEngine,
+            }
+
+        @staticmethod
+        def get_walk_forward_modules():
+            """返回所有可用的Walk-Forward验证模块"""
+            return {
+                "walk_forward_validator": _WalkForwardValidator,
+            }
+
+except ImportError:
+    class optimizations:
+        """优化模块不可用"""
+        CircuitBreakerV2 = None
+        PortfolioOptimizerV2 = None
+        RiskEngine = None
+        WalkForwardValidator = None
