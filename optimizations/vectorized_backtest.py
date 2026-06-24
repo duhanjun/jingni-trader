@@ -1,463 +1,272 @@
 """
-向量化回测引擎（验证用）
-========================
-OPTIMIZATION 1: 用预分组字典消除 O(n²) 布尔掩码。
+向量化回测引擎 + T+1 修复 + 基准跟踪
 
-借鉴来源：
-- VectorBT 的“向量化优先、避免朴素循环”哲学
-- 但保留逐日循环（路径依赖逻辑：T+1、资金扣减、持仓状态无法纯向量化，且不引入 numba）
+借鉴来源:
+  - FinRL-X (arXiv 2603.21330): 部署一致性架构 —— 回测执行语义应与实盘一致
+  - QuantConnect LEAN: 事件驱动 + 模块化成本模型
 
-本文件提供两个实现，逻辑完全一致，仅“取当日数据”方式不同：
-- run_original_backtest: 复刻 native_adapter.py 的原始 O(n²) 布尔掩码写法
-- VectorizedBacktest.run_backtest: 预先一次性构建 data_by_date / signals_by_date 字典，
-  循环体内仅做 O(1) 字典查找，消除重复布尔掩码
+jingni-trader 现有 native_adapter.py 的三个核心问题:
+  1. 性能: 逐日循环 + signals[signals['date']==dt] 过滤导致 O(n²)
+  2. 正确性 BUG: t_plus_1 参数被接收但从未实际执行（同日买卖未阻止）
+  3. 基准缺失: benchmark 参数接收但 equity_curve 未包含基准净值
 
-两者必须产出 IDENTICAL 的 equity_curve 与 trades（浮点误差 ~1e-10）。
-
-原始交易逻辑（必须逐字镜像，来自 native_adapter.py）：
-- data/signals 按 ['date','code'] 排序；dates = sorted(unique signal dates)
-- cash=init_capital, positions={}, 逐 dt:
-  - day_data_map = 当日数据 set_index('code')
-  - 卖出阶段: signal<0 的 code；无持仓/跌停跳过；price=close；shares=持仓；
-    sell_amount=price*shares；commission=max(sell_amount*rate,5)；tax=sell_amount*stamp；
-    cost=commission+tax；cash+=sell_amount-cost；记录 trade(pnl=sell_amount-cost)；持仓清0
-  - 买入阶段: signal>0 的 buy_codes；n_buy=len；budget=cash*0.95/n_buy；
-    涨停跳过；price=close*(1+slippage)；shares=int(budget/price/100)*100；
-    若 shares<=0 跳过；buy_amount=price*shares；commission=max(buy_amount*rate,5)；
-    cost=buy_amount+commission；若 cost>cash 则 shares=int(cash*0.98/price/100)*100 重算；
-    cash-=cost；positions[code]+=shares；记录 trade(pnl=-buy_amount-commission)
-  - market_value = sum(持仓股数 * 当日 close)（仅当日有数据的持仓计入）
-  - total_equity=cash+market_value；记录 equity
-- equity_curve=DataFrame(equity_records)；trades_df=DataFrame(trades)
-- metrics = calc_all_metrics(eq_series, trades_df)
+本模块通过向量化（pivot + 矩阵运算）解决性能问题，
+显式实现 T+1 约束，并加入基准净值跟踪。
 """
-from __future__ import annotations
-from typing import Dict, Any
 import numpy as np
 import pandas as pd
-from datetime import datetime
+from typing import Dict, Any, Optional
+
+from .cost_models import (
+    CostCalculator, ConstantSlippage, AShareFeeModel, TradeContext
+)
 
 
-# -------------------------------------------------------------------
-# 绩效指标计算（忠实复刻 backtest-engine base/base_backtest.py 的 BaseBacktestMetrics）
-# 复制到此处以保证验证代码自包含，不依赖 skills 包的相对导入。
-# -------------------------------------------------------------------
-class _Metrics:
-    """与 BaseBacktestMetrics 行为一致的轻量复刻（仅供验证用）"""
-
-    @staticmethod
-    def calc_total_return(equity_curve: pd.Series) -> float:
-        if len(equity_curve) < 2:
-            return 0.0
-        return float(equity_curve.iloc[-1] / equity_curve.iloc[0] - 1)
-
-    @staticmethod
-    def calc_annual_return(equity_curve: pd.Series, trading_days: int = 252) -> float:
-        if len(equity_curve) < 2:
-            return 0.0
-        total_return = equity_curve.iloc[-1] / equity_curve.iloc[0]
-        n_years = len(equity_curve) / trading_days
-        if n_years <= 0:
-            return 0.0
-        return float(total_return ** (1 / n_years) - 1)
-
-    @staticmethod
-    def calc_volatility(returns: pd.Series, trading_days: int = 252) -> float:
-        if len(returns) < 2:
-            return 0.0
-        return float(returns.std() * np.sqrt(trading_days))
-
-    @staticmethod
-    def calc_sharpe(returns: pd.Series, risk_free: float = 0.03, trading_days: int = 252) -> float:
-        vol = _Metrics.calc_volatility(returns, trading_days)
-        if vol == 0:
-            return 0.0
-        ann_return = returns.mean() * trading_days
-        return float((ann_return - risk_free) / vol)
-
-    @staticmethod
-    def calc_max_drawdown(equity_curve: pd.Series) -> float:
-        if len(equity_curve) < 2:
-            return 0.0
-        cumulative_max = equity_curve.cummax()
-        drawdown = (equity_curve - cumulative_max) / cumulative_max
-        return float(drawdown.min())
-
-    @staticmethod
-    def calc_calmar(equity_curve: pd.Series, trading_days: int = 252) -> float:
-        ann_return = _Metrics.calc_annual_return(equity_curve, trading_days)
-        mdd = abs(_Metrics.calc_max_drawdown(equity_curve))
-        if mdd == 0:
-            return 0.0
-        return float(ann_return / mdd)
-
-    @staticmethod
-    def calc_win_rate(trades: pd.DataFrame) -> float:
-        # 注意：这里复刻的是“原始有 bug”的胜率（统计全部 trade，含买入）
-        if trades.empty:
-            return 0.0
-        winning = (trades["pnl"] > 0).sum()
-        total = len(trades)
-        return float(winning / total) if total > 0 else 0.0
-
-    @staticmethod
-    def calc_sortino(returns: pd.Series, risk_free: float = 0.03, trading_days: int = 252) -> float:
-        negative_returns = returns[returns < 0]
-        if len(negative_returns) < 2:
-            return 0.0
-        downside_std = negative_returns.std() * np.sqrt(trading_days)
-        if downside_std == 0:
-            return 0.0
-        ann_return = returns.mean() * trading_days
-        return float((ann_return - risk_free) / downside_std)
-
-    @staticmethod
-    def calc_all_metrics(equity_curve: pd.Series, trades: pd.DataFrame,
-                         risk_free: float = 0.03, trading_days: int = 252) -> Dict[str, Any]:
-        returns = equity_curve.pct_change().dropna()
-        return {
-            "total_return": _Metrics.calc_total_return(equity_curve),
-            "annual_return": _Metrics.calc_annual_return(equity_curve, trading_days),
-            "volatility": _Metrics.calc_volatility(returns, trading_days),
-            "sharpe_ratio": _Metrics.calc_sharpe(returns, risk_free, trading_days),
-            "max_drawdown": _Metrics.calc_max_drawdown(equity_curve),
-            "calmar_ratio": _Metrics.calc_calmar(equity_curve, trading_days),
-            "sortino_ratio": _Metrics.calc_sortino(returns, risk_free, trading_days),
-            "win_rate": _Metrics.calc_win_rate(trades),
-            "total_trades": len(trades),
-            "calculation_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
-
-
-def _empty_result() -> Dict[str, Any]:
-    return {
-        "trades": pd.DataFrame(),
-        "positions": pd.DataFrame(),
-        "equity_curve": pd.DataFrame(),
-        "metrics": {},
-        "report_path": "",
-    }
-
-
-# -------------------------------------------------------------------
-# 原始实现：逐字复刻 native_adapter.py 的 O(n²) 布尔掩码写法（用于对比基准）
-# -------------------------------------------------------------------
-def run_original_backtest(
-    data: pd.DataFrame,
-    signals: pd.DataFrame,
-    init_capital: float = 1e6,
-    benchmark: str = "000300.SH",
-    commission_rate: float = 0.00025,
-    stamp_tax_rate: float = 0.001,
-    t_plus_1: bool = True,
-    price_limit: bool = True,
-    slippage: float = 0.001,
-) -> Dict[str, Any]:
-    """原始 O(n²) 布尔掩码回测（与 native_adapter.run_backtest 逻辑完全一致）"""
-    if data.empty or signals.empty:
-        return _empty_result()
-
-    data = data.sort_values(["date", "code"]).reset_index(drop=True)
-    signals = signals.sort_values(["date", "code"]).reset_index(drop=True)
-
-    dates = sorted(signals["date"].unique())
-    if not dates:
-        return _empty_result()
-
-    cash = init_capital
-    positions: Dict[str, int] = {}
-    equity_records = []
-    trades = []
-
-    for dt in dates:
-        # ---- 原始写法：每次循环都做两次 O(n) 布尔掩码 ----
-        day_signal = signals[signals["date"] == dt]
-        day_data = data[data["date"] == dt]
-
-        if day_data.empty:
-            continue
-
-        day_data_map = day_data.set_index("code")
-
-        sell_codes = []
-        buy_codes = []
-        for _, row in day_signal.iterrows():
-            code = row["code"]
-            sig = row.get("signal", 0)
-            if isinstance(sig, (int, float, np.integer, np.floating)):
-                sig = float(sig)
-                if sig > 0:
-                    buy_codes.append(code)
-                elif sig < 0:
-                    sell_codes.append(code)
-
-        # 卖出阶段
-        for code in sell_codes:
-            if code not in positions or positions[code] <= 0:
-                continue
-            if code not in day_data_map.index:
-                continue
-            price_row = day_data_map.loc[code]
-            if price_limit and price_row.get("is_limit_down", False):
-                continue
-            price = price_row["close"]
-            shares = positions[code]
-            sell_amount = price * shares
-            commission = max(sell_amount * commission_rate, 5)
-            tax = sell_amount * stamp_tax_rate
-            cost = commission + tax
-            cash += sell_amount - cost
-            trades.append({
-                "date": dt, "code": code, "action": "sell",
-                "price": price, "shares": shares, "amount": sell_amount,
-                "commission": commission, "tax": tax, "pnl": sell_amount - cost,
-            })
-            positions[code] = 0
-
-        # 买入阶段
-        if buy_codes:
-            n_buy = len(buy_codes)
-            budget_per_stock = cash * 0.95 / n_buy
-            for code in buy_codes:
-                if code not in day_data_map.index:
-                    continue
-                price_row = day_data_map.loc[code]
-                if price_limit and price_row.get("is_limit_up", False):
-                    continue
-                price = price_row["close"] * (1 + slippage)
-                shares = int(budget_per_stock / price / 100) * 100
-                if shares <= 0:
-                    continue
-                buy_amount = price * shares
-                commission = max(buy_amount * commission_rate, 5)
-                cost = buy_amount + commission
-                if cost > cash:
-                    shares = int((cash * 0.98) / price / 100) * 100
-                    if shares <= 0:
-                        continue
-                    buy_amount = price * shares
-                    commission = max(buy_amount * commission_rate, 5)
-                    cost = buy_amount + commission
-                cash -= cost
-                positions[code] = positions.get(code, 0) + shares
-                trades.append({
-                    "date": dt, "code": code, "action": "buy",
-                    "price": price, "shares": shares, "amount": buy_amount,
-                    "commission": commission, "tax": 0, "pnl": -buy_amount - commission,
-                })
-
-        # 市值
-        market_value = 0
-        for code, shares in list(positions.items()):
-            if shares <= 0:
-                continue
-            if code in day_data_map.index:
-                market_value += shares * day_data_map.loc[code, "close"]
-        total_equity = cash + market_value
-
-        equity_records.append({
-            "date": dt,
-            "equity": total_equity,
-            "cash": cash,
-            "market_value": market_value,
-            "position_count": sum(1 for s in positions.values() if s > 0),
-        })
-
-    equity_curve = pd.DataFrame(equity_records)
-    trades_df = pd.DataFrame(trades)
-
-    if equity_curve.empty:
-        return _empty_result()
-
-    eq_series = equity_curve.set_index("date")["equity"]
-    metrics = _Metrics.calc_all_metrics(eq_series, trades_df)
-
-    return {
-        "trades": trades_df,
-        "positions": pd.DataFrame(list(positions.items()), columns=["code", "shares"]),
-        "equity_curve": equity_curve,
-        "metrics": metrics,
-        "report_path": "",
-    }
-
-
-# -------------------------------------------------------------------
-# 优化实现：预先一次性构建按日字典，循环体内仅 O(1) 查找
-# -------------------------------------------------------------------
-class VectorizedBacktest:
+class VectorizedBacktester:
     """
-    向量化回测引擎。
+    向量化回测引擎
 
-    核心优化：在进入逐日循环前，一次性把 data / signals 按 date 分组并构建字典：
-        data_by_date[dt]    = 当日 DataFrame（已 set_index('code')）
-        signals_by_date[dt] = 当日 signal DataFrame
-    循环体内用字典查找替代原来的 signals[signals['date']==dt] / data[data['date']==dt]
-    两次 O(n) 布尔掩码，把 O(n_days * n_rows) 的掩码开销降为 O(n_rows) 的一次性分组。
-
-    逐日循环本身保留（路径依赖：cash/positions 状态机无法纯向量化）。
+    核心优化:
+      - 用 pivot 将 (date, code) -> 宽表，矩阵运算替代逐行循环
+      - 显式 T+1: 记录买入日期，次日不可卖出
+      - 基准净值: equity_curve 含 benchmark 列，便于计算 alpha/beta/IR
+      - 模块化成本: 接入 CostCalculator
     """
 
-    def run_backtest(
+    def __init__(
+        self,
+        cost_calculator: Optional[CostCalculator] = None,
+        t_plus_1: bool = True,
+        price_limit: bool = True,
+    ):
+        self.cost_calc = cost_calculator or CostCalculator(
+            ConstantSlippage(0.001), AShareFeeModel()
+        )
+        self.t_plus_1 = t_plus_1
+        self.price_limit = price_limit
+
+    def run(
         self,
         data: pd.DataFrame,
         signals: pd.DataFrame,
         init_capital: float = 1e6,
         benchmark: str = "000300.SH",
-        commission_rate: float = 0.00025,
-        stamp_tax_rate: float = 0.001,
-        t_plus_1: bool = True,
-        price_limit: bool = True,
-        slippage: float = 0.001,
     ) -> Dict[str, Any]:
         if data.empty or signals.empty:
-            return _empty_result()
+            return self._empty_result()
 
-        data = data.sort_values(["date", "code"]).reset_index(drop=True)
-        signals = signals.sort_values(["date", "code"]).reset_index(drop=True)
+        # --- 预处理: pivot 为宽表，避免逐日过滤 ---
+        price_wide = data.pivot_table(index='date', columns='code', values='close')
+        price_wide = price_wide.sort_index()
 
-        dates = sorted(signals["date"].unique())
-        if not dates:
-            return _empty_result()
+        # 涨跌停标记（宽表）
+        limit_up = data.pivot_table(index='date', columns='code', values='is_limit_up', aggfunc='max').reindex_like(price_wide).fillna(False)
+        limit_down = data.pivot_table(index='date', columns='code', values='is_limit_down', aggfunc='max').reindex_like(price_wide).fillna(False)
 
-        # ---- 关键优化：一次性预分组，避免循环内重复布尔掩码 ----
-        # data_by_date: {dt: 当日数据 set_index('code')}，等价于原始每次 day_data.set_index('code')
-        data_by_date: Dict[Any, pd.DataFrame] = {
-            dt: group.set_index("code")
-            for dt, group in data.groupby("date", sort=False)
-        }
-        # signals_by_date: {dt: 当日 signal DataFrame}，行内顺序保持原始（已按 date,code 排序）
-        signals_by_date: Dict[Any, pd.DataFrame] = {
-            dt: group for dt, group in signals.groupby("date", sort=False)
-        }
+        # 成交量宽表（用于量价滑点）
+        vol_wide = data.pivot_table(index='date', columns='code', values='volume', aggfunc='sum').reindex_like(price_wide).fillna(0)
+
+        # 信号宽表: 1 买入, -1 卖出, 0 无
+        sig_wide = signals.pivot_table(
+            index='date', columns='code', values='signal', aggfunc='max'
+        ).reindex_like(price_wide).fillna(0)
+
+        # 基准净值
+        bench_close = data[data['code'] == benchmark].set_index('date')['close'] if benchmark in price_wide.columns else None
+
+        dates = price_wide.index.tolist()
+        codes = price_wide.columns.tolist()
 
         cash = init_capital
-        positions: Dict[str, int] = {}
+        # shares[code] = 持仓股数; buy_date[code] = 最近买入日期（用于T+1）
+        shares = {c: 0 for c in codes}
+        buy_date = {c: None for c in codes}
+
         equity_records = []
         trades = []
 
-        for dt in dates:
-            # O(1) 字典查找替代 O(n) 布尔掩码
-            day_data_map = data_by_date.get(dt)
-            if day_data_map is None or day_data_map.empty:
-                continue
+        for i, dt in enumerate(dates):
+            prices = price_wide.loc[dt]
+            day_sigs = sig_wide.loc[dt]
+            day_vol = vol_wide.loc[dt]
+            day_limit_up = limit_up.loc[dt]
+            day_limit_down = limit_down.loc[dt]
 
-            day_signal = signals_by_date.get(dt)
-            sell_codes = []
-            buy_codes = []
-            if day_signal is not None:
-                for _, row in day_signal.iterrows():
-                    code = row["code"]
-                    sig = row.get("signal", 0)
-                    if isinstance(sig, (int, float, np.integer, np.floating)):
-                        sig = float(sig)
-                        if sig > 0:
-                            buy_codes.append(code)
-                        elif sig < 0:
-                            sell_codes.append(code)
-
-            # 卖出阶段（逻辑与原始完全一致）
+            # --- 1. 先卖出 ---
+            sell_codes = codes if not isinstance(day_sigs, pd.Series) else day_sigs[day_sigs < 0].index.tolist()
             for code in sell_codes:
-                if code not in positions or positions[code] <= 0:
+                if shares.get(code, 0) <= 0:
                     continue
-                if code not in day_data_map.index:
+                # T+1 检查: 买入当日不可卖出
+                if self.t_plus_1 and buy_date.get(code) == dt:
                     continue
-                price_row = day_data_map.loc[code]
-                if price_limit and price_row.get("is_limit_down", False):
+                if pd.isna(prices.get(code)):
                     continue
-                price = price_row["close"]
-                shares = positions[code]
-                sell_amount = price * shares
-                commission = max(sell_amount * commission_rate, 5)
-                tax = sell_amount * stamp_tax_rate
-                cost = commission + tax
-                cash += sell_amount - cost
-                trades.append({
-                    "date": dt, "code": code, "action": "sell",
-                    "price": price, "shares": shares, "amount": sell_amount,
-                    "commission": commission, "tax": tax, "pnl": sell_amount - cost,
-                })
-                positions[code] = 0
+                if self.price_limit and day_limit_down.get(code, False):
+                    continue  # 跌停无法卖出
 
-            # 买入阶段（逻辑与原始完全一致）
+                vol = day_vol.get(code, 0)
+                ctx = TradeContext(
+                    price=float(prices[code]),
+                    shares=float(shares[code]),
+                    side='sell',
+                    volume=float(vol) if vol > 0 else None,
+                )
+                fill_price, fees = self.cost_calc.compute(ctx)
+                sell_amount = fill_price * ctx.shares
+                total_cost = fees['commission'] + fees['tax'] + fees.get('transfer_fee', 0)
+                cash += sell_amount - total_cost
+                trades.append({
+                    'date': dt, 'code': code, 'action': 'sell',
+                    'price': fill_price, 'shares': ctx.shares, 'amount': sell_amount,
+                    'commission': fees['commission'], 'tax': fees['tax'],
+                })
+                shares[code] = 0
+                buy_date[code] = None
+
+            # --- 2. 再买入 ---
+            buy_codes = day_sigs[day_sigs > 0].index.tolist() if isinstance(day_sigs, pd.Series) else []
             if buy_codes:
                 n_buy = len(buy_codes)
-                budget_per_stock = cash * 0.95 / n_buy
+                budget = cash * 0.95 / n_buy
                 for code in buy_codes:
-                    if code not in day_data_map.index:
+                    if pd.isna(prices.get(code)):
                         continue
-                    price_row = day_data_map.loc[code]
-                    if price_limit and price_row.get("is_limit_up", False):
+                    if self.price_limit and day_limit_up.get(code, False):
+                        continue  # 涨停无法买入
+
+                    vol = day_vol.get(code, 0)
+                    # 先估算股数（用原始价），再用成本计算器精算
+                    est_price = float(prices[code]) * 1.001
+                    est_shares = int(budget / est_price / 100) * 100
+                    if est_shares <= 0:
                         continue
-                    price = price_row["close"] * (1 + slippage)
-                    shares = int(budget_per_stock / price / 100) * 100
-                    if shares <= 0:
-                        continue
-                    buy_amount = price * shares
-                    commission = max(buy_amount * commission_rate, 5)
-                    cost = buy_amount + commission
-                    if cost > cash:
-                        shares = int((cash * 0.98) / price / 100) * 100
-                        if shares <= 0:
+
+                    ctx = TradeContext(
+                        price=float(prices[code]),
+                        shares=float(est_shares),
+                        side='buy',
+                        volume=float(vol) if vol > 0 else None,
+                    )
+                    fill_price, fees = self.cost_calc.compute(ctx)
+                    buy_amount = fill_price * est_shares
+                    total_cost = buy_amount + fees['commission'] + fees.get('transfer_fee', 0)
+                    if total_cost > cash:
+                        est_shares = int((cash * 0.98) / fill_price / 100) * 100
+                        if est_shares <= 0:
                             continue
-                        buy_amount = price * shares
-                        commission = max(buy_amount * commission_rate, 5)
-                        cost = buy_amount + commission
-                    cash -= cost
-                    positions[code] = positions.get(code, 0) + shares
+                        ctx.shares = float(est_shares)
+                        fill_price, fees = self.cost_calc.compute(ctx)
+                        buy_amount = fill_price * est_shares
+                        total_cost = buy_amount + fees['commission'] + fees.get('transfer_fee', 0)
+
+                    cash -= total_cost
+                    shares[code] = shares.get(code, 0) + est_shares
+                    buy_date[code] = dt  # 记录买入日期用于T+1
                     trades.append({
-                        "date": dt, "code": code, "action": "buy",
-                        "price": price, "shares": shares, "amount": buy_amount,
-                        "commission": commission, "tax": 0, "pnl": -buy_amount - commission,
+                        'date': dt, 'code': code, 'action': 'buy',
+                        'price': fill_price, 'shares': est_shares, 'amount': buy_amount,
+                        'commission': fees['commission'], 'tax': 0,
                     })
 
-            # 市值（逻辑与原始完全一致）
-            market_value = 0
-            for code, shares in list(positions.items()):
-                if shares <= 0:
+            # --- 3. 计算当日总权益 ---
+            market_value = 0.0
+            for code, sh in shares.items():
+                if sh <= 0 or pd.isna(prices.get(code)):
                     continue
-                if code in day_data_map.index:
-                    market_value += shares * day_data_map.loc[code, "close"]
-            total_equity = cash + market_value
+                market_value += sh * float(prices[code])
+
+            bench_val = float(bench_close.loc[dt]) if bench_close is not None and dt in bench_close.index else np.nan
 
             equity_records.append({
-                "date": dt,
-                "equity": total_equity,
-                "cash": cash,
-                "market_value": market_value,
-                "position_count": sum(1 for s in positions.values() if s > 0),
+                'date': dt,
+                'equity': cash + market_value,
+                'cash': cash,
+                'market_value': market_value,
+                'position_count': sum(1 for s in shares.values() if s > 0),
+                'benchmark': bench_val,
             })
 
         equity_curve = pd.DataFrame(equity_records)
         trades_df = pd.DataFrame(trades)
 
         if equity_curve.empty:
-            return _empty_result()
+            return self._empty_result()
 
-        eq_series = equity_curve.set_index("date")["equity"]
-        metrics = _Metrics.calc_all_metrics(eq_series, trades_df)
+        metrics = self._calc_metrics(equity_curve, init_capital)
 
         return {
             "trades": trades_df,
-            "positions": pd.DataFrame(list(positions.items()), columns=["code", "shares"]),
+            "positions": pd.DataFrame(
+                [(c, s) for c, s in shares.items() if s > 0],
+                columns=['code', 'shares'],
+            ) if any(s > 0 for s in shares.values()) else pd.DataFrame(columns=['code', 'shares']),
             "equity_curve": equity_curve,
             "metrics": metrics,
             "report_path": "",
         }
 
+    def _calc_metrics(self, equity_curve: pd.DataFrame, init_capital: float) -> Dict[str, float]:
+        """计算绩效指标，含基准相对指标（alpha/beta/IR）"""
+        eq = equity_curve.set_index('date')['equity']
+        if len(eq) < 2:
+            return {}
 
-if __name__ == "__main__":
-    import sys
-    import os
-    sys.path.insert(0, os.path.dirname(__file__))
-    from data_generator import generate_test_data
+        returns = eq.pct_change().dropna()
+        cumulative = (1 + returns).cumprod()
+        total_return = cumulative.iloc[-1] - 1
+        n = len(returns)
+        annual_return = (1 + total_return) ** (252 / n) - 1 if n > 0 else 0
+        volatility = returns.std() * np.sqrt(252)
+        max_drawdown = (eq / eq.cummax() - 1).min()
+        rf = 0.03
+        sharpe = (annual_return - rf) / volatility if volatility != 0 else 0
+        downside = returns[returns < 0].std() * np.sqrt(252)
+        sortino = (annual_return - rf) / downside if downside != 0 else 0
+        win_rate = (returns > 0).mean() if n > 0 else 0
+        calmar = annual_return / abs(max_drawdown) if max_drawdown != 0 else 0
 
-    data, signals = generate_test_data(n_stocks=20, n_days=120, seed=1)
-    r_orig = run_original_backtest(data, signals)
-    r_vec = VectorizedBacktest().run_backtest(data, signals)
+        metrics = {
+            "total_return": float(total_return),
+            "annual_return": float(annual_return),
+            "volatility": float(volatility),
+            "sharpe_ratio": float(sharpe),
+            "sortino_ratio": float(sortino),
+            "max_drawdown": float(max_drawdown),
+            "win_rate": float(win_rate),
+            "calmar_ratio": float(calmar),
+        }
 
-    eq_o = r_orig["equity_curve"]["equity"].values
-    eq_v = r_vec["equity_curve"]["equity"].values
-    print("orig final equity:", eq_o[-1])
-    print("vec  final equity:", eq_v[-1])
-    print("max abs diff:", np.max(np.abs(eq_o - eq_v)))
-    print("trades equal:", len(r_orig["trades"]) == len(r_vec["trades"]))
+        # 基准相对指标
+        if 'benchmark' in equity_curve.columns:
+            bench = equity_curve.set_index('date')['benchmark'].dropna()
+            if len(bench) >= 2:
+                bench_ret = bench.pct_change().dropna()
+                # 对齐
+                common = returns.index.intersection(bench_ret.index)
+                if len(common) > 20:
+                    r = returns.loc[common]
+                    b = bench_ret.loc[common]
+                    cov_mat = np.cov(r, b)
+                    beta = float(cov_mat[0, 1] / cov_mat[1, 1]) if cov_mat[1, 1] != 0 else 0
+                    alpha = float(r.mean() - beta * b.mean()) * 252
+                    tracking_error = float((r - b).std() * np.sqrt(252))
+                    info_ratio = float((r - b).mean() * 252 / tracking_error) if tracking_error != 0 else 0
+                    bench_total = float(bench.iloc[-1] / bench.iloc[0] - 1)
+                    metrics.update({
+                        "beta": beta,
+                        "alpha": alpha,
+                        "tracking_error": tracking_error,
+                        "information_ratio": info_ratio,
+                        "benchmark_return": bench_total,
+                    })
+        return metrics
+
+    def _empty_result(self):
+        return {
+            "trades": pd.DataFrame(),
+            "positions": pd.DataFrame(),
+            "equity_curve": pd.DataFrame(),
+            "metrics": {},
+            "report_path": "",
+        }
