@@ -1,6 +1,6 @@
 # 量化优化验证报告 (feat/quant-opt-20260624)
 
-- **生成时间**: 2026-06-24 09:28:20
+- **生成时间**: 2026-06-24 09:32:51
 - **分支**: `feat/quant-opt-20260624`
 - **测试结果**: 4/4 模块通过
 
@@ -32,17 +32,17 @@
 
 | 优化项 | 测试模块 | 结果 | 备注 |
 |---|---|---|---|
-| OPT1 | `test_vectorized_backtest.py` | ✅ PASS | 正确性+性能+边界，加速比 1.67x |
+| OPT1 | `test_vectorized_backtest.py` | ✅ PASS | 正确性+性能+边界，加速比 1.49x |
 | OPT2 | `test_factor_expression.py` | ✅ PASS | 正确性+算术+错误处理 |
-| OPT3a | `test_vectorized_ic.py` | ✅ PASS | 正确性+性能+边界，加速比 2.53x |
+| OPT3a | `test_vectorized_ic.py` | ✅ PASS | 正确性+性能+边界，加速比 4.82x |
 | OPT3b | `test_metrics_fix.py` | ✅ PASS | 修复正确性+边界 |
 
 ## 三、性能对比
 
 | 优化项 | 原始耗时 | 优化耗时 | 加速比 | 数据规模 |
 |---|---|---|---|---|
-| OPT1 | 1.036s | 0.619s | **1.67x** | 80 stocks × 400 days |
-| OPT3a | 0.390s | 0.154s | **2.53x** | 100 stocks × 300 days |
+| OPT1 | 0.993s | 0.665s | **1.49x** | 80 stocks × 400 days |
+| OPT3a | 0.592s | 0.123s | **4.82x** | 100 stocks × 300 days |
 
 > 性能测试均在同一沙箱环境运行（pandas/numpy/scipy 原生实现，未使用 numba/vectorbt/qlib）。
 
