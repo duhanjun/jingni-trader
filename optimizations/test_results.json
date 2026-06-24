@@ -1,0 +1,216 @@
+[
+  {
+    "test": "vectorized_backtest",
+    "result": {
+      "total": 10,
+      "passed": 10,
+      "failed": 0,
+      "pass_rate": 1.0
+    },
+    "perf": {
+      "vectorized_sec": 0.0113,
+      "native_loop_sec": 0.0971,
+      "speedup": 8.6
+    },
+    "details": [
+      {
+        "name": "无成本下权益终值 ≈ 12100",
+        "status": "PASS",
+        "info": "实际=12100.00"
+      },
+      {
+        "name": "总收益率 ≈ 21%",
+        "status": "PASS",
+        "info": "实际=0.2100"
+      },
+      {
+        "name": "含成本终值 < 无成本终值",
+        "status": "PASS",
+        "info": "含成本=12032.85 < 无成本=12100.00"
+      },
+      {
+        "name": "调仓次数 = 2",
+        "status": "PASS",
+        "info": "实际=2"
+      },
+      {
+        "name": "向量化更快 (加速比 8.6x)",
+        "status": "PASS",
+        "info": "vec=0.0113s vs native=0.0971s"
+      },
+      {
+        "name": "两引擎终值同量级 (差异<30%)",
+        "status": "PASS",
+        "info": "vec=1816476 native=1765776 ratio=0.972"
+      },
+      {
+        "name": "单股票回测不报错",
+        "status": "PASS",
+        "info": ""
+      },
+      {
+        "name": "单股票调仓次数=1",
+        "status": "PASS",
+        "info": "实际=1"
+      },
+      {
+        "name": "全现金权益不变",
+        "status": "PASS",
+        "info": "终值=10000.00"
+      },
+      {
+        "name": "价格含 NaN 不崩溃",
+        "status": "PASS",
+        "info": ""
+      }
+    ]
+  },
+  {
+    "test": "factor_analysis",
+    "result": {
+      "total": 13,
+      "passed": 13,
+      "failed": 0,
+      "pass_rate": 1.0
+    },
+    "perf": {
+      "ic_decay_sec": 0.0332,
+      "native_ic_sec": 0.1019,
+      "vectorized_ic_sec": 0.0139,
+      "ic_speedup": 7.3
+    },
+    "details": [
+      {
+        "name": "5期 IC 为正 (因子有预测力)",
+        "status": "PASS",
+        "info": "ic_5=0.9594"
+      },
+      {
+        "name": "IC 随期数衰减 (5期 > 20期)",
+        "status": "PASS",
+        "info": "ic_5=0.9594 > ic_20=0.4623"
+      },
+      {
+        "name": "5期 IC 显著 (|t|>2)",
+        "status": "PASS",
+        "info": "t=1116.05"
+      },
+      {
+        "name": "Rank IC 为正",
+        "status": "PASS",
+        "info": "rank_ic_5=0.9594"
+      },
+      {
+        "name": "Rank IC std <= Normal IC std * 1.5",
+        "status": "PASS",
+        "info": "rank_std=0.0120 vs normal_std=0.0120"
+      },
+      {
+        "name": "换手率在 [0,1]",
+        "status": "PASS",
+        "info": "turnover=0.2798"
+      },
+      {
+        "name": "自相关性为正 (因子有一定持续性)",
+        "status": "PASS",
+        "info": "autocorr=0.7202"
+      },
+      {
+        "name": "分层收益有 5 层",
+        "status": "PASS",
+        "info": "层数=5"
+      },
+      {
+        "name": "多空收益为正 (Q_max > Q_min)",
+        "status": "PASS",
+        "info": "long_short=0.0884"
+      },
+      {
+        "name": "最高层 mean_return > 最低层",
+        "status": "PASS",
+        "info": "top=0.0482 > bottom=-0.0402"
+      },
+      {
+        "name": "向量化 IC 更快 (加速比 7.3x)",
+        "status": "PASS",
+        "info": "vec=0.0139s vs native=0.1019s"
+      },
+      {
+        "name": "向量化 IC 与循环 IC 均值一致 (差<0.01)",
+        "status": "PASS",
+        "info": "native=0.9594 vec=0.9594"
+      },
+      {
+        "name": "随机因子 5期 |IC| < 0.1",
+        "status": "PASS",
+        "info": "ic=0.0138"
+      }
+    ]
+  },
+  {
+    "test": "walk_forward",
+    "result": {
+      "total": 10,
+      "passed": 10,
+      "failed": 0,
+      "pass_rate": 1.0
+    },
+    "perf": {
+      "walk_forward_run_sec": 0.0806,
+      "single_train_ic": -0.1689,
+      "rolling_train_ic": 0.8334
+    },
+    "details": [
+      {
+        "name": "生成多个 fold",
+        "status": "PASS",
+        "info": "folds=13"
+      },
+      {
+        "name": "泄漏校验通过",
+        "status": "PASS",
+        "info": "violations=[]"
+      },
+      {
+        "name": "测试集覆盖率 > 0",
+        "status": "PASS",
+        "info": "coverage=1.000"
+      },
+      {
+        "name": "所有 fold train_end < test_start",
+        "status": "PASS",
+        "info": ""
+      },
+      {
+        "name": "产出样本外预测",
+        "status": "PASS",
+        "info": "非空预测数=3900"
+      },
+      {
+        "name": "fold 数 = 窗口数",
+        "status": "PASS",
+        "info": "folds=13"
+      },
+      {
+        "name": "样本外 IC 计算成功",
+        "status": "PASS",
+        "info": ""
+      },
+      {
+        "name": "滚动训练 IC >= 单次训练 IC",
+        "status": "PASS",
+        "info": "rolling=0.8334 >= single=-0.1689"
+      },
+      {
+        "name": "gap=0 时仍无 train/test 重叠",
+        "status": "PASS",
+        "info": "violations=[]"
+      },
+      {
+        "name": "数据不足时返回空窗口",
+        "status": "PASS",
+        "info": "folds=0"
+      }
+    ]
+  }
+]
