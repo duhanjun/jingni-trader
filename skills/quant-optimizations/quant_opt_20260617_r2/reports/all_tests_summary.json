@@ -1,0 +1,30 @@
+{
+  "timestamp": "2026-06-17 16:16:30",
+  "overall_duration_sec": 16.44490219399995,
+  "results": {
+    "backtest_engine": {
+      "returncode": 0,
+      "duration_sec": 10.827007570000205,
+      "stdout_tail": "============================================================\n向量化回测引擎验证测试\n============================================================\n\n[test_correctness_small] running...\n  final equity: native=1462913.42, vectorized=1462913.42, rel_err=0.0000%\n  n_trades: native=148, vectorized=148\n  max_drawdown: native=-0.0085, vectorized=-0.0085\n  ✓ test_correctness_small passed\n\n[test_performance] running...\n  n_stocks=30, n_days=252: native=0.654s, vectorized=0.033s, speedup=19.74x\n  n_stocks=60, n_days=252: native=1.017s, vectorized=0.047s, speedup=21.56x\n  n_stocks=100, n_days=504: native=3.159s, vectorized=0.096s, speedup=32.90x\n  ✓ test_performance passed\n\n[test_boundary_conditions] running...\n  ✓ empty input\n  ✓ single stock: n_buy=1, n_sell=1\n  ✓ all-buy: n_buy=5, n_sell=0\n  ✓ all-sell-no-holding: n_sell=0\n  ✓ limit-up blocks buy: n_buy=0\n  ✓ test_boundary_conditions passed\n\n[test_metrics_consistency] running...\n  total_return=0.0300, max_drawdown=-0.0392, trade_win_rate=0.5000\n  ✓ test_metrics_consistency passed\n\n报告已保存: /workspace/quant_opt_20260617/reports/backtest_engine_test.json\n\nALL TESTS PASSED ✓\n",
+      "stderr_tail": ""
+    },
+    "wfo": {
+      "returncode": 0,
+      "duration_sec": 2.4084821159995045,
+      "stdout_tail": "============================================================\nWalk-Forward Optimization 验证测试\n============================================================\n\n[test_split_rolling] running...\n  generated 3 splits, all constraints satisfied\n  ✓ test_split_rolling passed\n\n[test_split_anchored] running...\n  anchored train_lens (days): [655, 697, 739]\n  ✓ test_split_anchored passed\n\n[test_no_lookahead] running...\n  ✓ test_no_lookahead passed\n\n[test_split_data_too_short] running...\n  ✓ test_split_data_too_short passed\n\n[test_wfo_end_to_end] running...\n  n_segments=4\n  segment 0: train=2022-12-05 ~ 2023-09-08, test=2023-11-06 ~ 2023-12-15, mdd=-0.037500614827354894\n  segment 1: train=2023-01-16 ~ 2023-10-20, test=2023-12-18 ~ 2024-01-26, mdd=-0.024260728605662085\n  segment 2: train=2023-02-27 ~ 2023-12-01, test=2024-01-29 ~ 2024-03-08, mdd=-0.022124829920549427\n  segment 3: train=2023-04-10 ~ 2024-01-12, test=2024-03-11 ~ 2024-04-19, mdd=-0.020561386697487527\n  OOS 总收益: 2.88%\n  ✓ test_wfo_end_to_end passed\n\n[test_wfo_vs_static] running...\n  static split total_return: 3.17%\n  WFO total_return: 2.88%\n  ✓ test_wfo_vs_static passed (no strict assertion)\n\n报告已保存: /workspace/quant_opt_20260617/reports/wfo_test.json\n\nALL TESTS PASSED ✓\n",
+      "stderr_tail": ""
+    },
+    "factor_lib": {
+      "returncode": 0,
+      "duration_sec": 0.9123756569988473,
+      "stdout_tail": "============================================================\nAlpha158 风格因子库 + PIT 验证测试\n============================================================\n\n[test_registry_basic] running...\n  total=44, momentum=10, volatility=14\n  ✓ test_registry_basic passed\n\n[test_compute_basic] running...\n  result shape: (300, 8), ret_5d non-NaN: 55\n  ✓ test_compute_basic passed\n\n[test_numerical_correctness] running...\n  ret_1d[1]=0.0100, ret_5d[5]=0.0500\n  ✓ test_numerical_correctness passed\n\n[test_extensibility] running...\n  custom_my_alpha non-NaN: 75\n  ✓ test_extensibility passed\n\n[test_pit_validate] running...\n             factor   category  coverage  declared_delay  observed_lag_days  is_consistent\n             ret_1d   momentum    0.9833               0                  1           True\n             ret_5d   momentum    0.9167               0                  7           True\n     volatility_20d volatility    0.8333               0                 14           True\nearnings_surprise_q    quality    0.0167               1                  0          False\n  ✓ test_pit_validate passed\n\n[test_pit_leakage_detection] running...\n  is_clean: True, n_anomaly: 0\n  ✓ test_pit_leakage_detection passed (no crash)\n\n[test_perf_vs_existing] running...\n  20 factors, 25000 rows: 0.264s, coverage=96.97%\n  ✓ test_perf_vs_existing passed\n\n报告已保存: /workspace/quant_opt_20260617/reports/factor_lib_test.json\n\nALL TESTS PASSED ✓\n",
+      "stderr_tail": ""
+    },
+    "integration": {
+      "returncode": 0,
+      "duration_sec": 2.2969311280012334,
+      "stdout_tail": "============================================================\n整合测试: VectorizedEngine + WFO + AlphaEngine\n============================================================\n\n[test_integration_pipeline] running...\n  1) computing factors via AlphaEngine...\n  2) static 80/20 split backtest...\n     static total_return: 9.30%, sharpe: 1.15, mdd: -5.23%\n  3) WFO pipeline...\n     WFO OOS total_return: 3.44%, sharpe: 0.36, mdd: -5.62%\n     WFO n_segments: 4\n  4) running consistency checks...\n  ✓ test_integration_pipeline passed\n\n报告已保存: /workspace/quant_opt_20260617/reports/integration_test.json\n\nALL TESTS PASSED ✓\n",
+      "stderr_tail": ""
+    }
+  }
+}

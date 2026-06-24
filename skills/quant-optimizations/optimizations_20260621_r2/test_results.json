@@ -1,0 +1,148 @@
+{
+  "total": 20,
+  "passed": 20,
+  "failed": 0,
+  "pass_rate": 1.0,
+  "results": [
+    {
+      "name": "因子计算数值一致",
+      "category": "正确性",
+      "status": "PASS",
+      "detail": "公共列数=18, 最大绝对误差=0.00e+00",
+      "duration_sec": 0.1986
+    },
+    {
+      "name": "IC 分析数值一致（Spearman）",
+      "category": "正确性",
+      "status": "PASS",
+      "detail": "最大绝对误差=0.00e+00",
+      "duration_sec": 9.634
+    },
+    {
+      "name": "回测权益曲线一致",
+      "category": "正确性",
+      "status": "PASS",
+      "detail": "最终净值 base=838139.54, opt=838139.54, 最大误差=0.000000",
+      "duration_sec": 2.5705
+    },
+    {
+      "name": "回测交易笔数一致",
+      "category": "正确性",
+      "status": "PASS",
+      "detail": "base=897, opt=897",
+      "duration_sec": 0
+    },
+    {
+      "name": "扩展指标已生成",
+      "category": "正确性",
+      "status": "PASS",
+      "detail": "新增指标: sortino=-3.378225591883824, turnover=7.674146046748914",
+      "duration_sec": 0
+    },
+    {
+      "name": "Alpha/Beta/IR 指标生成",
+      "category": "正确性",
+      "status": "PASS",
+      "detail": "alpha=-0.2815068813102661, beta=0.8411424912785681, IR=-4.08513543148428",
+      "duration_sec": 0
+    },
+    {
+      "name": "Purged TS Split 无重叠",
+      "category": "正确性",
+      "status": "PASS",
+      "detail": "折数=3, 无重叠=True",
+      "duration_sec": 0
+    },
+    {
+      "name": "Walk-Forward Split 无重叠",
+      "category": "正确性",
+      "status": "PASS",
+      "detail": "折数=5, 无重叠=True",
+      "duration_sec": 0
+    },
+    {
+      "name": "Walk-Forward 预测覆盖",
+      "category": "正确性",
+      "status": "PASS",
+      "detail": "覆盖率=44.44%, 折数=5",
+      "duration_sec": 0
+    },
+    {
+      "name": "原 train 方法索引 Bug 确认",
+      "category": "Bug验证",
+      "status": "PASS",
+      "detail": "当 test_dates.index 为日期时，X_test 为空（0 行），全部数据进入训练集，无样本外验证",
+      "duration_sec": 0
+    },
+    {
+      "name": "因子计算性能",
+      "category": "性能",
+      "status": "PASS",
+      "detail": "base=0.515s, opt=0.381s, 加速比=1.35x",
+      "duration_sec": 0.3812
+    },
+    {
+      "name": "IC 分析性能",
+      "category": "性能",
+      "status": "PASS",
+      "detail": "base=28.238s, opt=2.067s, 加速比=13.66x",
+      "duration_sec": 2.0675
+    },
+    {
+      "name": "回测性能",
+      "category": "性能",
+      "status": "PASS",
+      "detail": "base=5.394s, opt=2.228s, 加速比=2.42x",
+      "duration_sec": 2.2277
+    },
+    {
+      "name": "因子计算-空数据",
+      "category": "边界",
+      "status": "PASS",
+      "detail": "返回 empty=True",
+      "duration_sec": 0
+    },
+    {
+      "name": "IC 分析-空数据",
+      "category": "边界",
+      "status": "PASS",
+      "detail": "返回空 dict=True",
+      "duration_sec": 0
+    },
+    {
+      "name": "回测-空数据",
+      "category": "边界",
+      "status": "PASS",
+      "detail": "返回空结果=True",
+      "duration_sec": 0
+    },
+    {
+      "name": "因子计算-单只股票",
+      "category": "边界",
+      "status": "PASS",
+      "detail": "行数=60",
+      "duration_sec": 0
+    },
+    {
+      "name": "IC 分析-单只股票",
+      "category": "边界",
+      "status": "PASS",
+      "detail": "返回类型=dict",
+      "duration_sec": 0
+    },
+    {
+      "name": "因子计算-短历史",
+      "category": "边界",
+      "status": "PASS",
+      "detail": "ret_20d 全 NaN=True",
+      "duration_sec": 0
+    },
+    {
+      "name": "因子计算-全NaN列",
+      "category": "边界",
+      "status": "PASS",
+      "detail": "turnover_20d 全 NaN=True",
+      "duration_sec": 0
+    }
+  ]
+}

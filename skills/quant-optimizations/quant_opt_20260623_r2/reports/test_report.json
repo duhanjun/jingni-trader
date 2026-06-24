@@ -1,0 +1,203 @@
+{
+  "summary": {
+    "total": 21,
+    "passed": 21,
+    "by_category": {
+      "correctness": {
+        "total": 8,
+        "passed": 8
+      },
+      "performance": {
+        "total": 5,
+        "passed": 5
+      },
+      "boundary": {
+        "total": 8,
+        "passed": 8
+      }
+    }
+  },
+  "results": [
+    {
+      "category": "correctness",
+      "name": "回测等价性 (T+1 off)",
+      "passed": "True",
+      "detail": "最大相对误差 0.0306%",
+      "metrics": {
+        "legacy_time_s": 0.0905,
+        "vec_time_s": 0.0567,
+        "speedup": 1.6
+      }
+    },
+    {
+      "category": "correctness",
+      "name": "T+1 开启阻止同日卖出 (新引擎)",
+      "passed": true,
+      "detail": "T+1=on 同日卖出笔数: 0",
+      "metrics": {}
+    },
+    {
+      "category": "correctness",
+      "name": "T+1 允许次日卖出 (新引擎)",
+      "passed": true,
+      "detail": "次日卖出笔数: 1",
+      "metrics": {}
+    },
+    {
+      "category": "correctness",
+      "name": "T+1 参数在 legacy 中是死代码",
+      "passed": true,
+      "detail": "legacy t_plus_1=True/False 产生完全相同的净值曲线，证明参数未生效",
+      "metrics": {}
+    },
+    {
+      "category": "correctness",
+      "name": "因子表达式 momentum_20",
+      "passed": "True",
+      "detail": "最大误差: 0.00e+00",
+      "metrics": {}
+    },
+    {
+      "category": "correctness",
+      "name": "因子表达式 vol_20",
+      "passed": "True",
+      "detail": "最大误差: 0.00e+00",
+      "metrics": {}
+    },
+    {
+      "category": "correctness",
+      "name": "向量化 IC vs scipy",
+      "passed": "True",
+      "detail": "最大 IC 误差: 1.11e-16, 样本数: 35",
+      "metrics": {}
+    },
+    {
+      "category": "correctness",
+      "name": "向量化中性化 vs sklearn",
+      "passed": "True",
+      "detail": "最大残差误差: 0.00e+00",
+      "metrics": {}
+    },
+    {
+      "category": "performance",
+      "name": "回测性能 small (20股×120天)",
+      "passed": true,
+      "detail": "加速比 2.21x",
+      "metrics": {
+        "scenario": "small",
+        "n_stocks": 20,
+        "n_days": 120,
+        "legacy_s": 0.0835,
+        "vec_s": 0.0377,
+        "speedup": 2.21
+      }
+    },
+    {
+      "category": "performance",
+      "name": "回测性能 medium (50股×250天)",
+      "passed": true,
+      "detail": "加速比 4.98x",
+      "metrics": {
+        "scenario": "medium",
+        "n_stocks": 50,
+        "n_days": 250,
+        "legacy_s": 0.2658,
+        "vec_s": 0.0534,
+        "speedup": 4.98
+      }
+    },
+    {
+      "category": "performance",
+      "name": "回测性能 large (100股×500天)",
+      "passed": true,
+      "detail": "加速比 5.36x",
+      "metrics": {
+        "scenario": "large",
+        "n_stocks": 100,
+        "n_days": 500,
+        "legacy_s": 0.9246,
+        "vec_s": 0.1726,
+        "speedup": 5.36
+      }
+    },
+    {
+      "category": "performance",
+      "name": "IC 分析向量化加速",
+      "passed": true,
+      "detail": "加速比 5.78x",
+      "metrics": {
+        "loop_s": 0.3419,
+        "vec_s": 0.0592,
+        "speedup": 5.78
+      }
+    },
+    {
+      "category": "performance",
+      "name": "因子表达式引擎开销",
+      "passed": true,
+      "detail": "表达式 0.349s vs 手写 0.350s, 开销 1.00x",
+      "metrics": {
+        "expr_s": 0.3492,
+        "manual_s": 0.3499,
+        "overhead_x": 1.0
+      }
+    },
+    {
+      "category": "boundary",
+      "name": "空数据回测",
+      "passed": true,
+      "detail": "应返回空结果",
+      "metrics": {}
+    },
+    {
+      "category": "boundary",
+      "name": "单只股票回测",
+      "passed": true,
+      "detail": "净值记录数: 36",
+      "metrics": {}
+    },
+    {
+      "category": "boundary",
+      "name": "全部涨停无法买入",
+      "passed": true,
+      "detail": "买入笔数: 0",
+      "metrics": {}
+    },
+    {
+      "category": "boundary",
+      "name": "表达式错误处理 unknown_op",
+      "passed": true,
+      "detail": "正确抛异常: ValueError",
+      "metrics": {}
+    },
+    {
+      "category": "boundary",
+      "name": "表达式错误处理 syntax_err",
+      "passed": true,
+      "detail": "正确抛异常: ValueError",
+      "metrics": {}
+    },
+    {
+      "category": "boundary",
+      "name": "表达式错误处理 missing_field",
+      "passed": true,
+      "detail": "正确抛异常: ValueError",
+      "metrics": {}
+    },
+    {
+      "category": "boundary",
+      "name": "算子注册表完整",
+      "passed": true,
+      "detail": "已注册 15 个算子: ['Abs', 'Corr', 'Cov', 'Delta', 'Greater', 'Less', 'Log', 'Max', 'Mean', 'Min', 'Rank', 'Ref', 'Sign', 'Std', 'Sum']",
+      "metrics": {}
+    },
+    {
+      "category": "boundary",
+      "name": "IC 空数据",
+      "passed": true,
+      "detail": "应返回空 Series",
+      "metrics": {}
+    }
+  ],
+  "timestamp": "2026-06-24T09:55:09.952136"
+}
