@@ -390,3 +390,24 @@ if __name__ == "__main__":
 
     result = run(ctx)
     print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+
+
+# ---------------------------------------------------------------------------
+# 优化模块入口（已整合到 scripts/optimizations/）
+# 使用方式: from engine import optimizations
+# ---------------------------------------------------------------------------
+from scripts.optimizations.quant_circuit_breaker import (
+    CircuitBreakerV2 as _CircuitBreakerV2,
+)
+
+
+class optimizations:
+    """执行监控引擎优化模块集合"""
+    CircuitBreakerV2 = _CircuitBreakerV2
+
+    @staticmethod
+    def get_breaker_modules():
+        """返回所有可用的断路器模块"""
+        return {
+            "quant_circuit_breaker": _CircuitBreakerV2,
+        }

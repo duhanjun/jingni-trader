@@ -520,23 +520,20 @@ from scripts.optimizations.ic_analysis_v2 import (
     calc_ic_stats as _calc_ic_stats,
 )
 
-# expression_dsl 是子包，保留从 quant_optimizations 引用
-try:
-    from skills.quant_optimizations.quant_opt_20260618.expression_dsl.evaluator import (
-        Evaluator as _FactorDSLEvaluator,
-    )
-    from skills.quant_optimizations.quant_opt_20260618.expression_dsl.parser import (
-        Parser as _FactorDSLParser,
-    )
-except ImportError:
-    _FactorDSLEvaluator = None
-    _FactorDSLParser = None
+from scripts.optimizations.expression_dsl.evaluator import (
+    Evaluator as _FactorDSLEvaluator,
+)
+from scripts.optimizations.expression_dsl.parser import (
+    AstNode as _AstNode,
+    FieldNode as _FieldNode,
+)
 
 
 class optimizations:
     """因子引擎优化模块集合"""
     FactorDSLEvaluator = _FactorDSLEvaluator
-    FactorDSLParser = _FactorDSLParser
+    AstNode = _AstNode
+    FieldNode = _FieldNode
     FactorEngine = _FactorEngine
     detect_lookahead_in_code = _detect_lookahead_in_code
     detect_lookahead_in_dataframe = _detect_lookahead_in_dataframe
@@ -560,7 +557,8 @@ class optimizations:
         return {
             "factor_engine": _FactorEngine,
             "expression_dsl_evaluator": _FactorDSLEvaluator,
-            "expression_dsl_parser": _FactorDSLParser,
+            "ast_node": _AstNode,
+            "field_node": _FieldNode,
             "alpha_engine": _AlphaEngine,
         }
 

@@ -521,6 +521,19 @@ from scripts.optimizations.extended_metrics import (
     ulcer_performance_index as _ulcer_performance_index,
     deflated_sharpe_ratio as _deflated_sharpe_ratio,
 )
+from scripts.optimizations.performance_metrics import (
+    alpha_beta as _alpha_beta,
+    information_ratio as _information_ratio,
+    up_down_capture as _up_down_capture,
+    sortino_ratio as _sortino_ratio,
+    calmar_ratio as _calmar_ratio,
+)
+from scripts.optimizations.vectorized_metrics import (
+    sharpe as _sharpe_vectorized,
+    sortino as _sortino_vectorized,
+    max_drawdown as _max_drawdown_vectorized,
+    win_rate as _win_rate_vectorized,
+)
 
 
 class optimizations:
@@ -532,6 +545,15 @@ class optimizations:
     ulcer_index = _ulcer_index
     ulcer_performance_index = _ulcer_performance_index
     deflated_sharpe_ratio = _deflated_sharpe_ratio
+    alpha_beta = _alpha_beta
+    information_ratio = _information_ratio
+    up_down_capture = _up_down_capture
+    sortino_ratio = _sortino_ratio
+    calmar_ratio = _calmar_ratio
+    sharpe_vectorized = _sharpe_vectorized
+    sortino_vectorized = _sortino_vectorized
+    max_drawdown_vectorized = _max_drawdown_vectorized
+    win_rate_vectorized = _win_rate_vectorized
 
     @staticmethod
     def get_attribution_modules():
@@ -550,4 +572,9 @@ class optimizations:
             "ulcer_index": _ulcer_index,
             "ulcer_performance_index": _ulcer_performance_index,
             "deflated_sharpe_ratio": _deflated_sharpe_ratio,
+            "alpha_beta": _alpha_beta,
+            "information_ratio": _information_ratio,
+            "up_down_capture": _up_down_capture,
+            "sortino_ratio": _sortino_ratio,
+            "calmar_ratio": _calmar_ratio,
         }
