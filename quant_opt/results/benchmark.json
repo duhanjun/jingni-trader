@@ -1,0 +1,59 @@
+{
+  "backtest_scaling": [
+    {
+      "n_stocks": 50,
+      "n_days": 252,
+      "elapsed_s": 0.10169601300003706,
+      "equity_final": 1068966.493758012,
+      "n_trades": 1909
+    },
+    {
+      "n_stocks": 100,
+      "n_days": 252,
+      "elapsed_s": 0.09196395000071789,
+      "equity_final": 1222981.9272635258,
+      "n_trades": 3134
+    },
+    {
+      "n_stocks": 200,
+      "n_days": 504,
+      "elapsed_s": 0.24158722099855368,
+      "equity_final": 1351599.3327430075,
+      "n_trades": 8365
+    },
+    {
+      "n_stocks": 500,
+      "n_days": 504,
+      "elapsed_s": 0.3890038520003145,
+      "equity_final": 1406981.8023459641,
+      "n_trades": 9800
+    },
+    {
+      "n_stocks": 1000,
+      "n_days": 504,
+      "elapsed_s": 0.7491389170008915,
+      "equity_final": 1365375.1012064873,
+      "n_trades": 11600
+    }
+  ],
+  "ic_scaling": [
+    {
+      "n_factors": 10,
+      "n_stocks": 100,
+      "n_dates": 252,
+      "elapsed_s": 1.7218663679996098
+    },
+    {
+      "n_factors": 20,
+      "n_stocks": 100,
+      "n_dates": 500,
+      "elapsed_s": 7.5358920019989455
+    },
+    {
+      "n_factors": 50,
+      "n_stocks": 200,
+      "n_dates": 500,
+      "elapsed_s": 23.475885669999116
+    }
+  ]
+}

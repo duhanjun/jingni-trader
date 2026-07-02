@@ -1,0 +1,26 @@
+[
+  {
+    "script": "tests/test_metrics.py",
+    "elapsed": 0.4799453000014182,
+    "returncode": 0,
+    "passed": true
+  },
+  {
+    "script": "tests/test_ic_analysis.py",
+    "elapsed": 18.94867035900097,
+    "returncode": 0,
+    "passed": true
+  },
+  {
+    "script": "tests/test_backtest.py",
+    "elapsed": 1.6804309229992214,
+    "returncode": 0,
+    "passed": true
+  },
+  {
+    "script": "tests/test_optimizer.py",
+    "elapsed": 1.9135339399999793,
+    "returncode": 0,
+    "passed": true
+  }
+]

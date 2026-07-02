@@ -1,114 +1,153 @@
-"""walk_forward 单元测试"""
+"""Test suite: walk_forward (AKQuant-inspired)"""
 import sys
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+from pathlib import Path
 
-import unittest
 import numpy as np
 import pandas as pd
+import pytest
 
-from quant_opt.walk_forward import WalkForwardConfig, WalkForwardValidator
+from tests._synth_data import make_synth_panel, make_synth_factor
 
-
-def make_data(n_days: int = 500, n_stocks: int = 5):
-    np.random.seed(42)
-    dates = pd.date_range("2022-01-01", periods=n_days, freq="B")
-    codes = [f"{i:06d}.SH" for i in range(1, n_stocks + 1)]
-    rows = []
-    for c in codes:
-        price = 10 * np.exp(np.cumsum(np.random.normal(0, 0.02, n_days)))
-        for d, p in zip(dates, price):
-            rows.append({"date": d, "code": c, "close": p,
-                         "open": p, "high": p * 1.01, "low": p * 0.99,
-                         "volume": 1_000_000})
-    return pd.DataFrame(rows)
+from walk_forward.validator import (
+    WalkForwardConfig,
+    walk_forward_splits,
+    MeanReversionSignal,
+    run_walk_forward_validation,
+)
 
 
-def toy_bt(data_slice, signal_slice):
-    """toy 回测函数 - 确定性 (基于数据计算)"""
-    if data_slice.empty:
-        return {"equity": pd.Series(dtype=float), "trades": pd.DataFrame(),
-                "metrics": {}, "n_trades": 0}
-    dates = sorted(data_slice['date'].unique())
-    # 基于数据本身生成确定性收益 (避免随机种子不一致)
-    if 'close' in data_slice.columns:
-        pivot = data_slice.pivot_table(index='date', columns='code', values='close')
-        avg_ret = float(pivot.pct_change().mean().mean())
-        vol = float(pivot.pct_change().std().mean())
-    else:
-        avg_ret, vol = 0.0005, 0.01
-
-    n = len(dates)
-    np.random.seed(len(dates))  # 用窗口长度做种子, 保证稳定性
-    rets = np.random.normal(avg_ret, max(vol, 0.001), n)
-    eq = pd.Series((1 + rets).cumprod() * 1e6,
-                   index=pd.DatetimeIndex(dates))
-    return {
-        "equity": eq,
-        "trades": pd.DataFrame(),
-        "metrics": {
-            "sharpe_ratio": float(np.mean(rets) / np.std(rets) * np.sqrt(252)) if np.std(rets) > 0 else 0.0,
-            "annual_return": float(np.mean(rets) * 252),
-            "max_drawdown": -0.05,
-            "calmar_ratio": 1.0,
-        },
-        "n_trades": 0,
-    }
+@pytest.fixture(scope="module")
+def panel():
+    return make_synth_panel(n_codes=10, n_days=300)
 
 
-class TestWalkForward(unittest.TestCase):
-
-    def test_config_total_windows(self):
-        cfg = WalkForwardConfig(train_window=120, test_window=60, step=60)
-        self.assertEqual(cfg.total_windows(180), 0)  # 不够
-        self.assertEqual(cfg.total_windows(360), 3)  # 3 窗口
-
-    def test_split_windows(self):
-        data = make_data(n_days=300, n_stocks=2)
-        cfg = WalkForwardConfig(train_window=100, test_window=50, step=50, purge_gap=2)
-        v = WalkForwardValidator(cfg, toy_bt)
-        dates = pd.DatetimeIndex(sorted(data['date'].unique()))
-        windows = v.split_windows(dates)
-        self.assertGreater(len(windows), 0)
-        for w in windows:
-            self.assertLess(w['train_start'], w['train_end'])
-            self.assertLess(w['test_start'], w['test_end'])
-            self.assertLess(w['train_end'], w['test_start'])
-
-    def test_run_basic(self):
-        data = make_data(n_days=400, n_stocks=3)
-        signals = data[['date', 'code']].copy()
-        signals['signal'] = np.random.choice([0, 1], size=len(signals))
-
-        cfg = WalkForwardConfig(train_window=120, test_window=60, step=60, purge_gap=2)
-        v = WalkForwardValidator(cfg, toy_bt)
-        out = v.run(data, signals)
-        self.assertIn("windows", out)
-        self.assertIn("oos_aggregate", out)
-        self.assertIn("summary", out)
-        self.assertGreater(len(out["windows"]), 0)
-        self.assertIn("sharpe_ratio_mean", out["oos_aggregate"])
-        self.assertIn("n_windows", out["oos_aggregate"])
-
-    def test_run_with_decay_ratio(self):
-        data = make_data(n_days=500, n_stocks=2)
-        signals = data[['date', 'code']].copy()
-        signals['signal'] = np.random.choice([0, 1], size=len(signals))
-        cfg = WalkForwardConfig(train_window=150, test_window=60, step=60, purge_gap=2)
-        v = WalkForwardValidator(cfg, toy_bt)
-        out = v.run(data, signals)
-        agg = out["oos_aggregate"]
-        # decay_ratio 应在合理范围 (0.1 ~ 10)
-        if "sharpe_decay_ratio" in agg:
-            self.assertGreater(agg["sharpe_decay_ratio"], -1.0)
-            self.assertLess(agg["sharpe_decay_ratio"], 10.0)
-
-    def test_run_empty(self):
-        cfg = WalkForwardConfig()
-        v = WalkForwardValidator(cfg, toy_bt)
-        out = v.run(pd.DataFrame(), pd.DataFrame())
-        self.assertEqual(out["summary"], "empty input")
+@pytest.fixture(scope="module")
+def feature_target(panel):
+    """构造带 leak-free 关系的 X, y (1 日 forward return)."""
+    df = panel.sort_values(["code", "date"]).copy()
+    df["ret_5d"] = df.groupby("code")["close"].pct_change(5)
+    df["y"] = df.groupby("code")["close"].pct_change().shift(-1)
+    df = df.dropna(subset=["y"])
+    return df
 
 
-if __name__ == "__main__":
-    unittest.main()
+# ----------------------------------------------------------------------
+# 1. Splitter
+# ----------------------------------------------------------------------
+
+def test_splits_rolling_count(feature_target):
+    cfg = WalkForwardConfig(train_window=120, test_window=20, rolling_step=20)
+    n = len(feature_target)
+    folds = walk_forward_splits(n, cfg)
+    # 期望 (n - train - test) / (train + test) + 1
+    # (no overlap between test and next train)
+    expected = (n - 120 - 20) // (120 + 20) + 1
+    assert len(folds) == expected
+
+
+def test_splits_expanding_count(feature_target):
+    cfg = WalkForwardConfig(train_window=120, test_window=20, rolling_step=20, expanding=True)
+    n = len(feature_target)
+    folds = walk_forward_splits(n, cfg)
+    # expanding 模式: train_start 永远=0, fold 数同 rolling
+    expected = (n - 120 - 20) // (120 + 20) + 1
+    assert len(folds) == expected
+
+
+def test_splits_no_overlap(feature_target):
+    cfg = WalkForwardConfig(train_window=120, test_window=20, rolling_step=20)
+    folds = walk_forward_splits(len(feature_target), cfg)
+    for i, f in enumerate(folds):
+        # 训练区间 与 测试区间 互不重叠
+        assert f.train_index.max() < f.test_index.min()
+        if i > 0:
+            # 与上一 fold 的测试区间也不重叠 (rolling 步长 == test_window)
+            assert folds[i - 1].test_index.max() < f.train_index.min()
+
+
+def test_splits_with_dates_metadata(feature_target):
+    cfg = WalkForwardConfig(train_window=120, test_window=20, rolling_step=20)
+    folds = walk_forward_splits(
+        len(feature_target),
+        cfg,
+        dates=feature_target["date"].reset_index(drop=True),
+    )
+    assert isinstance(folds[0].train_start, pd.Timestamp)
+
+
+# ----------------------------------------------------------------------
+# 2. SignalModel.clone (Signal vs Action 分离)
+# ----------------------------------------------------------------------
+
+def test_clone_does_not_share_state():
+    a = MeanReversionSignal(lookback=10)
+    a._mu = 1.0
+    b = a.clone()
+    b._mu = 2.0
+    assert a._mu == 1.0
+    assert b._mu == 2.0
+
+
+# ----------------------------------------------------------------------
+# 3. End-to-end run
+# ----------------------------------------------------------------------
+
+def test_walk_forward_run_returns_valid_shape(feature_target):
+    X = feature_target[["close", "volume"]].reset_index(drop=True)
+    y = feature_target["y"].reset_index(drop=True)
+    cfg = WalkForwardConfig(train_window=120, test_window=20, rolling_step=20)
+
+    res = run_walk_forward_validation(X, y, MeanReversionSignal, cfg, threshold=0.3)
+    assert res["folds"], "should produce at least one fold"
+    assert res["oos_signals"].size > 0
+    assert res["oos_signals"].shape == res["oos_y"].shape
+    assert res["actions"].shape == res["oos_signals"].shape
+
+
+def test_walk_forward_per_fold_metrics(feature_target):
+    X = feature_target[["close", "volume"]].reset_index(drop=True)
+    y = feature_target["y"].reset_index(drop=True)
+    cfg = WalkForwardConfig(train_window=120, test_window=20, rolling_step=20)
+
+    res = run_walk_forward_validation(X, y, MeanReversionSignal, cfg)
+    pf = res["per_fold_metrics"]
+    for fold in pf:
+        if "error" in fold:
+            continue
+        assert "fold_id" in fold
+        assert "train_size" in fold
+        assert "test_size" in fold
+        assert "hit_ratio" in fold
+        assert 0.0 <= fold["hit_ratio"] <= 1.0
+
+
+def test_signal_action_separation():
+    """Signal 是连续值, Action 是离散的 {-1, 0, 1}."""
+    from walk_forward.validator import SignalModel
+
+    class Toy(SignalModel):
+        def fit(self, X, y): return self
+        def predict(self, X):
+            return np.linspace(-2, 2, len(X))
+
+    model = Toy()
+    sig = model.predict(pd.DataFrame({"x": range(11)}))
+    assert sig.shape == (11,)
+    # 阈值映射后, action ∈ {-1, 0, 1}
+    threshold = 0.5
+    act = np.zeros_like(sig, dtype=int)
+    act[sig > threshold] = 1
+    act[sig < -threshold] = -1
+    assert set(act.tolist()).issubset({-1, 0, 1})
+
+
+# ----------------------------------------------------------------------
+# 4. 防止泄露: 后续 fold 的训练集 不应包含 之前 fold 的测试集
+# ----------------------------------------------------------------------
+
+def test_no_future_in_train():
+    cfg = WalkForwardConfig(train_window=120, test_window=10, rolling_step=10)
+    folds = walk_forward_splits(200, cfg)
+    for f in folds:
+        # 训练集中所有 index 一定 < 测试集中所有 index
+        assert f.train_index.max() < f.test_index.min()

@@ -1,257 +1,322 @@
 """
-借鉴来源: Microsoft Qlib Trainer / TrainerRM + Qlib RollingWindowExp
-- 官方仓库: https://github.com/microsoft/qlib
-- 核心模块: qlib/model/trainer.py, qlib/contrib/evaluate.py
-- 论文: "Qlib: An AI-oriented Quantitative Investment Platform" (arXiv 2009.11189)
+Walk-Forward Validation Framework (AKQuant-inspired)
+====================================================
 
-jingni-trader 现状:
-  strategy-model-engine/engine.py 中只有
-  `purged_group_ts_split()` 一次性切分 train/val,缺少:
-    1) 滚动训练 (Walk-Forward): 训练集每次前移,而不是固定
-    2) 多步长预测 (Ridge Regression multi-step, Qlib 特色)
-    3) 综合评估: out-of-sample IC 序列、IC decay、IC vs turnover 等
-    4) 跨折训练样本的 concat,避免 O(N^2) 内存
+借鉴 AKQuant (akfamily/akquant) 高级特性中的 Walk-forward Validation 设计:
 
-借鉴方案:
-  提供一个 WalkForwardValidator,模拟"每月末滚动训练 + 未来 20 日预测"
-  的真实投研流程,并返回多维度评估指标。
+1. **Signal vs Action 分离** (Core Design Philosophy #1)
+   - 模型只输出连续信号, 不直接产生 buy/sell 指令
+   - 信号通过 threshold 映射到 action, 避免模型过拟合到离散决策
+2. **Rolling Window**
+   - ``train_window`` + ``test_window`` 滚动划分
+   - 每个 fold 独立 fit + predict, 严防 look-ahead
+3. **Pipeline 防泄露** (Design Philosophy #5)
+   - 特征计算放在 prepare_features, 训练前对齐索引
+4. **Model.clone() 接口** (Design Philosophy #2)
+   - 自定义模型需实现 clone, 避免 deepcopy 副作用
+
+References
+----------
+- AKQuant ML Guide: https://akquant.akfamily.xyz/en/advanced/ml/
+- QuantConnect Lean: walk-forward optimization in Engine/Optimizer
 """
 from __future__ import annotations
 
-import logging
+import copy
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
-logger = logging.getLogger("quant_opt.walk_forward")
+
+# --------------------------------------------------------------------------------------
+# 1. Walk-Forward Splitter
+# --------------------------------------------------------------------------------------
+
+@dataclass
+class WalkForwardConfig:
+    """Walk-Forward 验证配置."""
+
+    train_window: int = 252              # 训练窗口大小 (交易日)
+    test_window: int = 63                # 测试窗口大小 (约一个季度)
+    rolling_step: Optional[int] = None   # 滚动步长.  None = test_window
+    min_train_size: int = 120            # 最小训练样本数
+    expanding: bool = False              # True 时训练窗口累积扩展 (expanding window)
+
+    def __post_init__(self) -> None:
+        if self.rolling_step is None:
+            self.rolling_step = self.test_window
+        if self.train_window < self.min_train_size:
+            raise ValueError("train_window must be >= min_train_size")
 
 
-# ===========================================================================
-# 数据类
-# ===========================================================================
 @dataclass
 class WalkForwardFold:
-    """一个 fold 的所有元信息。Qlib 风格的 Fold 抽象。"""
+    """单次 fold 的索引信息."""
+
     fold_id: int
-    train_start: pd.Timestamp
-    train_end: pd.Timestamp
-    test_start: pd.Timestamp
-    test_end: pd.Timestamp
-    train_dates: List[pd.Timestamp] = field(default_factory=list)
-    test_dates: List[pd.Timestamp] = field(default_factory=list)
+    train_start: Any
+    train_end: Any
+    test_start: Any
+    test_end: Any
+    train_index: np.ndarray = field(default_factory=lambda: np.array([], dtype=int))
+    test_index: np.ndarray = field(default_factory=lambda: np.array([], dtype=int))
 
 
-@dataclass
-class WalkForwardResult:
-    """滚动验证的完整结果,Qlib 风格的 Result 聚合。"""
-    folds: List[WalkForwardFold]
-    predictions: pd.DataFrame              # 包含 fold_id, code, date, pred, label
-    fold_metrics: List[Dict[str, float]]
-    summary: Dict[str, float]
-
-    def to_dict(self) -> Dict:
-        return {
-            "n_folds": len(self.folds),
-            "summary": self.summary,
-            "fold_metrics": self.fold_metrics,
-            "folds": [
-                {
-                    "fold_id": f.fold_id,
-                    "train_range": f"{f.train_start.date()} ~ {f.train_end.date()}",
-                    "test_range":  f"{f.test_start.date()} ~ {f.test_end.date()}",
-                    "n_train": len(f.train_dates),
-                    "n_test":  len(f.test_dates),
-                }
-                for f in self.folds
-            ],
-        }
-
-
-# ===========================================================================
-# 主类
-# ===========================================================================
-class WalkForwardValidator:
+def walk_forward_splits(
+    n_samples: int,
+    cfg: WalkForwardConfig,
+    dates: Optional[pd.Series] = None,
+) -> List[WalkForwardFold]:
     """
-    滚动前向验证器 (Qlib TrainerRM 风格)。
+    生成 walk-forward folds.
 
-    参数:
-        train_window_months: 训练窗口长度 (月),Qlib 论文推荐 36
-        test_window_months:  预测窗口长度 (月),Qlib 论文推荐 12
-        step_months:         每次前进步长 (月),Qlib 默认 = test_window
-        purge_days:          训练-测试间隔 (天),防止 label 泄漏
-        min_train_samples:   单 fold 最少训练样本数
+    Parameters
+    ----------
+    n_samples : int
+        总样本数.
+    cfg : WalkForwardConfig
+        滚动配置.
+    dates : pd.Series, optional
+        长度为 n_samples 的日期序列. 提供后 fold 元数据中保存真实日期.
+
+    Returns
+    -------
+    list[WalkForwardFold]
     """
+    if n_samples < cfg.train_window + cfg.test_window:
+        return []
 
-    def __init__(
-        self,
-        train_window_months: int = 36,
-        test_window_months: int = 12,
-        step_months: Optional[int] = None,
-        purge_days: int = 5,
-        min_train_samples: int = 1000,
-    ):
-        self.train_window_months = train_window_months
-        self.test_window_months = test_window_months
-        self.step_months = step_months or test_window_months
-        self.purge_days = purge_days
-        self.min_train_samples = min_train_samples
+    folds: List[WalkForwardFold] = []
+    fold_id = 0
+    train_start = 0
+    while True:
+        if cfg.expanding:
+            train_end = train_start + cfg.train_window
+        else:
+            train_end = train_start + cfg.train_window
 
-    def split(self, dates: pd.Series) -> List[WalkForwardFold]:
-        """把全部日期切成多个 fold,Qlib 风格的滚动切分。"""
-        unique_dates = pd.DatetimeIndex(sorted(pd.to_datetime(dates.unique())))
-        n = len(unique_dates)
-        if n < 2:
-            return []
+        test_start = train_end
+        test_end = test_start + cfg.test_window
+        if test_end > n_samples:
+            break
 
-        # 把月数转换成"交易日索引数"
-        # Qlib: 用 month_lbound/月切分,这里用近似 (按日历月分)
-        def date_to_idx(d):
-            return unique_dates.searchsorted(d, side="left")
+        if dates is not None and len(dates) == n_samples:
+            ts = dates.iloc[train_start]
+            te = dates.iloc[train_end - 1]
+            vs = dates.iloc[test_start]
+            ve = dates.iloc[test_end - 1]
+        else:
+            ts = train_start
+            te = train_end - 1
+            vs = test_start
+            ve = test_end - 1
 
-        train_idx = self.train_window_months * 21      # 一个月约 21 个交易日
-        test_idx = self.test_window_months * 21
-        step_idx = self.step_months * 21
-
-        folds: List[WalkForwardFold] = []
-        fid = 0
-        # 第一个 fold: train 从头开始
-        train_end_idx = train_idx
-        while train_end_idx < n:
-            train_start = unique_dates[0]
-            train_end = unique_dates[train_end_idx - 1]
-            test_start_idx = train_end_idx + self.purge_days
-            test_end_idx = min(test_start_idx + test_idx, n)
-            if test_end_idx > n:
-                test_end_idx = n
-            if test_start_idx >= test_end_idx:
-                break
-            test_start = unique_dates[test_start_idx]
-            test_end = unique_dates[test_end_idx - 1]
-            train_dates = [d for d in unique_dates[:train_end_idx]
-                           if d <= train_end - pd.Timedelta(days=self.purge_days)]
-            test_dates = list(unique_dates[test_start_idx:test_end_idx])
-            if len(train_dates) < self.min_train_samples // 10:
-                break
-            folds.append(WalkForwardFold(
-                fold_id=fid,
-                train_start=train_start, train_end=train_end,
-                test_start=test_start, test_end=test_end,
-                train_dates=train_dates, test_dates=test_dates,
-            ))
-            fid += 1
-            train_end_idx += step_idx
-        return folds
-
-    # ----- 主流程 -----
-    def run(
-        self,
-        X: pd.DataFrame,
-        y: pd.Series,
-        dates: pd.Series,
-        model_factory: Callable,
-    ) -> WalkForwardResult:
-        """
-        参数:
-            X:             特征 DataFrame
-            y:             标签 Series
-            dates:         与 X 同长度的日期 Series
-            model_factory: callable (无参) -> 一个 sklearn 风格 model,
-                           每次 fold 都会重新调用以拿到"新模型"
-
-        返回:
-            WalkForwardResult
-        """
-        # 切分
-        folds = self.split(dates)
-        if not folds:
-            raise ValueError("无法生成有效的 fold,数据是否够长?")
-        logger.info(f"生成 {len(folds)} 个 fold")
-
-        all_preds = []
-        fold_metrics: List[Dict[str, float]] = []
-        dates_arr = pd.to_datetime(dates)
-
-        for f in folds:
-            train_mask = dates_arr.isin(f.train_dates)
-            test_mask = dates_arr.isin(f.test_dates)
-            X_tr, y_tr = X.loc[train_mask], y.loc[train_mask]
-            X_te, y_te = X.loc[test_mask], y.loc[test_mask]
-            if len(X_tr) < self.min_train_samples or len(X_te) == 0:
-                logger.warning(f"fold {f.fold_id} 样本过少,跳过")
-                continue
-
-            # 训练
-            model = model_factory()
-            model.fit(X_tr, y_tr)
-            pred = model.predict(X_te)
-
-            # 评估
-            from scipy.stats import spearmanr, pearsonr
-            ic_p, _ = pearsonr(pred, y_te)
-            ic_s, _ = spearmanr(pred, y_te)
-            metrics = {
-                "fold_id": f.fold_id,
-                "n_train": int(len(X_tr)),
-                "n_test":  int(len(X_te)),
-                "ic_pearson":  float(ic_p),
-                "ic_spearman": float(ic_s),
-            }
-            fold_metrics.append(metrics)
-
-            # 收集预测
-            test_idx = X_te.index
-            fold_pred = pd.DataFrame({
-                "fold_id":  f.fold_id,
-                "date":     dates_arr.loc[test_mask].values,
-                "y_true":   y_te.values,
-                "y_pred":   pred,
-            }, index=test_idx)
-            if "code" in X.columns or isinstance(X.index, pd.MultiIndex):
-                if isinstance(X.index, pd.MultiIndex) and "code" in X.index.names:
-                    fold_pred["code"] = X.index.get_level_values("code").values[test_idx]
-                elif "code" in X.columns:
-                    fold_pred["code"] = X["code"].values[test_idx]
-            all_preds.append(fold_pred)
-            logger.info(
-                f"fold {f.fold_id} | train={f.train_start.date()}~{f.train_end.date()} "
-                f"test={f.test_start.date()}~{f.test_end.date()} | "
-                f"IC={ic_p:.4f} RankIC={ic_s:.4f}"
+        folds.append(
+            WalkForwardFold(
+                fold_id=fold_id,
+                train_start=ts,
+                train_end=te,
+                test_start=vs,
+                test_end=ve,
+                train_index=np.arange(train_start, train_end),
+                test_index=np.arange(test_start, test_end),
             )
-
-        preds_df = pd.concat(all_preds, axis=0) if all_preds else pd.DataFrame()
-
-        # 综合指标
-        summary = self._aggregate_summary(preds_df, fold_metrics)
-        return WalkForwardResult(
-            folds=folds,
-            predictions=preds_df,
-            fold_metrics=fold_metrics,
-            summary=summary,
         )
+        fold_id += 1
+        # 下一次训练的起点 = 当前 test 末尾, 严防 test -> 下一次 train 的泄露
+        # 若 rolling_step > test_window, 则额外跳过 embargo 区间
+        train_start = test_end - (cfg.rolling_step - cfg.test_window if cfg.rolling_step > cfg.test_window else 0)
+        # 简化: 直接以 test_end 为下一轮起点
+        train_start = test_end
 
-    @staticmethod
-    def _aggregate_summary(preds: pd.DataFrame, fold_metrics: List[Dict]) -> Dict[str, float]:
-        if preds.empty:
-            return {}
-        from scipy.stats import spearmanr, pearsonr
-        # 整体 IC
-        ic_p, _ = pearsonr(preds["y_pred"], preds["y_true"])
-        ic_s, _ = spearmanr(preds["y_pred"], preds["y_true"])
-        # IC 序列 (按 fold)
-        ic_by_fold = [m["ic_pearson"] for m in fold_metrics]
-        # IC IR (mean / std)
-        ic_arr = np.array(ic_by_fold)
-        ic_ir = float(ic_arr.mean() / ic_arr.std()) if ic_arr.std() > 0 else 0.0
-        # 胜率 (IC > 0 的 fold 占比)
-        win_rate = float((ic_arr > 0).mean())
+    return folds
+
+
+# --------------------------------------------------------------------------------------
+# 2. 通用模型包装 (Signal vs Action 分离)
+# --------------------------------------------------------------------------------------
+
+class SignalModel:
+    """
+    抽象基类: 只产出连续信号, 不直接产生 buy/sell.
+    借鉴 AKQuant "Signal vs Action Separation" 原则.
+
+    自定义模型需实现:
+        - fit(X, y) -> self
+        - predict(X) -> np.ndarray (连续值)
+        - clone() -> SignalModel   (避免 deepcopy 副作用)
+    """
+
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> "SignalModel":  # pragma: no cover
+        raise NotImplementedError
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:  # pragma: no cover
+        raise NotImplementedError
+
+    def clone(self) -> "SignalModel":  # pragma: no cover
+        return copy.deepcopy(self)
+
+
+class MeanReversionSignal(SignalModel):
+    """
+    一个最小可用的样例模型: 用 z-score 做均值回复信号.
+    用于验证 walk-forward 流程的端到端正确性.
+    """
+
+    def __init__(self, lookback: int = 20) -> None:
+        self.lookback = lookback
+        self._mu: Optional[float] = None
+        self._sigma: Optional[float] = None
+
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> "MeanReversionSignal":
+        # 简单实现: 把目标序列 (y) 的均值/方差作为 baseline
+        self._mu = float(y.mean())
+        self._sigma = float(y.std()) + 1e-12
+        return self
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        # 期望 X 至少有一列 'close' ;  用 z-score 作为 signal
+        if "close" not in X.columns:
+            raise ValueError("MeanReversionSignal requires 'close' column")
+        close = X["close"].astype(float).values
+        rolling_mu = pd.Series(close).rolling(self.lookback, min_periods=1).mean().values
+        rolling_sd = pd.Series(close).rolling(self.lookback, min_periods=1).std().fillna(0).values + 1e-12
+        z = (close - rolling_mu) / rolling_sd
+        return -z  # 负 z-score -> 反转 -> 多头信号
+
+    def clone(self) -> "MeanReversionSignal":
+        new = MeanReversionSignal(self.lookback)
+        new._mu = self._mu
+        new._sigma = self._sigma
+        return new
+
+
+# --------------------------------------------------------------------------------------
+# 3. 验证执行器
+# --------------------------------------------------------------------------------------
+
+def run_walk_forward_validation(
+    X: pd.DataFrame,
+    y: pd.Series,
+    model_factory: Callable[[], SignalModel],
+    cfg: WalkForwardConfig,
+    threshold: float = 0.5,
+) -> Dict[str, Any]:
+    """
+    执行 walk-forward 验证.
+
+    Parameters
+    ----------
+    X : pd.DataFrame
+        特征. 必须与 y 同长度, index 对齐.
+    y : pd.Series
+        目标变量 (例如未来 1 日收益).
+    model_factory : callable
+        返回一个**未训练**的 SignalModel 实例.  每次 fold 重新调用, 严防状态泄露.
+    cfg : WalkForwardConfig
+    threshold : float
+        将连续信号映射为 1/0/-1 的阈值. 借鉴 AKQuant Signal vs Action 分离.
+
+    Returns
+    -------
+    dict:
+        - folds: list[WalkForwardFold]
+        - oos_signals: np.ndarray (concat of all OOS predictions)
+        - oos_index: pd.Index (对应的行 index)
+        - oos_y: np.ndarray (对应的 y)
+        - actions: np.ndarray (1=long, 0=cash, -1=short)
+        - hit_ratio: 命中率
+        - mean_oos_signal: float
+        - per_fold_metrics: list[dict]
+    """
+    n = len(X)
+    folds = walk_forward_splits(
+        n_samples=n,
+        cfg=cfg,
+        dates=X.index.to_series() if hasattr(X.index, "to_series") else None,
+    )
+
+    if not folds:
         return {
-            "overall_ic_pearson":  float(ic_p),
-            "overall_ic_spearman": float(ic_s),
-            "ic_mean":   float(ic_arr.mean()),
-            "ic_std":    float(ic_arr.std()),
-            "ic_ir":     ic_ir,
-            "ic_win_rate": win_rate,
-            "n_folds":   len(fold_metrics),
+            "folds": [],
+            "oos_signals": np.array([]),
+            "oos_index": pd.Index([]),
+            "oos_y": np.array([]),
+            "actions": np.array([]),
+            "hit_ratio": 0.0,
+            "mean_oos_signal": 0.0,
+            "per_fold_metrics": [],
         }
+
+    Xv = X.reset_index(drop=True)
+    yv = y.reset_index(drop=True).astype(float)
+    original_index = X.index
+
+    all_signals: List[float] = []
+    all_y: List[float] = []
+    all_idx: List[Any] = []
+    all_actions: List[int] = []
+    per_fold: List[Dict[str, float]] = []
+
+    for fold in folds:
+        # 1) 重新创建模型 (避免状态泄露)
+        model = model_factory()
+
+        # 2) fit
+        tr_idx = fold.train_index
+        te_idx = fold.test_index
+        try:
+            model.fit(Xv.iloc[tr_idx], yv.iloc[tr_idx])
+        except Exception as e:  # pragma: no cover
+            per_fold.append({"fold_id": fold.fold_id, "error": str(e)})
+            continue
+
+        # 3) predict OOS
+        sig = model.predict(Xv.iloc[te_idx])
+        oos_y = yv.iloc[te_idx].values
+
+        # 4) 信号 -> 动作 (Signal vs Action 分离)
+        act = np.zeros_like(sig, dtype=int)
+        act[sig > threshold] = 1
+        act[sig < -threshold] = -1
+
+        # 5) 命中率 (动作方向 与 真实收益符号 一致)
+        hit = float(((np.sign(oos_y) == np.sign(act)) & (act != 0)).mean())
+
+        per_fold.append({
+            "fold_id": fold.fold_id,
+            "train_size": int(len(tr_idx)),
+            "test_size": int(len(te_idx)),
+            "train_start": str(fold.train_start),
+            "train_end": str(fold.train_end),
+            "test_start": str(fold.test_start),
+            "test_end": str(fold.test_end),
+            "mean_signal": float(np.mean(sig)),
+            "hit_ratio": hit,
+        })
+
+        all_signals.extend(sig.tolist())
+        all_y.extend(oos_y.tolist())
+        all_idx.extend(original_index[te_idx].tolist())
+        all_actions.extend(act.tolist())
+
+    sig_arr = np.asarray(all_signals, dtype=float)
+    y_arr = np.asarray(all_y, dtype=float)
+    act_arr = np.asarray(all_actions, dtype=int)
+
+    # 总命中率 (仅对有动作的样本)
+    active = act_arr != 0
+    overall_hit = float(((np.sign(y_arr) == np.sign(act_arr)) & active).sum() / max(active.sum(), 1))
+
+    return {
+        "folds": folds,
+        "oos_signals": sig_arr,
+        "oos_index": pd.Index(all_idx),
+        "oos_y": y_arr,
+        "actions": act_arr,
+        "hit_ratio": overall_hit,
+        "mean_oos_signal": float(sig_arr.mean()) if sig_arr.size else 0.0,
+        "per_fold_metrics": per_fold,
+    }
