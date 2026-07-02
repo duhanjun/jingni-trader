@@ -1,193 +1,294 @@
-# jingni-trader 量化交易学习报告
+# 量化交易开源项目学习报告
 
-> **日期**: 2026-06-14  
-> **序号**: #001  
-> **作者**: AI Agent (jingni-trader skill)  
-> **分支**: feature/quant-stream-inspired  
+**日期**: 2026-06-12  
+**序号**: #001  
+**研究员**: AI Agent  
+**分支**: feature/quant-stream-inspired
 
 ---
 
-## 一、学习项目清单及核心亮点
+## 1. 学习项目清单及核心亮点
 
-### 1.1 microsoft/qlib (⭐ 42,000+)
+### 1.1 Microsoft Qlib
 
-**仓库**: https://github.com/microsoft/qlib
+| 属性 | 详情 |
+|------|------|
+| GitHub | https://github.com/microsoft/qlib |
+| Stars | ~44k |
+| 语言 | Python |
+| 定位 | AI-Oriented Quantitative Investment Platform |
 
 **核心亮点**:
 
-| 亮点 | 说明 | 对 jingni-trader 的借鉴价值 |
-|------|------|---------------------------|
-| **因子表达式引擎 (Expression DSL)** | 用 DSL 声明因子，如 `$close`, `Ref($close, 1)`, `Mean($close, 20)`，将因子从数据升维到函数级别 | 因子构建从硬编码 → 声明式，LLM 可直接生成因子表达式 |
-| **Point-in-Time 数据库** | 财务数据多版本管理，回测时只能使用当时已公开的版本，彻底消除未来数据泄露 | 当前无 PIT 机制，财务因子回测可能存在前瞻偏差 |
-| **列式二进制存储** | HDF5 格式的列式存储，比 CSV 快 2-5x | 数据引擎可引入列式存储加速读取 |
-| **Workflow 自动化** | 声明式 YAML 配置定义完整研究流程，自动执行数据→因子→模型→回测 | 参考其声明式配置设计，简化策略研究流程 |
-| **RD-Agent 集成** | 2024 年新增，用 LLM 自动生成因子和策略代码 | 可与 jingni-trader 的 LLM 驱动设计理念深度结合 |
+1. **表达式引擎 (Expression Engine)**
+   - 提供 DSL 语法定义因子，如 `Ref($close, 60) / $close - 1` 直接表达 60 日收益率
+   - 支持时序算子（Ref, Mean, Std, Max, Min）、截面算子（CSRank, CSMean）、元素算子（Add, Sub, Mul, Div）
+   - 因子声明为**函数而非数据**，LLM 可直接生成因子表达式
+   - 表达式解析为 AST，支持嵌套组合
 
-### 1.2 QUANTAXIS (⭐ 25,000+)
+2. **数据管道设计**
+   - `Data Loader → Data Handler → Dataset` 三层架构
+   - 列式二进制数据格式（`qlib_bin`，基于 ffnan 压缩），10x 读取速度提升
+   - 支持多频率数据（日频/分钟频）的统一处理接口
+   - 内置 Alpha158 / Alpha360 因子库
 
-**仓库**: https://github.com/QUANTAXIS/QUANTAXIS
+3. **工作流引擎**
+   - YAML 配置驱动的工作流定义
+   - 支持断点续跑和交叉验证
+   - 在线/离线学习模式切换
+   - RD-Agent 集成，自动化因子挖掘
+
+### 1.2 NautilusTrader
+
+| 属性 | 详情 |
+|------|------|
+| GitHub | https://github.com/nautechsystems/nautilus_trader |
+| Stars | ~5k（快速增长中） |
+| 语言 | Rust (核心) + Python (绑定 via PyO3) |
+| 定位 | Production-Ready, High-Performance Algorithmic Trading Platform |
 
 **核心亮点**:
 
-| 亮点 | 说明 | 对 jingni-trader 的借鉴价值 |
-|------|------|---------------------------|
-| **Rust + Python 混合架构** | QARSBridge 用 Rust(PyO3) 实现性能关键路径，10-100x 加速 | 回测引擎、因子计算可引入 Rust/Numba 加速 |
-| **QIFI 统一账户协议** | 标准化的交易接口协议，统一不同券商 API | 实盘监控引擎可参考统一接口设计 |
-| **零拷贝数据桥接** | Apache Arrow 实现 Python ↔ Rust 零拷贝数据交换 | 多模块间数据传递可优化 |
-| **微服务架构** | 数据服务、回测服务、交易服务独立部署，gRPC 通信 | 长期架构演进方向参考 |
+1. **事件驱动架构 (Event-Driven Architecture)**
+   - 所有组件通过 MessageBus 通信，松耦合
+   - 单线程 + LMAX Disruptor 模式，无锁高性能
+   - 支持同一套事件系统同时用于回测和实盘
 
-### 1.3 Freqtrade/FreqAI (⭐ 25,000+)
+2. **确定性时间模型**
+   - nanosecond 级时间分辨率
+   - 回测的时间推进逻辑与实盘一致
+   - 支持多种时间触发策略（固定间隔、市场事件、定时）
 
-**仓库**: https://github.com/freqtrade/freqtrade
+3. **风险引擎**
+   - 可插拔的风险检查器管道
+   - 预交易风控（最大仓位、最大回撤、最大订单量等）
+   - 内置 Account/Position/Risk 管理
+
+4. **Rust 核心性能**
+   - 核心引擎用 Rust 实现，毫秒级延迟
+   - Python 绑定层通过 PyO3 暴露 API
+   - 缓存系统（Cache）减少重复计算
+
+### 1.3 Freqtrade + FreqAI
+
+| 属性 | 详情 |
+|------|------|
+| GitHub | https://github.com/freqtrade/freqtrade |
+| Stars | ~35k（业界最热） |
+| 语言 | Python |
+| 定位 | Open-Source Crypto Trading Bot with ML (FreqAI) |
 
 **核心亮点**:
 
-| 亮点 | 说明 | 对 jingni-trader 的借鉴价值 |
-|------|------|---------------------------|
-| **自适应滑动窗口训练** | 实盘中定期重训练，用滑动窗口管理训练数据，自动淘汰过期数据 | 模型引擎可引入自适应重训练，适应市场风格切换 |
-| **模型持久化与恢复** | 每个交易对独立模型，支持崩溃恢复 | 提升模型管理的健壮性 |
-| **特征工程引擎** | 可插拔的特征管道，支持自定义特征提取器 | 因子构建管道的可扩展性参考 |
-| **持续学习** | 实盘交易中持续收集数据、定期重训练、无缝模型切换 | 关键优化方向，解决模型老化问题 |
+1. **FreqAI 标准化 ML 接口**
+   - `IFreqaiModel` 抽象基类，`train() → fit() → predict()` 三步接口
+   - 支持 LightGBM, XGBoost, PyTorch, CatBoost 等多种后端
+   - DataKitchen/DataDrawer 负责数据管道（归一化、PCA、异常值检测）
+
+2. **超参数优化 (Hyperopt)**
+   - 基于 Optuna 的贝叶斯优化
+   - 支持多维参数空间定义
+   - 自定义损失函数（Sharpe, Profit, WinRate 等）
+   - 带时间序列交叉验证
+
+3. **自适应训练策略**
+   - 滑动训练窗口（Sliding Window）
+   - 模型过期机制（超过一定时间自动重训练）
+   - 特征重要性分析和筛选
+
+4. **完整的策略开发体验**
+   - 统一的回测/模拟盘/实盘接口
+   - Strategy 模板化定义
+   - 内置 100+ 指标
 
 ---
 
-## 二、可借鉴的优化方向
+## 2. 可借鉴的优化方向
 
-基于以上三个项目的学习，对照 jingni-trader 现有代码结构，识别出以下优化方向：
+### 2.1 因子表达式引擎（借鉴 Qlib）
 
-### 优先级评估
+| 维度 | 当前 jingni-trader | 优化方向 |
+|------|-------------------|----------|
+| 因子定义方式 | 硬编码 Python 函数 | DSL 表达式引擎 |
+| 可扩展性 | 需修改代码 | 注册即用，无需改代码 |
+| AI 友好性 | LLM 难以直接生成 | LLM 可直接输出 DSL |
+| 跨截面计算 | 需手动 groupby | 内置 CSRank 等算子 |
 
-| 优先级 | 方向 | 影响模块 | 预期收益 | 实施难度 |
-|--------|------|---------|---------|---------|
-| **P0** | 因子表达式引擎 | factor-engine | 因子构建效率提升 2-3x, LLM 友好 | 中 |
-| **P0** | 自适应滑动窗口训练 | strategy-model-engine | 模型适应市场变化，IR 提升 2-5x | 中 |
-| **P1** | Point-in-Time 数据库 | data-engine | 消除财务因子前瞻偏差 | 高 |
-| **P1** | 数据管道列式存储加速 | data-engine | 数据读取 5-15x 加速 | 低 |
-| **P2** | Rust/Numba 加速关键路径 | backtest-engine | 回测性能 10-100x | 高 |
-| **P2** | 统一接口协议 | execution-monitor-engine | 多券商接入标准化 | 高 |
+**对 jingni-trader 的改进**:
+- 在 `factor-engine` 中引入 FactorExpression `FactorExpressionParser` 和 `FactorExpressionEngine`
+- 支持 `Ref($close, 20)`, `Mean($close, 60)`, `CSRank($close)` 等表达式
+- 保留现有 API 接口兼容，新增 `register_expression()` 接口
 
----
+### 2.2 事件驱动回测架构（借鉴 NautilusTrader）
 
-## 三、已完成的验证测试及结论
+| 维度 | 当前 jingni-trader | 优化方向 |
+|------|-------------------|----------|
+| 架构模式 | 向量化回测（逐列计算） | 事件驱动（MessageBus） |
+| 组价通信 | 直接调用 | 松耦合事件总线 |
+| 风险控制 | 嵌入策略函数 | 独立 RiskEngine 管道 |
+| 实盘一致性 | 不保证 | 同一事件系统 |
 
-### 3.1 因子表达式引擎 (借鉴 Qlib)
+**对 jingni-trader 的改进**:
+- 在 `backtest-engine` 中引入 `MessageBus`、`EventDrivenBacktestEngine`
+- 在 `portfolio-risk-engine` 中引入 `RiskEngine` 管道
+- 事件类型覆盖完整的订单生命周期
 
-**测试文件**: `tests/study_2026/test_factor_expression_engine.py`
+### 2.3 标准化 ML 模型接口 + 超参数优化（借鉴 Freqtrade/FreqAI）
 
-**测试内容**:
+| 维度 | 当前 jingni-trader | 优化方向 |
+|------|-------------------|----------|
+| 模型接口 | 无统一抽象 | `BaseQuantModel` 抽象基类 |
+| 数据预处理 | 策略内手工处理 | `DataPipeline` 管道化 |
+| 超参数调优 | 无自动化 | `HyperoptEngine` + Optuna |
+| 训练策略 | 固定窗口 | 滑动窗口 `SlidingWindowTrainer` |
 
-| 测试项 | 结果 | 关键数据 |
-|--------|------|---------|
-| 解析器正确性 (12 种表达式) | ✅ PASS | 覆盖字段、函数、二元/一元运算、嵌套、条件 |
-| 求值器一致性 (vs 硬编码) | ✅ PASS | 5 组对比，max_diff < 1e-9 |
-| 缓存性能 | ✅ PASS | 103.8x 加速（重复求值） |
-| 嵌套表达式 (4 种复杂模式) | ✅ PASS | 可处理 3 层以上嵌套 |
-| 性能对比 (vs 硬编码) | ✅ PASS | 表达式引擎快 2-5x (benchmark) |
-
-**结论**: 因子表达式引擎方案可行，表达能力强于硬编码，且性能更优。建议在 factor-engine 中引入。
-
-**表达式语法参考**:
-```
-$open, $high, $low, $close, $volume, $amount      -- 原始字段
-Ref(expr, N)                                        -- 前 N 期值
-Mean(expr, N)                                       -- N 期滚动均值
-Std(expr, N)                                        -- N 期滚动标准差
-Corr(expr1, expr2, N)                               -- 滚动相关系数
-Rank(expr)                                          -- 截面排名
-expr + expr, expr - expr, expr * expr, expr / expr  -- 二元运算
--expr, Abs(expr), Log(expr), Sign(expr)             -- 一元运算
-If(cond, true_expr, false_expr)                     -- 条件选择
-```
-
-### 3.2 数据管道性能优化 (借鉴 Qlib + QUANTAXIS)
-
-**测试文件**: `tests/study_2026/test_data_pipeline_performance.py`
-
-**测试内容**:
-
-| 测试项 | 结果 | 关键数据 |
-|--------|------|---------|
-| 存储格式对比 (Parquet/HDF5/Feather/CSV) | ✅ PASS | Feather 读取 14.8x, Parquet 4.5x vs CSV |
-| Point-in-Time 正确性 | ✅ PASS | PIT 值 2.0, 非 PIT 泄露值 1.8 |
-| PIT 数据库类 (多版本查询) | ✅ PASS | 4 个时间点查询全部正确 |
-| 数据切片查询性能 | ✅ PASS | xs() 方法 11.6x vs 布尔索引 |
-
-**结论**: 
-- 当前 Parquet 格式已足够好，Feather 作为中间缓存格式可大幅提升开发时迭代速度
-- PIT 数据库是财务因子回测的必要组件，建议尽快引入
-
-### 3.3 自适应滑动窗口模型训练 (借鉴 FreqAI)
-
-**测试文件**: `tests/study_2026/test_sliding_window_training.py`
-
-**测试内容**:
-
-| 测试项 | 结果 | 关键数据 |
-|--------|------|---------|
-| 固定 vs 滑动窗口训练 | ✅ PASS | 滑动窗口 MSE 改善 62.8% |
-| 模型过期与持久化 | ✅ PASS | 版本管理正确，磁盘恢复正常 |
-| 滚动 IC 稳定性 | ✅ PASS | 滑动窗口 IR=2.17 vs 固定窗口 IR=0.43 |
-
-**结论**: 滑动窗口训练在存在市场风格切换的场景下显著优于固定窗口。建议在 strategy-model-engine 中引入自适应重训练机制。
+**对 jingni-trader 的改进**:
+- 在 `strategy-model-engine` 中引入 `BaseQuantModel` 抽象
+- 在 `strategy-model-engine` 中引入 `HyperoptEngine` 自动调参
+- 在 `strategy-model-engine` 中引入 `SlidingWindowTrainer` 自适应训练
 
 ---
 
-## 四、待用户确认的优化建议
+## 3. 已完成的验证测试
 
-### 建议 1: 引入因子表达式引擎 (P0)
+### 3.1 测试文件清单
 
-- **范围**: factor-engine 模块
-- **改动**: 新增 `FactorExpressionParser` 和 `FactorExpressionEvaluator` 类
-- **收益**: 因子构建效率提升、LLM 可生成因子、支持嵌套与复合因子
-- **风险**: 低，与现有硬编码因子完全兼容，可渐进式迁移
+| 测试文件 | 优化方向 | 测试数 | 结果 |
+|----------|----------|--------|------|
+| `test_factor_expression_engine.py` | 因子表达式引擎 | 16 | 全部通过 |
+| `test_event_driven_backtest.py` | 事件驱动回测 | 11 | 全部通过 |
+| `test_ml_model_interface.py` | ML 模型接口 | 12 | 全部通过 |
 
-### 建议 2: 引入自适应滑动窗口训练 (P0)
+### 3.2 各优化方向测试详情
 
-- **范围**: strategy-model-engine 模块
-- **改动**: 新增 `SlidingWindowTrainer` 类，支持定期重训练、模型持久化、版本管理
-- **收益**: 模型适应市场变化，IC 稳定性提升 2-5x
-- **风险**: 中，需调整现有训练流程，模型切换逻辑需充分测试
+#### 3.2.1 因子表达式引擎
 
-### 建议 3: 引入 Point-in-Time 数据库 (P1)
+**测试覆盖**:
+- 表达式解析器（tokenizer + parser → AST）：7 测试
+- 表达式求值（多股票批量计算）：5 测试
+- 性能对比测试：1 测试
+- 边界条件（空数据、NaN）：2 测试
 
-- **范围**: data-engine 模块
-- **改动**: 新增 `SimplePITDatabase` 类，支持多版本财务数据存储和查询
-- **收益**: 消除财务因子回测的 look-ahead bias
-- **风险**: 中，需要整理历史财务数据多版本，数据源可能受限
+**关键测试结果**:
 
-### 建议 4: 数据缓存层优化 (P1)
+| 测试项 | 结果 | 说明 |
+|--------|------|------|
+| 1 日收益率正确性 | 通过 | `Div(Sub($close, Ref($close, 1)), Ref($close, 1))` 与 pandas pct_change 数值一致 |
+| 20 日均线正确性 | 通过 | `Mean($close, 20)` 与 rolling(20).mean() 一致 |
+| 截面排名正确性 | 通过 | `CSRank($close)` 与 groupby.rank(pct=True) 一致 |
+| 复合因子 | 通过 | 嵌套表达式 `CSRank(Sub(0, Div(Sub($close, Ref($close, 20)), Ref($close, 20))))` |
+| 性能 (100 股 x 522 天) | 通过 | 表达式引擎 ~76ms vs 手动 ~8ms (9.2x)，可接受 |
 
-- **范围**: data-engine 模块
-- **改动**: 引入 Feather 格式作为中间缓存，添加 `get_locs` 索引优化
-- **收益**: 数据读取速度提升 5-15x，开发迭代更高效
-- **风险**: 低，纯性能优化，不影响功能正确性
+#### 3.2.2 事件驱动回测
+
+**测试覆盖**:
+- 消息总线发布/订阅：3 测试
+- 风险引擎管道：3 测试
+- 完整回测流程：3 测试
+- 性能对比：1 测试
+
+**关键测试结果**:
+
+| 测试项 | 结果 | 说明 |
+|--------|------|------|
+| 完整回测 MA20 突破策略 | 通过 | 产生有效交易记录和绩效指标 |
+| 风险拒绝机制 | 通过 | 极端风控下交易数显著减少 |
+| 事件总数验证 | 通过 | 回测过程产生大量有序事件 |
+| 性能 (50 股 x 522 天) | 通过 | ~12 秒完成，约 51000+ 事件 |
+
+#### 3.2.3 ML 模型接口
+
+**测试覆盖**:
+- 标准化模型接口：3 测试
+- 数据预处理管道：4 测试
+- 超参数优化：2 测试
+- 滑动窗口训练：3 测试
+
+**关键测试结果**:
+
+| 测试项 | 结果 | 说明 |
+|--------|------|------|
+| 模型训练/预测/持久化 | 通过 | 支持 save/load 周期 |
+| 多模型类型 | 通过 | LightGBM, XGBoost 均正常（含 sklearn 回退） |
+| 数据管道（StandardScaler/PCA/MinMax） | 通过 | 正确处理 fit/transform |
+| 超参数优化 | 通过 | Optuna 贝叶斯搜索，最佳 IC=0.2939 |
+| 滑动窗口 | 通过 | 按间隔自动重训练 |
 
 ---
 
-## 五、验证测试文件清单
+## 4. 性能对比分析
 
-所有测试文件位于 `tests/study_2026/` 目录：
+### 4.1 因子计算性能
 
-| 文件 | 借鉴来源 | 优化方向 | 测试状态 |
-|------|---------|---------|---------|
-| `test_factor_expression_engine.py` | microsoft/qlib | 因子表达式引擎 | ✅ 全部通过 |
-| `test_data_pipeline_performance.py` | qlib + QUANTAXIS | 数据管道性能优化 | ✅ 全部通过 |
-| `test_sliding_window_training.py` | Freqtrade/FreqAI | 滑动窗口自适应训练 | ✅ 全部通过 |
+| 方法 | 100 股 x 50K 行 | 相对性能 |
+|------|----------------|----------|
+| Pandas groupby | ~8ms | 1.0x (基线) |
+| 表达式引擎 | ~76ms | 9.2x |
+| **优化潜力**: 改用向量化分组计算可降至 ~20ms | | |
 
----
+### 4.2 回测引擎性能
 
-## 六、附录：项目架构对比
-
-| 维度 | jingni-trader | Qlib | QUANTAXIS | Freqtrade |
-|------|-------------|------|-----------|-----------|
-| 语言 | Python | Python | Python + Rust | Python |
-| 因子构建 | 硬编码 | 表达式 DSL | 硬编码 | 特征管道 |
-| 回测引擎 | 自定义 | 向量化 | 事件驱动 | 事件驱动 |
-| 数据存储 | Parquet | HDF5 (列式) | MongoDB | SQLite/PostgreSQL |
-| 模型训练 | 一次性 | Workflow | 手动 | FreqAI 自适应 |
-| LLM 集成 | 有 (Skill) | RD-Agent | 无 | 推荐策略 |
-| 实盘交易 | 执行监控 | 无 | QIFI 协议 | 内置支持 |
+| 引擎类型 | 50 股 x 50K 行 | 特点 |
+|----------|----------------|------|
+| 向量化回测（旧） | ~0.5s | 快但不灵活 |
+| 事件驱动（新） | ~12s | 灵活但较慢 |
+| **取舍**: 事件驱动提供了更高的准确性和可扩展性，适合策略验证阶段 | | |
 
 ---
 
-*报告生成时间: 2026-06-14 | 下次学习计划: 2026-07-01*
+## 5. 待用户确认的优化建议
+
+### 优先级 P0（高价值、低风险）
+
+1. **因子表达式引擎集成到 factor-engine**
+   - 影响范围：`skills/factor-engine/scripts/base/` 新增 `expression_engine.py`
+   - API 兼容：保留现有 `BaseFactor`, `PandasTACalculator`，新增 `ExpressionFactor`
+   - 风险：低，纯增量功能
+
+2. **标准化 ML 模型接口集成到 strategy-model-engine**
+   - 影响范围：`skills/strategy-model-engine/scripts/base/` 新增 `base_quant_model.py`
+   - API 兼容：新增抽象类，不修改现有代码
+   - 风险：低
+
+### 优先级 P1（中价值、需评估）
+
+3. **事件驱动回测架构引入 backtest-engine**
+   - 影响范围：`skills/backtest-engine/scripts/base/` 需要重构
+   - API 兼容：建议新增 `event_driven_engine.py`，保留向量化引擎
+   - 风险：中，需充分测试与原向量的结果一致性
+
+4. **超参数优化引入 strategy-model-engine**
+   - 影响范围：新增 `hyperopt_engine.py`
+   - 依赖：需安装 Optuna (`pip install optuna`)
+   - 风险：低
+
+### 优先级 P2（长期规划）
+
+5. **数据存储格式优化**（借鉴 Qlib 的列式二进制格式）
+6. **Rust 核心迁移**（借鉴 NautilusTrader 的 PyO3 方案，长期性能优化）
+7. **实盘交易接口统一事件模型**
+
+---
+
+## 6. 下一步行动
+
+1. **等待用户确认** P0 优化方向是否可以合并到主分支
+2. 用户确认后，按 Conventional Commits 规范提交：
+   - `feat(factor-engine): add factor expression engine inspired by Qlib`
+   - `feat(strategy-model-engine): add standardized ML model interface`
+3. 如有需要，可继续深入 P1/P2 方向的验证测试
+
+---
+
+## 附录：验证代码位置
+
+| 文件 | 路径 |
+|------|------|
+| 因子表达式引擎测试 | `tests/study_2026/test_factor_expression_engine.py` |
+| 事件驱动回测测试 | `tests/study_2026/test_event_driven_backtest.py` |
+| ML 模型接口测试 | `tests/study_2026/test_ml_model_interface.py` |
+| 本报告 | `tests/study_2026/LEARNING_REPORT.md` |
+
+---
+
+*报告生成时间: 2026-06-12 | 基于 jingni-trader v0.1.x 代码结构分析*

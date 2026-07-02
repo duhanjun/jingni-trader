@@ -1,637 +1,524 @@
 """
-优化方向：因子表达式引擎 (Factor Expression Engine)
-借鉴来源：microsoft/qlib (https://github.com/microsoft/qlib)
-         Qlib 的表达式引擎允许用 DSL 声明因子，如 $close, Ref($close, 1), Mean($close, 3)
+验证测试：因子表达式引擎（Factor Expression Engine）
 
-核心亮点：
-  - Qlib 将因子声明为函数而非数据，使得 LLM 可生成因子表达式
-  - 表达式引擎自动处理缓存和列式计算
-  - 支持嵌套表达式，如 Mean($high - $low, 5)
+借鉴来源：Microsoft Qlib (https://github.com/microsoft/qlib)
+  - Qlib 的 Expression Engine 提供 DSL 语法定义因子，
+    如 `Ref($close, 60) / $close - 1` 计算 60 日收益率，
+    支持跨截面算子（CSRank, CSMean）和时序算子（Ref, Mean, Std）。
+  - 设计理念：因子声明为函数而非数据，让 LLM 可直接生成因子表达式。
 
-本测试验证：
-  1. 表达式解析器的正确性
-  2. 与现有硬编码因子计算的输出一致性
-  3. 表达式引擎的性能表现
-  4. 嵌套表达式的处理能力
+优化方向：为 jingni-trader 的 factor-engine 引入表达式引擎，
+  支持用户用简洁的 DSL 定义因子，降低因子开发门槛，
+  提高因子库的可扩展性和 AI 友好性。
+
+测试内容：
+  1. 表达式解析器（tokenizer + parser → AST）
+  2. 运算符实现（时序算子、截面算子、元素算子）
+  3. 表达式求值（多股票 DataFrame 上的批量计算）
+  4. 性能对比测试（表达式引擎 vs 手动循环）
+  5. 边界条件测试（空数据、NaN、极端值）
 """
 
-import sys
-import os
+import unittest
+import pandas as pd
+import numpy as np
 import re
 import time
-import json
-from typing import Dict, List, Callable, Any, Union, Optional
-from functools import lru_cache
-
-sys.path.insert(0, '/workspace')
-
-import numpy as np
-import pandas as pd
+from typing import Dict, List, Callable, Any, Union
+from abc import ABC, abstractmethod
 
 
 # ============================================================
-# 1. 因子表达式引擎原型实现
+# 表达式引擎实现（借鉴 Qlib 设计）
 # ============================================================
 
-# 表达式语法定义:
-#   $open, $high, $low, $close, $volume, $amount       -- 原始字段
-#   Ref(expr, N)                                        -- 前 N 期值
-#   Mean(expr, N)                                       -- N 期滚动均值
-#   Std(expr, N)                                        -- N 期滚动标准差
-#   Sum(expr, N)                                        -- N 期滚动求和
-#   Max(expr, N)                                        -- N 期滚动最大值
-#   Min(expr, N)                                        -- N 期滚动最小值
-#   PctChange(expr, N)                                  -- N 期变化率
-#   Corr(expr1, expr2, N)                               -- 两表达式 N 期滚动相关系数
-#   Rank(expr)                                          -- 截面排名
-#   二元运算: expr + expr, expr - expr, expr * expr, expr / expr
-#   一元运算: -expr, Abs(expr), Log(expr), Sign(expr)
-#   条件: If(cond_expr, true_expr, false_expr)          -- 条件选择
+class Expression(ABC):
+    """表达式 AST 节点基类"""
+
+    @abstractmethod
+    def evaluate(self, data: pd.DataFrame, code_groups: Dict[str, pd.DataFrame]) -> pd.Series:
+        ...
+
+
+class FieldRef(Expression):
+    """字段引用节点，如 $close, $open, $volume"""
+
+    def __init__(self, field: str):
+        self.field = field
+
+    def evaluate(self, data: pd.DataFrame, code_groups: Dict[str, pd.DataFrame]) -> pd.Series:
+        return data[self.field].copy()
+
+    def __repr__(self):
+        return f"FieldRef({self.field})"
+
+
+class Literal(Expression):
+    """字面量节点"""
+
+    def __init__(self, value: float):
+        self.value = value
+
+    def evaluate(self, data: pd.DataFrame, code_groups: Dict[str, pd.DataFrame]) -> pd.Series:
+        return pd.Series(self.value, index=data.index)
+
+    def __repr__(self):
+        return f"Literal({self.value})"
+
+
+class Ref(Expression):
+    """时序偏移算子 Ref($close, 5) → 5 天前的收盘价"""
+
+    def __init__(self, expr: Expression, offset: int):
+        self.expr = expr
+        self.offset = offset
+
+    def evaluate(self, data: pd.DataFrame, code_groups: Dict[str, pd.DataFrame]) -> pd.Series:
+        series = self.expr.evaluate(data, code_groups)
+        result = pd.Series(index=data.index, dtype=float)
+        for code, grp in code_groups.items():
+            idx = grp.index
+            result.loc[idx] = series.loc[idx].shift(self.offset)
+        return result
+
+    def __repr__(self):
+        return f"Ref({self.expr}, {self.offset})"
+
+
+class RollingOp(Expression):
+    """滚动窗口算子 Mean($close, 20), Std($close, 20)"""
+
+    OP_MAP = {
+        "Mean": "mean",
+        "Std": "std",
+        "Max": "max",
+        "Min": "min",
+        "Sum": "sum",
+    }
+
+    def __init__(self, op_name: str, expr: Expression, window: int):
+        self.op_name = op_name
+        self.expr = expr
+        self.window = window
+
+    def evaluate(self, data: pd.DataFrame, code_groups: Dict[str, pd.DataFrame]) -> pd.Series:
+        series = self.expr.evaluate(data, code_groups)
+        method = self.OP_MAP.get(self.op_name, "mean")
+        result = pd.Series(index=data.index, dtype=float)
+        for code, grp in code_groups.items():
+            idx = grp.index
+            result.loc[idx] = getattr(series.loc[idx].rolling(self.window, min_periods=1), method)()
+        return result
+
+    def __repr__(self):
+        return f"{self.op_name}({self.expr}, {self.window})"
+
+
+class BinaryOp(Expression):
+    """二元运算 Add, Sub, Mul, Div, Gt, Lt"""
+
+    OP_MAP = {
+        "Add": lambda a, b: a + b,
+        "Sub": lambda a, b: a - b,
+        "Mul": lambda a, b: a * b,
+        "Div": lambda a, b: a / b,
+        "Gt":  lambda a, b: (a > b).astype(float),
+        "Lt":  lambda a, b: (a < b).astype(float),
+    }
+
+    def __init__(self, op_name: str, left: Expression, right: Expression):
+        self.op_name = op_name
+        self.left = left
+        self.right = right
+
+    def evaluate(self, data: pd.DataFrame, code_groups: Dict[str, pd.DataFrame]) -> pd.Series:
+        lv = self.left.evaluate(data, code_groups)
+        rv = self.right.evaluate(data, code_groups)
+        if isinstance(rv, pd.Series) and not isinstance(self.right, Literal):
+            return self.OP_MAP[self.op_name](lv, rv)
+        else:
+            return self.OP_MAP[self.op_name](lv, rv)
+
+    def __repr__(self):
+        return f"{self.op_name}({self.left}, {self.right})"
+
+
+class CSRank(Expression):
+    """截面排名算子 CSRank($close) → 在当日的截面内排名"""
+
+    def __init__(self, expr: Expression):
+        self.expr = expr
+
+    def evaluate(self, data: pd.DataFrame, code_groups: Dict[str, pd.DataFrame]) -> pd.Series:
+        series = self.expr.evaluate(data, code_groups)
+        result = pd.Series(index=data.index, dtype=float)
+        for date, grp in data.groupby("date"):
+            idx = grp.index
+            result.loc[idx] = series.loc[idx].rank(pct=True)
+        return result
+
+    def __repr__(self):
+        return f"CSRank({self.expr})"
 
 
 class FactorExpressionParser:
-    """因子表达式解析器 - 将 DSL 字符串解析为可执行的操作树"""
+    """
+    表达式解析器：将 DSL 字符串解析为 AST 表达式树
 
-    # Token 模式
-    FIELD_PATTERN = re.compile(r'\$(open|high|low|close|volume|amount|vwap|turnover|pre_close)')
+    支持语法:
+      - $field          字段引用
+      - 123.45          数字字面量
+      - Ref(expr, N)     时序偏移
+      - Mean(expr, N)    滚动均值
+      - Std(expr, N)     滚动标准差
+      - Add(a, b)        加法
+      - Sub(a, b)        减法
+      - Mul(a, b)        乘法
+      - Div(a, b)        除法
+      - CSRank(expr)     截面排名
+    """
+
+    TOKEN_PATTERN = re.compile(
+        r'\$(\w+)|'           # $field
+        r'(\d+\.?\d*)|'       # number
+        r'([A-Za-z_]\w*)\(|'  # func_name(
+        r'(,)|'               # comma
+        r'(\))|'              # right paren
+        r'(\s+)'              # whitespace
+    )
 
     def __init__(self):
-        self._field_map = {
-            'open': 'open', 'high': 'high', 'low': 'low', 'close': 'close',
-            'volume': 'volume', 'amount': 'amount', 'vwap': 'vwap',
-            'turnover': 'turnover', 'pre_close': 'pre_close'
-        }
+        pass
 
-    def parse(self, expr: str) -> Dict[str, Any]:
-        """
-        解析表达式字符串为 AST
+    def tokenize(self, expr: str) -> List[tuple]:
+        tokens = []
+        for m in self.TOKEN_PATTERN.finditer(expr):
+            if m.group(1):   # $field
+                tokens.append(("FIELD", m.group(1)))
+            elif m.group(2):  # number
+                tokens.append(("NUMBER", float(m.group(2))))
+            elif m.group(3):  # func_name(
+                tokens.append(("FUNC", m.group(3)))
+                tokens.append(("LPAREN", "("))
+            elif m.group(4):  # comma
+                tokens.append(("COMMA", ","))
+            elif m.group(5):  # )
+                tokens.append(("RPAREN", ")"))
+        return tokens
 
-        返回: {'type': 'op'|'field'|'func', ...}
-        """
-        expr = expr.strip()
-        return self._parse_expr(expr)
+    def parse(self, expr_str: str) -> Expression:
+        tokens = self.tokenize(expr_str)
+        self.pos = 0
+        self.tokens = tokens
+        return self._parse_expr()
 
-    def _parse_expr(self, expr: str) -> Dict[str, Any]:
-        """递归下降解析"""
-        expr = expr.strip()
+    def _peek(self):
+        if self.pos < len(self.tokens):
+            return self.tokens[self.pos]
+        return None
 
-        # 处理括号包裹
-        if expr.startswith('(') and expr.endswith(')'):
-            depth = 0
-            for i, ch in enumerate(expr):
-                if ch == '(':
-                    depth += 1
-                elif ch == ')':
-                    depth -= 1
-                if depth == 0 and i == len(expr) - 1:
-                    return self._parse_expr(expr[1:-1])
-                if depth == 0:
-                    break
+    def _consume(self):
+        tok = self.tokens[self.pos]
+        self.pos += 1
+        return tok
 
-        # 处理一元负号 (表达式开头为 -)
-        if expr.startswith('-'):
-            inner = self._parse_expr(expr[1:].strip())
-            return {'type': 'op', 'op': 'neg', 'args': [inner]}
+    def _parse_expr(self) -> Expression:
+        tok = self._peek()
+        if tok is None:
+            raise ValueError("Unexpected end of expression")
 
-        # 处理函数调用: FuncName(args)
-        func_match = re.match(r'^(\w+)\s*\((.*)\)\s*$', expr)
-        if func_match and self._is_balanced(expr):
-            func_name = func_match.group(1)
-            args_str = func_match.group(2)
-            args = self._split_args(args_str)
-            parsed_args = [self._parse_expr(a.strip()) for a in args]
-            return {'type': 'func', 'func': func_name, 'args': parsed_args}
+        if tok[0] == "FIELD":
+            self._consume()
+            return FieldRef(tok[1])
+        elif tok[0] == "NUMBER":
+            self._consume()
+            return Literal(tok[1])
+        elif tok[0] == "FUNC":
+            func_name = self._consume()[1]
+            self._consume()  # LPAREN
+            args = []
+            args.append(self._parse_expr())
+            while self._peek() and self._peek()[0] == "COMMA":
+                self._consume()  # COMMA
+                args.append(self._parse_expr())
+            self._consume()  # RPAREN
 
-        # 处理字段: $open, $close, etc.
-        field_match = self.FIELD_PATTERN.fullmatch(expr)
-        if field_match:
-            return {'type': 'field', 'field': self._field_map.get(field_match.group(1), field_match.group(1))}
-
-        # 处理二元运算符 (按优先级: +, - 最低)
-        for op in ['+', '-']:
-            parts = self._split_by_op(expr, op)
-            if len(parts) > 1:
-                left = self._parse_expr(parts[0].strip())
-                right = self._parse_expr(op.join(parts[1:]).strip())
-                return {'type': 'op', 'op': op, 'args': [left, right]}
-
-        for op in ['*', '/']:
-            parts = self._split_by_op(expr, op)
-            if len(parts) > 1:
-                left = self._parse_expr(parts[0].strip())
-                right = self._parse_expr(op.join(parts[1:]).strip())
-                return {'type': 'op', 'op': op, 'args': [left, right]}
-
-        # 处理数字常量
-        try:
-            val = float(expr)
-            return {'type': 'const', 'value': val}
-        except ValueError:
-            pass
-
-        raise ValueError(f"无法解析表达式: {expr}")
-
-    def _is_balanced(self, expr: str) -> bool:
-        """检查是否是完整的函数调用：FuncName(balanced_args)"""
-        # Find the first '('
-        try:
-            paren_start = expr.index('(')
-        except ValueError:
-            return False
-
-        # Everything before '(' should be a function name (word chars only)
-        prefix = expr[:paren_start]
-        if not re.match(r'^\w+$', prefix):
-            return False
-
-        # Must end with ')'
-        if not expr.endswith(')'):
-            return False
-
-        # Check that parentheses close precisely at the end
-        depth = 0
-        opened = False
-        for i, ch in enumerate(expr):
-            if ch == '(':
-                depth += 1
-                opened = True
-            elif ch == ')':
-                depth -= 1
-            if opened and depth == 0 and i < len(expr) - 1:
-                # Closed before the end -> not a single function call
-                return False
-        return depth == 0
-
-    def _split_args(self, args_str: str) -> List[str]:
-        """按逗号分隔函数参数，正确处理嵌套"""
-        parts = []
-        depth = 0
-        current = []
-        for ch in args_str:
-            if ch == '(':
-                depth += 1
-                current.append(ch)
-            elif ch == ')':
-                depth -= 1
-                current.append(ch)
-            elif ch == ',' and depth == 0:
-                parts.append(''.join(current))
-                current = []
+            # 时序算子
+            if func_name in ("Ref",):
+                return Ref(args[0], int(args[1].value))
+            elif func_name in ("Mean", "Std", "Max", "Min", "Sum"):
+                return RollingOp(func_name, args[0], int(args[1].value))
+            elif func_name in ("Add", "Sub", "Mul", "Div", "Gt", "Lt"):
+                if func_name == "Mul" and isinstance(args[0], Literal) and isinstance(args[1], FieldRef):
+                    # 简化：Literal * expr 可直接在 BinaryOp 中处理
+                    pass
+                return BinaryOp(func_name, args[0], args[1])
+            elif func_name == "CSRank":
+                return CSRank(args[0])
             else:
-                current.append(ch)
-        if current:
-            parts.append(''.join(current))
-        return parts
-
-    def _split_by_op(self, expr: str, op: str) -> List[str]:
-        """按运算符分割，正确处理嵌套"""
-        parts = []
-        depth = 0
-        last = 0
-        for i, ch in enumerate(expr):
-            if ch == '(':
-                depth += 1
-            elif ch == ')':
-                depth -= 1
-            elif ch == op and depth == 0 and i > 0:
-                # 对于 +, *, /，只要不在括号内就允许分割
-                # 对于 -，需要区分负号和减号
-                if op == '-':
-                    if expr[i-1] not in '(,+-*/':
-                        parts.append(expr[last:i])
-                        last = i + 1
-                else:
-                    parts.append(expr[last:i])
-                    last = i + 1
-        parts.append(expr[last:])
-        return parts
+                raise ValueError(f"Unknown function: {func_name}")
+        else:
+            raise ValueError(f"Unexpected token: {tok}")
 
 
-class FactorExpressionEvaluator:
-    """因子表达式求值器 - 将 AST 转换为 pandas 操作"""
+class FactorExpressionEngine:
+    """
+    因子表达式引擎：编译表达式并批量求值
 
-    def __init__(self, parser: FactorExpressionParser = None):
-        self.parser = parser or FactorExpressionParser()
-        self._cache = {}
+    借鉴 Qlib 的设计：
+    - 表达式编译为 AST
+    - 按股票分组求值，支持跨截面计算
+    """
 
-    def evaluate(self, expr: str, data: pd.DataFrame, group_col: str = 'code') -> pd.Series:
-        """
-        对数据执行因子表达式求值
+    def __init__(self):
+        self.parser = FactorExpressionParser()
+        self._compiled: Dict[str, Expression] = {}
 
-        参数:
-            expr: 因子表达式字符串
-            data: 行情数据 DataFrame，须包含 date, code 及 OHLCV 列
-            group_col: 分组列名
+    def compile(self, name: str, expr_str: str) -> Expression:
+        ast = self.parser.parse(expr_str)
+        self._compiled[name] = ast
+        return ast
 
-        返回:
-            pd.Series, 与 data 同 index
-        """
-        cache_key = (expr, id(data))
-        if cache_key in self._cache:
-            return self._cache[cache_key].copy()
+    def evaluate(self, name: str, data: pd.DataFrame) -> pd.Series:
+        if name not in self._compiled:
+            raise ValueError(f"Factor '{name}' not compiled. Call compile() first.")
 
-        ast = self.parser.parse(expr) if isinstance(expr, str) else expr
-        result = self._eval_node(ast, data, group_col)
+        ast = self._compiled[name]
+        code_groups = {code: grp for code, grp in data.groupby("code")}
+        return ast.evaluate(data, code_groups)
 
-        # 缓存（仅限非空结果）
-        if result is not None and len(result) > 0:
-            self._cache[cache_key] = result.copy()
-
+    def calculate(self, data: pd.DataFrame, expressions: Dict[str, str]) -> pd.DataFrame:
+        result = data[["code", "date"]].copy()
+        for name, expr_str in expressions.items():
+            self.compile(name, expr_str)
+            result[name] = self.evaluate(name, data)
         return result
 
-    def _eval_node(self, node: Dict, data: pd.DataFrame, group_col: str) -> pd.Series:
-        """递归求值 AST 节点"""
-        node_type = node['type']
 
-        if node_type == 'field':
-            field = node['field']
-            if field in data.columns:
-                return data[field].copy()
-            raise KeyError(f"数据中不包含字段: {field}")
+# ============================================================
+# 测试用例
+# ============================================================
 
-        elif node_type == 'const':
-            val = node['value']
-            return pd.Series(val, index=data.index)
+class TestFactorExpressionParser(unittest.TestCase):
+    """测试表达式解析器"""
 
-        elif node_type == 'op':
-            op = node['op']
-            args = [self._eval_node(a, data, group_col) for a in node['args']]
+    def setUp(self):
+        self.parser = FactorExpressionParser()
 
-            if op == 'neg':
-                return -args[0]
-            elif op == '+':
-                return args[0] + args[1]
-            elif op == '-':
-                return args[0] - args[1]
-            elif op == '*':
-                return args[0] * args[1]
-            elif op == '/':
-                return args[0] / args[1].replace(0, np.nan)
-            else:
-                raise ValueError(f"未知运算符: {op}")
+    def test_field_ref(self):
+        ast = self.parser.parse("$close")
+        self.assertIsInstance(ast, FieldRef)
+        self.assertEqual(ast.field, "close")
 
-        elif node_type == 'func':
-            func_name = node['func']
-            args = [self._eval_node(a, data, group_col) for a in node['args']]
+    def test_literal(self):
+        ast = self.parser.parse("123.45")
+        self.assertIsInstance(ast, Literal)
+        self.assertEqual(ast.value, 123.45)
 
-            return self._apply_func(func_name, args, data, group_col)
+    def test_ref(self):
+        ast = self.parser.parse("Ref($close, 5)")
+        self.assertIsInstance(ast, Ref)
+        self.assertEqual(ast.offset, 5)
+        self.assertIsInstance(ast.expr, FieldRef)
 
-        raise ValueError(f"未知节点类型: {node_type}")
+    def test_rolling_mean(self):
+        ast = self.parser.parse("Mean($close, 20)")
+        self.assertIsInstance(ast, RollingOp)
+        self.assertEqual(ast.op_name, "Mean")
+        self.assertEqual(ast.window, 20)
 
-    def _apply_func(self, func_name: str, args: List[pd.Series],
-                    data: pd.DataFrame, group_col: str) -> pd.Series:
-        """应用函数到参数"""
-        lookup = {
-            'Ref': self._func_ref,
-            'Mean': self._func_rolling,
-            'Std': self._func_rolling,
-            'Sum': self._func_rolling,
-            'Max': self._func_rolling,
-            'Min': self._func_rolling,
-            'PctChange': self._func_pct_change,
-            'Corr': self._func_corr,
-            'Abs': self._func_abs,
-            'Log': self._func_log,
-            'Sign': self._func_sign,
-            'Rank': self._func_rank,
-            'If': self._func_if,
+    def test_binary_op(self):
+        ast = self.parser.parse("Div(Sub($close, Ref($close, 1)), Ref($close, 1))")
+        self.assertIsInstance(ast, BinaryOp)
+        self.assertEqual(ast.op_name, "Div")
+
+    def test_csrank(self):
+        ast = self.parser.parse("CSRank($close)")
+        self.assertIsInstance(ast, CSRank)
+
+    def test_complex_nested(self):
+        """测试复杂嵌套表达式：20日收益率的截面排名"""
+        expr = "CSRank(Div(Sub($close, Ref($close, 20)), Ref($close, 20)))"
+        ast = self.parser.parse(expr)
+        self.assertIsInstance(ast, CSRank)
+        print(f"    复杂表达式 AST: {ast}")
+
+    def test_invalid_expression(self):
+        with self.assertRaises(ValueError):
+            self.parser.parse("UnknownFunc($close)")
+
+
+class TestFactorExpressionEngine(unittest.TestCase):
+    """测试因子表达式引擎求值"""
+
+    @classmethod
+    def setUpClass(cls):
+        """创建多股票测试数据"""
+        np.random.seed(42)
+        codes = ["000001.SZ", "000002.SZ", "000003.SZ"]
+        dates = pd.date_range("2024-01-01", "2024-06-30", freq="B")
+        records = []
+        for code in codes:
+            n = len(dates)
+            base_price = {"000001.SZ": 10.0, "000002.SZ": 20.0, "000003.SZ": 50.0}[code]
+            returns = np.random.normal(0.0005, 0.02, n)
+            prices = base_price * np.cumprod(1 + returns)
+            for i, d in enumerate(dates):
+                records.append({
+                    "code": code,
+                    "date": d,
+                    "open": prices[i] * (1 + np.random.normal(0, 0.002)),
+                    "high": prices[i] * (1 + abs(np.random.normal(0, 0.01))),
+                    "low": prices[i] * (1 - abs(np.random.normal(0, 0.01))),
+                    "close": prices[i],
+                    "volume": np.random.lognormal(10, 0.5),
+                })
+        cls.data = pd.DataFrame(records).sort_values(["code", "date"]).reset_index(drop=True)
+
+    def setUp(self):
+        self.engine = FactorExpressionEngine()
+
+    def test_simple_ret_1d(self):
+        """测试 1 日收益率: (close - close_lag1) / close_lag1"""
+        expr = "Div(Sub($close, Ref($close, 1)), Ref($close, 1))"
+        self.engine.compile("ret_1d", expr)
+        result = self.engine.evaluate("ret_1d", self.data)
+
+        # 手动验证
+        manual = self.data.groupby("code")["close"].pct_change()
+        manual = manual.reset_index(drop=True)
+        result = result.reset_index(drop=True)
+
+        # 比较（忽略 NaN）
+        mask = result.notna() & manual.notna()
+        self.assertTrue(np.allclose(result[mask], manual[mask], rtol=1e-10))
+
+    def test_ma20(self):
+        """测试 20 日均线"""
+        expr = "Mean($close, 20)"
+        self.engine.compile("ma20", expr)
+        result = self.engine.evaluate("ma20", self.data)
+
+        manual = self.data.groupby("code")["close"].transform(
+            lambda x: x.rolling(20, min_periods=1).mean()
+        )
+        result = result.reset_index(drop=True)
+        manual = manual.reset_index(drop=True)
+        mask = result.notna() & manual.notna()
+        self.assertTrue(np.allclose(result[mask], manual[mask], rtol=1e-10))
+
+    def test_csrank_close(self):
+        """测试截面排名"""
+        expr = "CSRank($close)"
+        self.engine.compile("cs_rank", expr)
+        result = self.engine.evaluate("cs_rank", self.data)
+
+        # 手动验证：每天按 close 排名
+        manual = self.data.groupby("date")["close"].rank(pct=True)
+        result = result.reset_index(drop=True)
+        manual = manual.reset_index(drop=True)
+        mask = result.notna() & manual.notna()
+        self.assertTrue(np.allclose(result[mask], manual[mask], rtol=1e-10))
+
+    def test_complex_factor(self):
+        """测试复合因子：20日反转因子的截面排名"""
+        # 使用 Sub(0, ret_20) 来实现取负值（反转因子）
+        expr = "CSRank(Sub(0, Div(Sub($close, Ref($close, 20)), Ref($close, 20))))"
+        self.engine.compile("reversal_20_rank", expr)
+        result = self.engine.evaluate("reversal_20_rank", self.data)
+
+        # 验证结果在 [0, 1] 范围内
+        valid = result.dropna()
+        self.assertTrue(valid.between(0, 1).all())
+        self.assertEqual(len(result), len(self.data))
+
+    def test_batch_calculate(self):
+        """测试批量计算多个因子"""
+        expressions = {
+            "ret_1d": "Div(Sub($close, Ref($close, 1)), Ref($close, 1))",
+            "ma20": "Mean($close, 20)",
+            "ma5": "Mean($close, 5)",
+            "ret_20": "Div(Sub($close, Ref($close, 20)), Ref($close, 20))",
         }
-        if func_name not in lookup:
-            raise ValueError(f"未知函数: {func_name}")
-        return lookup[func_name](args, data, group_col, func_name)
+        result = self.engine.calculate(self.data, expressions)
+        expected_cols = {"code", "date", "ret_1d", "ma20", "ma5", "ret_20"}
+        self.assertTrue(expected_cols.issubset(set(result.columns)))
+        self.assertEqual(len(result), len(self.data))
 
-    def _func_ref(self, args, data, group_col, func_name):
-        """Ref(expr, N) -- 前 N 期值"""
-        expr, n = args[0], int(self._extract_const(args[1]))
-        return expr.groupby(data[group_col]).shift(n)
+    def test_empty_data(self):
+        """边界条件：空数据"""
+        empty_df = pd.DataFrame(columns=["code", "date", "open", "high", "low", "close", "volume"])
+        self.engine.compile("ret_1d", "Div(Sub($close, Ref($close, 1)), Ref($close, 1))")
+        result = self.engine.evaluate("ret_1d", empty_df)
+        self.assertEqual(len(result), 0)
 
-    def _func_rolling(self, args, data, group_col, func_name):
-        """Mean/Std/Sum/Max/Min(expr, N) -- N 期滚动"""
-        expr, n = args[0], int(self._extract_const(args[1]))
-        roll = expr.groupby(data[group_col]).rolling(n, min_periods=max(3, n // 2))
-        method_map = {
-            'Mean': 'mean', 'Std': 'std', 'Sum': 'sum',
-            'Max': 'max', 'Min': 'min'
-        }
-        method = method_map[func_name]
-        result = getattr(roll, method)()
-        # reset multi-index back to original index
-        result = result.reset_index(level=0, drop=True)
-        result = result.reindex(data.index)
-        return result
-
-    def _func_pct_change(self, args, data, group_col, func_name):
-        """PctChange(expr, N) -- N 期变化率"""
-        expr, n = args[0], int(self._extract_const(args[1]))
-        return expr.groupby(data[group_col]).pct_change(n)
-
-    def _func_corr(self, args, data, group_col, func_name):
-        """Corr(expr1, expr2, N) -- 两表达式 N 期滚动相关系数"""
-        e1, e2, n = args[0], args[1], int(self._extract_const(args[2]))
-        result = pd.Series(index=data.index, dtype=float)
-        for code, grp in data.groupby(group_col):
-            idx = grp.index
-            r1 = e1.loc[idx]
-            r2 = e2.loc[idx]
-            corr = r1.rolling(n, min_periods=max(5, n // 2)).corr(r2)
-            result.loc[idx] = corr.values
-        return result
-
-    def _func_abs(self, args, data, group_col, func_name):
-        return args[0].abs()
-
-    def _func_log(self, args, data, group_col, func_name):
-        return np.log(args[0].clip(lower=1e-10))
-
-    def _func_sign(self, args, data, group_col, func_name):
-        return np.sign(args[0])
-
-    def _func_rank(self, args, data, group_col, func_name):
-        """Rank(expr) -- 截面排名 (percentile)"""
-        expr = args[0]
-        df = pd.DataFrame({'date': data['date'], 'val': expr})
-        result = df.groupby('date')['val'].rank(pct=True)
-        return result.reindex(data.index)
-
-    def _func_if(self, args, data, group_col, func_name):
-        """If(cond, true_expr, false_expr)"""
-        cond, true_val, false_val = args[0], args[1], args[2]
-        return pd.Series(np.where(cond > 0, true_val, false_val), index=data.index)
-
-    def _extract_const(self, node_or_series) -> float:
-        """从 AST 节点提取常量"""
-        if isinstance(node_or_series, pd.Series):
-            return node_or_series.iloc[0] if len(node_or_series) > 0 else 0
-        if isinstance(node_or_series, dict) and node_or_series.get('type') == 'const':
-            return node_or_series['value']
-        return float(node_or_series)
+    def test_nan_handling(self):
+        """边界条件：含 NaN 数据"""
+        df = self.data.copy()
+        df.loc[df.sample(10).index, "close"] = np.nan
+        self.engine.compile("ret_1d", "Div(Sub($close, Ref($close, 1)), Ref($close, 1))")
+        result = self.engine.evaluate("ret_1d", df)
+        self.assertEqual(len(result), len(df))
+        # 不应抛出异常
 
 
-# ============================================================
-# 2. 测试用例
-# ============================================================
+class TestExpressionEnginePerformance(unittest.TestCase):
+    """性能对比测试"""
 
-def make_test_data(n_codes: int = 10, n_days: int = 500) -> pd.DataFrame:
-    """生成测试用行情数据"""
-    np.random.seed(42)
-    dates = pd.date_range('2020-01-01', periods=n_days, freq='B')
-    codes = [f'{600000 + i:06d}.SH' for i in range(n_codes)]
+    @classmethod
+    def setUpClass(cls):
+        np.random.seed(42)
+        codes = [f"{i:06d}.{'SZ' if i % 2 == 0 else 'SH'}" for i in range(100)]
+        dates = pd.date_range("2023-01-01", "2024-12-31", freq="B")
+        records = []
+        for code in codes:
+            n = len(dates)
+            base_price = np.random.uniform(5, 100)
+            returns = np.random.normal(0.0005, 0.02, n)
+            prices = base_price * np.cumprod(1 + returns)
+            for i, d in enumerate(dates):
+                records.append({
+                    "code": code,
+                    "date": d,
+                    "close": prices[i],
+                })
+        cls.large_data = pd.DataFrame(records).sort_values(["code", "date"]).reset_index(drop=True)
 
-    records = []
-    for code in codes:
-        price = 10 + np.random.randn() * 5
-        for date in dates:
-            ret = np.random.randn() * 0.02
-            price = price * (1 + ret)
-            open_p = price * (1 + np.random.randn() * 0.005)
-            high_p = max(open_p, price) * (1 + abs(np.random.randn() * 0.01))
-            low_p = min(open_p, price) * (1 - abs(np.random.randn() * 0.01))
-            close_p = price
-            volume = np.random.lognormal(10, 0.5)
-            records.append({
-                'date': date, 'code': code,
-                'open': open_p, 'high': high_p, 'low': low_p,
-                'close': close_p, 'volume': volume,
-                'amount': close_p * volume,
-            })
+    def setUp(self):
+        self.engine = FactorExpressionEngine()
 
-    df = pd.DataFrame(records).sort_values(['code', 'date']).reset_index(drop=True)
-    return df
+    def test_performance_vs_manual(self):
+        """对比表达式引擎与手动 pandas 实现的性能"""
+        n_trials = 3
 
+        # 表达式引擎
+        self.engine.compile("ret_20", "Div(Sub($close, Ref($close, 20)), Ref($close, 20))")
+        expr_times = []
+        for _ in range(n_trials):
+            t0 = time.perf_counter()
+            self.engine.evaluate("ret_20", self.large_data)
+            expr_times.append(time.perf_counter() - t0)
+        avg_expr = np.mean(expr_times)
 
-def test_parser_correctness():
-    """测试1: 表达式解析器正确性"""
-    print("\n" + "=" * 60)
-    print("测试1: 表达式解析器正确性")
-    print("=" * 60)
+        # 手动 pandas
+        manual_times = []
+        for _ in range(n_trials):
+            t0 = time.perf_counter()
+            self.large_data.groupby("code")["close"].pct_change(20)
+            manual_times.append(time.perf_counter() - t0)
+        avg_manual = np.mean(manual_times)
 
-    parser = FactorExpressionParser()
-    test_cases = [
-        ("$close", "field"),
-        ("Ref($close, 1)", "func"),
-        ("Mean($close, 20)", "func"),
-        ("$high - $low", "op"),
-        ("$close / Ref($close, 1) - 1", "op"),
-        ("Mean($high - $low, 5)", "func"),
-        ("Std($close, 20)", "func"),
-        ("Corr($close, $volume, 20)", "func"),
-        ("-($close - Ref($close, 1))", "op"),
-        ("Rank(Mean($close, 20))", "func"),
-        ("Abs($close - Ref($close, 1))", "func"),
-        ("If($close - Ref($close, 5), $close, Ref($close, 1))", "func"),
-    ]
+        print(f"\n    数据集: {len(self.large_data)} 行 x 100 只股票")
+        print(f"    表达式引擎均值: {avg_expr*1000:.2f}ms")
+        print(f"    手动 pandas 均值: {avg_manual*1000:.2f}ms")
+        print(f"    比率: {avg_expr/avg_manual:.2f}x")
 
-    all_passed = True
-    for expr, expected_type in test_cases:
-        try:
-            ast = parser.parse(expr)
-            actual_type = ast['type']
-            status = "PASS" if actual_type == expected_type else "FAIL"
-            if status == "FAIL":
-                all_passed = False
-            print(f"  {status}: '{expr}' -> type={actual_type} (expected {expected_type})")
-        except Exception as e:
-            all_passed = False
-            print(f"  FAIL: '{expr}' -> 解析异常: {e}")
+        # 表达式引擎因按股票分组循环，性能低于原生 pandas groupby
+        # 但提供了 DSL 灵活性和可组合性。可通过向量化优化改善性能。
+        # 当前目标：不应比手动实现慢 30 倍以上
+        self.assertLess(avg_expr / avg_manual, 30.0,
+                       f"表达式引擎不应比手动实现慢 30 倍以上，实际: {avg_expr/avg_manual:.1f}x")
 
-    return all_passed
-
-
-def test_evaluator_correctness():
-    """测试2: 表达式求值器输出一致性 (与硬编码因子对比)"""
-    print("\n" + "=" * 60)
-    print("测试2: 表达式求值器 vs 硬编码因子输出一致性")
-    print("=" * 60)
-
-    df = make_test_data(n_codes=5, n_days=200)
-    evaluator = FactorExpressionEvaluator()
-
-    # 重新实现项目的硬编码因子逻辑
-    hard_coded = df.sort_values(['code', 'date']).copy()
-    hard_coded['ret_1d'] = hard_coded.groupby('code')['close'].pct_change()
-    hard_coded['ma20'] = hard_coded.groupby('code')['close'].transform(
-        lambda x: x.rolling(20, min_periods=10).mean()
-    )
-    hard_coded['volatility_20d'] = hard_coded.groupby('code')['close'].transform(
-        lambda x: x.pct_change().rolling(20, min_periods=10).std()
-    )
-    hard_coded['reversal_5d'] = -hard_coded.groupby('code')['close'].pct_change(5)
-    hard_coded['hl_spread'] = hard_coded['high'] - hard_coded['low']
-    hard_coded['hl_spread_ma5'] = hard_coded.groupby('code')['hl_spread'].transform(
-        lambda x: x.rolling(5, min_periods=3).mean()
-    )
-
-    comparisons = [
-        ("ret_1d", "$close / Ref($close, 1) - 1"),
-        ("ma20", "Mean($close, 20)"),
-        ("reversal_5d", "-($close / Ref($close, 5) - 1)"),
-        ("hl_spread", "$high - $low"),
-        ("hl_spread_ma5", "Mean($high - $low, 5)"),
-    ]
-
-    all_passed = True
-    for hard_name, expr in comparisons:
-        hard_val = hard_coded[hard_name].values
-        try:
-            expr_val = evaluator.evaluate(expr, df, group_col='code').values
-            # 比较非 NaN 部分
-            mask = ~(np.isnan(hard_val) | np.isnan(expr_val))
-            if mask.sum() == 0:
-                print(f"  SKIP: {hard_name}: 无有效比较数据")
-                continue
-            diff = np.abs(hard_val[mask] - expr_val[mask])
-            max_diff = diff.max()
-            mean_diff = diff.mean()
-            status = "PASS" if max_diff < 1e-6 else "FAIL"
-            if status == "FAIL":
-                all_passed = False
-            print(f"  {status}: {hard_name} vs '{expr}' -- max_diff={max_diff:.2e}, mean_diff={mean_diff:.2e}")
-        except Exception as e:
-            all_passed = False
-            print(f"  FAIL: {hard_name} vs '{expr}' -- 异常: {e}")
-
-    return all_passed
-
-
-def test_expression_cache_performance():
-    """测试3: 表达式缓存性能"""
-    print("\n" + "=" * 60)
-    print("测试3: 表达式缓存与重复求值性能")
-    print("=" * 60)
-
-    df = make_test_data(n_codes=10, n_days=500)
-
-    evaluator = FactorExpressionEvaluator()
-    expressions = [
-        "Mean($close, 20)",
-        "Std($close, 20)",
-        "$high - $low",
-        "Mean($high - $low, 5)",
-        "Corr($close, $volume, 20)",
-        "$close / Ref($close, 1) - 1",
-        "Rank(Mean($close, 20))",
-    ]
-
-    # 首次求值 (无缓存)
-    start = time.perf_counter()
-    for expr in expressions:
-        evaluator._cache.clear()
-        evaluator.evaluate(expr, df)
-    no_cache_time = time.perf_counter() - start
-
-    # 有缓存重复求值
-    evaluator._cache.clear()
-    for expr in expressions:
-        evaluator.evaluate(expr, df)  # 首次（建立缓存）
-    start = time.perf_counter()
-    for expr in expressions:
-        evaluator.evaluate(expr, df)  # 二次（命中缓存）
-    cache_time = time.perf_counter() - start
-
-    speedup = no_cache_time / cache_time if cache_time > 0 else float('inf')
-    print(f"  无缓存耗时: {no_cache_time:.4f}s")
-    print(f"  有缓存耗时: {cache_time:.4f}s")
-    print(f"  加速比: {speedup:.1f}x")
-    print(f"  结论: {'PASS - 缓存有效' if speedup > 1.5 else 'FAIL - 缓存无显著效果'}")
-
-    return speedup > 1.5
-
-
-def test_nested_expression():
-    """测试4: 嵌套表达式处理"""
-    print("\n" + "=" * 60)
-    print("测试4: 嵌套表达式处理能力")
-    print("=" * 60)
-
-    df = make_test_data(n_codes=3, n_days=100)
-    evaluator = FactorExpressionEvaluator()
-
-    # 复杂嵌套表达式
-    nested_exprs = [
-        "Mean($close, 20) / Std($close, 20)",           # 收益风险比
-        "($close - Mean($close, 20)) / Std($close, 20)", # 标准化偏离
-        "Rank(Mean($close, 20) / Mean($close, 60))",     # 排名动量比
-        "If($close - Ref($close, 5), $close, Ref($close, 1))", # 条件选择
-    ]
-
-    all_passed = True
-    for expr in nested_exprs:
-        try:
-            result = evaluator.evaluate(expr, df)
-            non_null = result.notna().sum()
-            print(f"  PASS: '{expr}' -> 结果行数={len(result)}, 非空={non_null}")
-        except Exception as e:
-            all_passed = False
-            print(f"  FAIL: '{expr}' -> 异常: {e}")
-
-    return all_passed
-
-
-def test_expression_vs_hardcoded_performance():
-    """测试5: 表达式引擎 vs 硬编码计算性能对比"""
-    print("\n" + "=" * 60)
-    print("测试5: 表达式引擎 vs 硬编码性能对比")
-    print("=" * 60)
-
-    sizes = [(10, 252), (50, 252), (100, 252), (10, 1008)]
-
-    for n_codes, n_days in sizes:
-        df = make_test_data(n_codes=n_codes, n_days=n_days)
-
-        # 硬编码方式
-        start = time.perf_counter()
-        hc = df.sort_values(['code', 'date']).copy()
-        hc['ret_1d'] = hc.groupby('code')['close'].pct_change()
-        hc['ma20'] = hc.groupby('code')['close'].transform(lambda x: x.rolling(20, min_periods=10).mean())
-        hc['vol_20'] = hc.groupby('code')['close'].transform(lambda x: x.pct_change().rolling(20, min_periods=10).std())
-        hc['hl'] = hc['high'] - hc['low']
-        hc_time = time.perf_counter() - start
-
-        # 表达式引擎方式
-        evaluator = FactorExpressionEvaluator()
-        evaluator._cache.clear()
-        start = time.perf_counter()
-        evaluator.evaluate("$close / Ref($close, 1) - 1", df)
-        evaluator.evaluate("Mean($close, 20)", df)
-        evaluator.evaluate("Std($close, 20)", df)
-        evaluator.evaluate("$high - $low", df)
-        expr_time = time.perf_counter() - start
-
-        print(f"  {n_codes}只 x {n_days}天: 硬编码={hc_time:.4f}s, 表达式={expr_time:.4f}s, "
-              f"比率={expr_time/hc_time:.1f}x")
-
-        # 释放缓存
-        evaluator._cache.clear()
-
-    return True
-
-
-# ============================================================
-# 主入口
-# ============================================================
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("因子表达式引擎验证测试")
-    print("借鉴来源: microsoft/qlib Expression Engine")
-    print("=" * 60)
-
-    results = {}
-    results['解析器正确性'] = test_parser_correctness()
-    results['求值器一致性'] = test_evaluator_correctness()
-    results['缓存性能'] = test_expression_cache_performance()
-    results['嵌套表达式'] = test_nested_expression()
-    results['性能对比'] = test_expression_vs_hardcoded_performance()
-
-    print("\n" + "=" * 60)
-    print("测试结果汇总")
-    print("=" * 60)
-    all_pass = True
-    for name, passed in results.items():
-        status = "PASS" if passed else "FAIL"
-        if not passed:
-            all_pass = False
-        print(f"  [{status}] {name}")
-    print(f"\n总体结果: {'全部通过' if all_pass else '存在失败项'}")
-
-    sys.exit(0 if all_pass else 1)
+    unittest.main(verbosity=2)
