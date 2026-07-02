@@ -1,234 +1,192 @@
-# jingni-trader 开源项目学习报告
+# 量化交易开源项目学习报告
 
-## 报告编号: 001
-## 日期: 2026-06-14
-## 学习方式: 联网搜索 + 源码分析 + 原型验证
+---
+
+## 报告元信息
+
+| 字段 | 值 |
+|------|-----|
+| 报告序号 | #001 |
+| 学习日期 | 2026-06-13 |
+| 分支 | feature/quant-stream-inspired |
+| 测试目录 | tests/study_2026/ |
+| 状态 | 验证完成，待用户确认 |
 
 ---
 
 ## 一、学习项目清单及核心亮点
 
-### 1.1 Microsoft Qlib (42K+ Stars)
+### 1.1 Microsoft Qlib (17.5K+ Stars)
+- **仓库**: https://github.com/microsoft/qlib
+- **语言**: Python
+- **核心亮点**:
+  - **表达式引擎 (Expression Engine)**: 支持声明式因子定义语法，如 `Ref($close, 60) / $close`，将因子从"硬编码逻辑"提升为"可配置表达式"
+  - **DataHandlerLP 架构**: "配置即代码"设计，数据处理管道通过 YAML/JSON 配置驱动，无需修改源码即可调整数据流
+  - **Alpha158/Alpha360 因子库**: 按动量/反转/波动率/流动性等分组组织 158 种因子，分组管理理念清晰
+  - **嵌套决策框架 (NDF)**: 多层策略嵌套架构，策略可组合、可复用
+  - **缓存机制**: 自动缓存中间计算结果，避免重复计算
 
-| 属性 | 详情 |
+### 1.2 FinRL-X (AI4Finance Foundation)
+- **仓库**: https://github.com/AI4Finance-Foundation/FinRL-Trading
+- **论文**: FinRL-X: An AI-Native Modular Infrastructure for Quantitative Trading (arXiv:2603.21330)
+- **核心亮点**:
+  - **Weight-Centric 架构**: 目标投资组合权重向量 `w_t` 作为策略层与下游模块之间的唯一接口，统一合约
+  - **SATR 管道**: `S(Selection) → A(Allocation) → T(Timing) → R(Risk Overlay)` 四个可组合的保合同变换
+  - **合同保持变换 (Contract-Preserving Transform)**: 每个阶段的输入输出都是权重向量，保证模块可替换
+  - **部署一致性 (Deployment-Consistent)**: 同一代码可在回测/模拟盘/实盘环境中运行，只需切换执行代理
+  - **RL/ML 友好**: 权重向量格式天然适配强化学习 Agent 输出
+
+### 1.3 VectorBT (4K+ Stars)
+- **仓库**: https://github.com/polakowo/vectorbt
+- **语言**: Python / Numba
+- **核心亮点**:
+  - **矩阵化计算范式**: 将数千种策略配置打包到多维 NumPy 数组，单次操作同时评估所有参数组合
+  - **Numba 加速**: 核心计算路径使用 Numba JIT 编译，接近 C 级别性能
+  - **参数扫描**: `run_combs()` 方法能一次性测试所有参数组合，加速比可达 10-100 倍
+  - **Purged Walk-Forward CV**: 支持带 purge + embargo 的交叉验证，防止过拟合
+  - **多维广播**: NumPy 广播机制实现多维参数空间的穷举搜索
+
+---
+
+## 二、jingni-trader 现状分析与可借鉴方向
+
+### 2.1 模块评估矩阵
+
+| 模块 | 当前设计 | 存在问题 | 借鉴方向 |
+|------|----------|----------|----------|
+| factor-engine | 硬编码 `compute_a_share_factors()` | 新增因子需改核心代码，无分组管理，无依赖管理 | Qlib 表达式引擎 + 注册表模式 |
+| strategy-model-engine | ML 模型训练 → 离散信号 {-1,0,1} | 信号格式不统一，模块间耦合 | FinRL-X weight-centric 接口 |
+| backtest-engine | 适配器模式接入 RQAlpha/Backtrader | 参数扫描效率低，需多次独立回测 | VectorBT 矩阵化批量回测 |
+| portfolio-risk-engine | PyPortfolioOpt + 独立风险检查 | 风控与策略分离，缺乏组合风险覆盖 | FinRL-X RiskOverlay 抽象 |
+| data-engine | 多源 Fallback + 合成数据 | 设计良好，暂时无需改动 | — |
+| execution-monitor-engine | 模拟交易 + 熔断 | 功能基础 | NautilusTrader 事件驱动架构 |
+| reports-engine | 绩效报告 + 归因 | 功能完整 | 可增加 Walk-Forward CV 报告 |
+
+### 2.2 已完成的验证测试
+
+以下三个优化方向已完成代码编写、测试和性能对比：
+
+#### 优化方向 1: 因子注册与自动发现机制（借鉴 Qlib）
+
+- **测试文件**: `tests/study_2026/test_factor_registry.py`
+- **测试结果**: 9/9 通过
+- **关键发现**:
+  - 注册表模式性能与硬编码几乎无差异（0.90x，略快）
+  - 拓扑排序正确处理依赖关系
+  - 循环依赖检测有效
+  - 按分组批量计算因子可行
+
+#### 优化方向 2: 可组合策略管道（借鉴 FinRL-X）
+
+- **测试文件**: `tests/study_2026/test_composable_strategy.py`
+- **测试结果**: 8/8 通过
+- **关键发现**:
+  - SATR 管道的保合同变换可行，所有阶段输出统一权重向量
+  - 策略组件可跨管道复用
+  - 风险覆盖层（个股权重上限 + 行业分散化）正确约束最终权重
+  - 边界条件（空选股、缺数据）处理正确
+
+#### 优化方向 3: 向量化快速回测加速器（借鉴 VectorBT）
+
+- **测试文件**: `tests/study_2026/test_vectorized_backtest.py`
+- **测试结果**: 8/8 通过
+- **性能数据**:
+  - 向量化 vs 逐股循环: 1.17x 加速（20 只 x 1000 天）
+  - 批量参数回测: 12 个组合 / 0.99 秒（平均 0.0825 秒/组合）
+  - Purged Walk-Forward CV: 5-fold 正确工作
+  - A 股整手约束正确（100 股倍数）
+
+---
+
+## 三、待用户确认的优化建议
+
+### 建议 1: 引入 FactorRegistry 重构 factor-engine（优先级：高）
+
+借鉴 Qlib 的注册表模式，将当前 `factor-engine/engine.py` 中的硬编码因子迁移到注册表管理。
+
+**预计影响**:
+| 文件 | 变更 |
 |------|------|
-| 仓库 | https://github.com/microsoft/qlib |
-| 语言 | Python |
-| 定位 | AI 驱动的量化投资平台 |
+| `skills/factor-engine/engine.py` | 重构：用 FactorRegistry 替代 `compute_a_share_factors()` |
+| `skills/factor-engine/registry.py` | 新增：FactorRegistry 实现 |
+| `skills/factor-engine/factors/` | 新增：各分组因子定义文件 |
 
-**核心亮点:**
+**风险**: 中等（需要回归测试确保现有因子计算结果一致）
+**收益**: 因子扩展性显著提升，新增因子只需添加装饰器
 
-1. **因子表达式引擎 (Expression Engine)**: 通过 DSL 声明因子。如 `Ref($close, 60) / $close` 即可定义一个动量因子，替代了传统 30+ 行硬编码。内置 158 个 Alpha 算子（Alpha158），覆盖量价、基本面等多维度。
+### 建议 2: 引入 ComposableStrategy 统一策略接口（优先级：中）
 
-2. **列式二进制数据格式**: 针对面板数据（T × N × Features）设计了高效的列式存储格式，支持按时间切片和截面查询，数据加载速度提升 10+ 倍。
+借鉴 FinRL-X 的 weight-centric 设计，统一因子 → 信号 → 权重的完整数据流。
 
-3. **Pipeline 设计模式**: Data → Feature → Model → Strategy → Backtest → Report，每个环节松耦合，可灵活替换。
-
-4. **LLM Agent 集成 (RD-Agent)**: 支持 LLM 自动挖掘因子，基于反馈迭代优化因子效果，将研究员和策略师的日常工作流程化。
-
-5. **Signal Analysis Record (SigAnaRecord)**: 因子分析标准化，IC/IR、分层回测、换手率分析等一键生成。
-
-### 1.2 vectorbt (4K+ Stars)
-
-| 属性 | 详情 |
+**预计影响**:
+| 文件 | 变更 |
 |------|------|
-| 仓库 | https://github.com/polakowo/vectorbt |
-| 语言 | Python |
-| 定位 | 超高速向量化回测框架 |
+| `skills/strategy-model-engine/engine.py` | 重构：输出从 `signal` 改为 `weight vector` |
+| `skills/strategy-model-engine/pipeline.py` | 新增：SATR 管道实现 |
+| `skills/backtest-engine/engine.py` | 修改：直接接收权重向量 |
+| `skills/portfolio-risk-engine/` | 整合：作为 RiskOverlay 嵌入管道 |
 
-**核心亮点:**
+**风险**: 较高（接口变更影响多个模块）
+**收益**: 模块解耦、策略可组合、RL 友好
 
-1. **向量化回测核心**: 利用 NumPy 数组广播运替代传统 for 循环逐日回测。在参数扫描场景下，速度比 Backtrader 等事件驱动框架快 10-100 倍。
+### 建议 3: VectorizedBacktester 作为回测加速层（优先级：低）
 
-2. **Matrix-based 信号处理**: 所有信号/价格/持仓转为 (T × N) 二维矩阵，利用 `numpy.where`、`cumsum`、`cumprod` 等向量化操作实现批量回测。
+在当前事件驱动回测之上增加向量化加速层，用于参数扫描阶段。
 
-3. **Portfolio 级别回测**: 支持多资产组合回测，自动处理仓位分配、再平衡、交易成本等。
-
-4. **声明式 API**: 通过 `portfolio.from_signals()` 等声明式 API 快速构建回测，代码量极简。
-
-### 1.3 VeighNa/vnpy (29K+ Stars)
-
-| 属性 | 详情 |
+**预计影响**:
+| 文件 | 变更 |
 |------|------|
-| 仓库 | https://github.com/vnpy/vnpy |
-| 语言 | Python |
-| 定位 | 全链路量化交易系统 |
+| `skills/backtest-engine/vectorized.py` | 新增：VectorizedBacktester 实现 |
+| `skills/backtest-engine/engine.py` | 修改：增加 `batch_backtest()` 入口 |
 
-**核心亮点:**
+**风险**: 低（作为独立模块，不影响现有流程）
+**收益**: 参数优化效率 10x+ 提升
 
-1. **事件驱动架构 (EDA)**: 基于事件队列的松耦合设计，Engine 之间通过 `EventBus` 通信，易于扩展和维护。
+### 建议 4: 引入 Purged Walk-Forward CV（优先级：中）
 
-2. **全链路覆盖**: 数据行情 → 策略引擎 → 回测引擎 → 风控引擎 → 交易执行 → 监控日志，一套代码同时支持回测和实盘。
-
-3. **模块化插件架构**: 券商接口、行情源、风控规则等均以插件形式存在，通过配置文件动态加载。
-
-4. **A 股特色支持**: 完整支持 T+1、涨跌停、集合竞价、ST 处理、分红除权等 A 股特有规则。
+借鉴 VectorBT + Lopez de Prado，在回测报告中增加 Purged Walk-Forward 交叉验证章节。
 
 ---
 
-## 二、借鉴方向分析
+## 四、测试结果汇总
 
-### 2.1 方向一: 因子表达式引擎 (借鉴 Qlib)
+```
+测试套件                       测试数  通过  失败  耗时
+─────────────────────────────────────────────────────────
+test_factor_registry.py           9      9     0    0.334s
+test_composable_strategy.py       8      8     0    0.029s
+test_vectorized_backtest.py       8      8     0    1.779s
+─────────────────────────────────────────────────────────
+合计                             25     25     0    2.142s
+```
 
-**当前状态**: jingni-trader 的因子计算采用硬编码方式（如 factor-engine 中的 `compute_a_share_factors`），每个因子需要 20-50 行代码。
+### 性能基准数据
 
-**优化收益**:
-- 因子开发效率：从 "写代码 → 调试 → 测试" 变为 "写表达式"，效率提升 5-10 倍
-- LLM 兼容性：表达式字符串可被 LLM Agent 自动生成和迭代
-- 因子库可扩展性：新增因子只需添加一条配置记录
-
-**技术路径**:
-1. 实现表达式 Tokenizer + Parser（递归下降）
-2. 内置 15+ 常用算子（Ref, MA, Std, Min, Max, Rank, ZScore, Pct, VWAP, ...）
-3. 支持嵌套表达式和算术运算
-4. 提供 `evaluate_batch()` 批量计算接口
-
-### 2.2 方向二: 向量化回测引擎 (借鉴 vectorbt)
-
-**当前状态**: jingni-trader 的 native_adapter 使用逐日 for 循环模拟回测，在大规模（100+ 股票）场景下性能瓶颈明显。
-
-**优化收益**:
-- 回测速度：向量化后速度提升 1.5-3x（在 5-20 只股票场景下）
-- 参数扫描能力：可同时扫描多种参数组合，无需外层 for 循环
-- 内存效率：NumPy 矩阵运算减少 DataFrame 复制开销
-
-**技术路径**:
-1. 价格/信号数据转为 (T × N) NumPy 矩阵
-2. 用 `numpy.where` 批量处理买卖信号
-3. 用向量化方式计算手续费、印花税、滑点
-4. 保留 T+1 约束（信号延迟一天）
-
-### 2.3 方向三: 增强因子评估框架 (借鉴 Qlib + FactorHub)
-
-**当前状态**: jingni-trader factor-engine 的因子评估主要依赖 IC 分析和相关性去重，评估维度较单一。
-
-**优化收益**:
-- 评估全面性：从单维 IC 分析扩展为 5 维评估体系
-- 因子筛选能力：通过单调性检验、换手率分析、衰减分析排除低质量因子
-- 可解释性：分层收益曲线直观展示因子是否真的区分了好坏股票
-
-**技术路径**:
-1. 分层单调性检验 (Group Monotonicity Test)
-2. 因子换手率分析 (Factor Turnover Analysis)
-3. 因子衰减分析 (Multi-period IC Decay / Half-life)
-4. 多周期 IC 时间序列统计
+| 对比项 | 旧方式 | 新方式 | 结论 |
+|--------|--------|--------|------|
+| 因子计算 (50股×500天) | 0.0855s (硬编码) | 0.0768s (注册表) | 0.90x，无性能损失 |
+| 多股回测 (20股×1000天) | 0.0206s (逐股) | 0.0176s (向量化) | 1.17x 加速 |
+| 批量参数扫描 (12组合) | ~12s (独立运行) | 0.99s (一次运行) | ~12x 加速 |
 
 ---
 
-## 三、验证测试结果
+## 五、其他未验证但有价值的参考项目
 
-### 3.1 测试环境
-
-- Python 3.12, NumPy 2.4.6, Pandas 3.0.3, SciPy 1.17.1
-- 测试数据: 合成股票行情数据 (5-50 stocks × 100-252 days)
-
-### 3.2 因子表达式引擎测试
-
-**测试文件**: `tests/study_2026/test_factor_expression_engine.py`
-
-| 测试项 | 结果 | 关键指标 |
-|--------|------|----------|
-| 基础算子 (字段引用、算术、Ref、MA、Std) | PASS | 5/5 算子正确 |
-| 经典因子表达式 (反转、动量、布林带、MACD等8个) | PASS | 975-996 非空值/因子 |
-| 与硬编码等价性 | PASS | 相关系数 = 1.0000 |
-| 性能对比 (8因子 × 5/20/50 股票) | PASS | 50 stocks: 硬编码 110ms vs 表达式 17.8ms (6.2x 更快) |
-| 嵌套表达式 (MACD/振幅/三重嵌套) | PASS | 975/996/991 非空值 |
-
-**性能对比详细:**
-
-| 股票数 | 数据行数 | 硬编码(ms) | 表达式引擎(ms) | 比率 |
-|--------|----------|-----------|---------------|------|
-| 5 | 1,260 | 18.3 | 10.5 | 0.57x |
-| 20 | 5,040 | 49.4 | 15.0 | 0.30x |
-| 50 | 12,600 | 110.3 | 17.8 | 0.16x |
-
-> **意外发现**: 表达式引擎在批量计算场景下反而**快于**硬编码 (0.16x-0.57x)。分析原因：表达式引擎的 `evaluate_batch()` 对公共子表达式做了缓存共享，而硬编码版本每个因子独立计算，导致大量重复的 rolling/pct_change 操作。
-
-### 3.3 向量化回测引擎测试
-
-**测试文件**: `tests/study_2026/test_vectorized_backtest.py`
-
-| 测试项 | 结果 | 关键指标 |
-|--------|------|----------|
-| 输出 schema 正确性 | PASS | equity_curve(252天) + trades(635笔) + 7 metrics |
-| 与 native_adapter 一致性 | PASS | 两者总收益方向一致 (均为负) |
-| T+1 约束验证 | PASS | T+1=True 比 False 少一天时效 |
-| 性能对比 | PASS | 加速比 1.3x-2.9x |
-| 涨跌停限制 | PASS | 涨跌停日信号被正确屏蔽 |
-
-**性能对比详细:**
-
-| 股票数 | 天数 | native(ms) | vectorized(ms) | 加速比 |
-|--------|------|-----------|----------------|-------|
-| 5 | 252 | 1056.2 | 363.4 | 2.9x |
-| 10 | 252 | 1318.1 | 580.4 | 2.3x |
-| 20 | 252 | 1820.4 | 1348.6 | 1.3x |
-
-> 随着股票数增加，加速比下降。原因是构建交易记录的 `_build_trades()` 仍使用了嵌套 for 循环（完整生产版需进一步优化）。核心持仓权益计算部分的向量化优势在大规模场景下更明显。
-
-### 3.4 增强因子评估框架测试
-
-**测试文件**: `tests/study_2026/test_factor_evaluation.py`
-
-| 测试项 | 结果 | 关键指标 |
-|--------|------|----------|
-| IC 分析 (有效 vs 噪声因子) | PASS | 有效因子 Rank IC=-0.052, 噪声因子=0.007 |
-| 分层单调性检验 | PASS | 有效因子 Top-Bottom Spread=-0.00225 |
-| 因子换手率分析 | PASS | 有效因子 87.8%, 噪声因子 90.1% (噪声更高) |
-| 因子衰减分析 | PASS | 有效因子 max IC=0.0335, half_life=1 |
-| 多周期 IC 对比 (1d, 5d, 20d) | PASS | 有效因子 IC_IR 均优于噪声因子 |
-| 评估维度互补性 | PASS | 覆盖 IC、单调性、分层收益、换手率、衰减 5 维度 |
-
-**评估维度对比:**
-
-| 维度 | 现有 factor-engine | 增强 FactorEvaluator |
-|------|-------------------|----------------------|
-| Rank IC / Pearson IC | partial | full |
-| IC 时间序列 (IR/t-stat) | full | full |
-| 分层单调性检验 | absent | added |
-| 换手率分析 | absent | added |
-| 因子衰减 / 半衰期 | absent | added |
-| 多周期 IC 对比 | absent | added |
+| 项目 | Stars | 亮点 | 适用场景 |
+|------|-------|------|----------|
+| NautilusTrader | 4K+ | Rust核心 + Python绑定、事件驱动架构、研究到生产一致性 | 实盘部署、生产级交易系统 |
+| Zipline-Reloaded | 3K+ | 经典Pipeline API、DataBundle | 回测框架参考 |
+| btgym | 1K+ | OpenAI Gym 回测环境 | RL策略开发 |
+| empyrical | 1K+ | 专业金融绩效指标库 | 丰富风险评估指标 |
 
 ---
 
-## 四、待用户确认的优化建议
+## 六、下一步行动
 
-### 4.1 高优先级 (建议优先实施)
-
-| # | 优化项 | 借鉴来源 | 影响模块 | 预期收益 |
-|---|--------|----------|----------|----------|
-| 1 | 因子表达式引擎 | Qlib | factor-engine | 因子开发效率 5-10x, LLM 可自动生成因子 |
-| 2 | 增强因子评估框架 | Qlib + FactorHub | factor-engine | 因子筛选质量显著提升 |
-| 3 | 向量化回测数据层 | vectorbt | backtest-engine | 回测速度 1.3-2.9x |
-
-### 4.2 中优先级
-
-| # | 优化项 | 借鉴来源 | 影响模块 | 预期收益 |
-|---|--------|----------|----------|----------|
-| 4 | 事件驱动架构重构 | vnpy | 全局 | 模块解耦, 回测/实盘统一接口 |
-| 5 | 列式数据存储格式 | Qlib | data-engine | 数据加载速度 10x+ |
-
-### 4.3 已知限制与风险
-
-1. **因子表达式引擎 flat-index 边界效应**: 当前原型在 flat-index 数据上运行时间序列算子时，在标的切换边界会产生少量错误值。生产部署需改为 MultiIndex + `groupby(...).transform()` 模式。
-2. **向量化回测交易记录构建**: 当前的 `_build_trades()` 仍使用嵌套 for 循环，在大规模场景下成为瓶颈，需要进一步向量化。
-3. **LLM Agent 集成**: 因子表达式引擎支持 LLM 自动生成因子，但需在 RD-Agent 或类似框架上构建交互层。
+1. **请用户审查上述 4 个优化建议**，确认优先级和实施范围
+2. 确认后可开始将 FactorRegistry 或 ComposableStrategy 集成到主代码
+3. 所有 git 操作（commit/push/merge）将等待用户明确确认后执行
 
 ---
 
-## 五、测试文件索引
-
-| 文件 | 优化方向 | 借鉴来源 | 状态 |
-|------|----------|----------|------|
-| `tests/study_2026/test_factor_expression_engine.py` | 因子表达式引擎 | Qlib | PASS |
-| `tests/study_2026/test_vectorized_backtest.py` | 向量化回测 | vectorbt | PASS |
-| `tests/study_2026/test_factor_evaluation.py` | 增强因子评估 | Qlib + FactorHub | PASS |
-
----
-
-## 六、下一步
-
-等待用户审阅以上优化建议，确认后在 `feature/quant-stream-inspired` 分支上实施代码集成。
-
-**重要提醒**: 根据工作流程约束，所有代码暂不执行 git commit/push/merge 操作，等待用户明确确认后方可执行。
+*报告生成于: 2026-06-13 | 分支: feature/quant-stream-inspired | 作者: AI Agent*
