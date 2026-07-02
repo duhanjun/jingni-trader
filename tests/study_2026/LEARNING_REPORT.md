@@ -1,218 +1,206 @@
 # 量化交易开源项目学习报告
 
-> **日期**: 2026-06-11
-> **序号**: #001
-> **项目**: jingni-trader
+## 报告信息
+- 日期: 2026-06-13
+- 序号: 第1期
+- 研究范围: 因子挖掘、回测框架、因子库设计
+- 验证代码位置: tests/study_2026/
 
 ---
 
 ## 一、学习项目清单及核心亮点
 
-### 1.1 Microsoft Qlib (https://github.com/microsoft/qlib)
-
-- **Stars**: 44K+
-- **定位**: AI 驱动的量化投研平台
+### 1. Microsoft Qlib (36.5K Stars)
+- **仓库**: https://github.com/microsoft/qlib
 - **核心亮点**:
-  - **表达式驱动的因子引擎**: 通过 `$close / Ref($close, 20) - 1` 这样的简洁表达式定义因子，无需硬编码。内置 Alpha158 因子集。
-  - **Point-in-Time 数据系统**: 每条数据记录带 `knowledge_time`，查询时只能获取 `knowledge_time <= query_time` 的数据，从架构层面杜绝前视数据泄漏。
-  - **模型动物园**: 内置 LightGBM、LSTM、Transformer、GRU 等 20+ 模型，支持 AutoML 超参搜索。
-  - **RD-Agent**: LLM 驱动的自动化因子挖掘与模型优化，实现"数据-想法-代码-验证"的自动化闭环。
-  - **滚动窗口回测**: 严格的样本外测试框架，支持 Rolling CV 而非随机切分。
+  - **表达式引擎**: 支持公式化 Alpha 定义，如 `Ref($close, 60) / $close`，用户无需编写代码即可定义因子
+  - **Point-in-Time 数据系统**: 严格防止前视偏差，确保回测结果可信
+  - **Alpha158/Alpha360 标准化因子库**: 158 个经过验证的因子，覆盖趋势、反转、成交量、波动率等 6 大类
+  - **模型动物园**: 集成 LightGBM、XGBoost、Transformer、TCN、HIST 等 20+ 模型
+  - **TopkDropoutStrategy**: 考虑容量约束的组合构建策略
+  - **声明式 YAML 工作流**: 通过 YAML 配置驱动整个量化研究流程
+  - **RD-Agent 集成**: 自动化因子挖掘和模型优化
 
-### 1.2 NautilusTrader (https://github.com/nautechsystems/nautilus_trader)
-
-- **Stars**: 20K+
-- **定位**: 高性能事件驱动算法交易平台
+### 2. RD-Agent (Q) (NeurIPS 2025)
+- **仓库**: https://github.com/microsoft/RD-Agent
 - **核心亮点**:
-  - **Rust + Python 混合架构**: 性能关键路径用 Rust (tokio 异步运行时)，策略层保留 Python API (Cython 绑定)，兼顾性能与开发效率。
-  - **统一事件总线**: 回测和实盘使用同一事件引擎/消息总线，实现"写一次代码，回测实盘无缝切换"。
-  - **模块化适配器**: REST/WebSocket 适配器封装交易所/数据源差异，策略层看到统一接口。
-  - **微秒级事件处理**: 事件驱动架构 + Rust 核心，支持高频交易场景。
-  - **日志与可追踪性**: 事件链路可追踪，支持回测期间的错误捕捉与数据还原。
+  - **五步闭环**: 规约(Specification) → 综合(Synthesis) → 实现(Co-STEER) → 验证(Validation) → 分析(Analysis)
+  - **多智能体架构**: 研究 Agent + 开发 Agent + 反馈 Agent 协同
+  - **因子-模型协同优化**: 同时优化因子和模型，而非割裂处理
+  - **MAB 调度器**: 自适应方向选择，高效探索因子空间
+  - **实测效果**: 年化收益提升 2x，因子数量减少 70%
 
-### 1.3 vnpy (https://github.com/vnpy/vnpy)
-
-- **Stars**: 28K+
-- **定位**: 国产全功能量化交易框架
+### 3. VectorBT (~7K Stars)
+- **仓库**: https://github.com/polakowo/vectorbt
 - **核心亮点**:
-  - **事件驱动架构**: `event` 模块实现的异步事件引擎，确保实时交易与数据处理的效率。
-  - **CTA 策略引擎**: 完整的策略生命周期管理（初始化、启动、停止），支持参数优化（遗传算法/穷举法）。
-  - **AI 量化模块 (vnpy.alpha)**: 内置 Alpha158 因子集、Lasso/LightGBM/MLP 模型集成、完整投研流程。
-  - **全市场交易接口**: 40+ 交易接口（CTP、XTP、IB 等），覆盖期货/股票/期权/加密货币。
-  - **内置风控模块**: `risk_manager` 提供多层级风控（单日最大回撤、波动率上限等）。
+  - **向量化回测**: 对价格矩阵进行 NumPy 运算，速度比事件驱动快 100-1000x
+  - **参数广播**: 一次计算同时评估多组参数，无需循环
+  - **Numba JIT 编译**: 对热点路径进行即时编译优化
+  - **Pandas-native API**: 与 Pandas 生态无缝集成
+
+### 4. quant-stream (Pathway)
+- **仓库**: https://github.com/pathwaycom/quant-stream
+- **核心亮点**:
+  - **因子表达式 DSL**: `RANK(DELTA($close, 5))` 风格的声明式因子定义
+  - **流式引擎**: 基于 Pathway 流式计算框架，同一代码同时用于回测和实盘
+  - **AlphaCopilot**: LLM 驱动的因子生成 Agent
+  - **50+ 内置指标**: 开箱即用
+
+### 5. CBO (Consensus-Based Optimizer) - QUANTT 论文
+- **核心亮点**:
+  - **多智能体分布式梯度下降**: 用于投资组合优化
+  - **惩罚项**: 方差惩罚、L2 集中度惩罚、换手率惩罚
+  - **Black-Litterman 增强**: 结合 Ledoit-Wolf 收缩估计
+  - **无需梯度计算**: 基于共识的粒子群优化方法
 
 ---
 
-## 二、可借鉴的方向列表
+## 二、可借鉴方向列表
 
-对照 jingni-trader 现有代码结构，分析出以下 6 个可优化方向：
-
-### 方向 1: 表达式驱动的因子引擎 (factor-engine)
-
-| 维度 | 当前状态 | 借鉴目标 | 优先级 |
-|------|---------|---------|--------|
-| 因子定义方式 | 在 `compute_a_share_factors()` 中硬编码所有计算逻辑 | Qlib 的表达式系统，新增因子只需一行配置 | **高** |
-| 扩展性 | 新增因子需修改引擎代码并重新测试 | 因子与引擎解耦，用户可自定义 | **高** |
-| 可维护性 | 因子增多后代码臃肿 | 表达式定义更直观，易于 review | 中 |
-| 因子注册 | 无 | 支持因子元信息注册（方向、说明、参数） | 中 |
-
-**验证结果**: 已通过 `test_expression_factor.py` 验证，12 个测试用例全部通过。
-- 表达式引擎与硬编码方式计算结果完全一致（差异 < 1e-6）
-- 新增 5 个因子仅需 5 行配置，无需修改引擎代码
-- 性能比率为 ~4x（表达式解析有开销，可通过对表达式预编译优化）
-
-### 方向 2: 事件驱动回测架构 (backtest-engine)
-
-| 维度 | 当前状态 | 借鉴目标 | 优先级 |
-|------|---------|---------|--------|
-| 架构模式 | 向量化逐日循环（所有数据在内存中同时可用） | NautilusTrader/vnpy 的事件驱动架构，天然防前视偏差 | **高** |
-| 前视偏差防护 | 依赖开发者自律 | 架构层面杜绝 | **高** |
-| 策略 API | 直接操作 DataFrame | 标准化的 `on_bar`/`on_tick` 回调模式 | 中 |
-| 事件可追踪性 | 仅记录结果 | 完整的 MarketData → Signal → Order → Fill 事件链 | 中 |
-
-**验证结果**: 已通过 `test_event_driven_backtest.py` 验证，5 个测试用例全部通过。
-- 事件驱动引擎基本运行正常，可生成完整的净值曲线和绩效指标
-- DataHandler 正确隔离历史数据与未来数据
-- 事件队列严格遵循 FIFO 顺序
-- 与向量化回测的最终净值差异在可接受范围内
-
-### 方向 3: Point-in-Time 数据验证 (data-engine)
-
-| 维度 | 当前状态 | 借鉴目标 | 优先级 |
-|------|---------|---------|--------|
-| 数据时间对齐 | 未显式处理 | Qlib 的 PoT 数据系统 | 中 |
-| 前视泄漏检测 | 无 | 自动检测因子计算中的时间泄漏 | **高** |
-| 财务数据对齐 | 不支持 | 支持按发布日期对齐基本面数据 | 低 |
-
-**验证结果**: 已通过 `test_point_in_time.py` 验证，5 个测试用例全部通过。
-- PoT 存储结构可正确隔离已知数据和未来数据
-- 泄漏检测器成功识别 shift(-1) 的泄漏因子，通过 shift(20) 的安全因子
-
-### 方向 4: 策略编写 API 标准化 (strategy-model-engine)
-
-| 维度 | 当前状态 | 借鉴目标 | 优先级 |
-|------|---------|---------|--------|
-| 策略接口 | 简单的 `train/predict` 二方法接口 | vnpy 的 CTA 模板 + NautilusTrader 的回调模式 | 中 |
-| 策略生命周期 | 无 | `on_init → on_start → on_bar → on_stop` 生命周期 | 中 |
-| 参数优化 | 无 | 遗传算法/Grid Search 超参优化 | 低 |
-
-### 方向 5: 风控模块完善 (portfolio-risk-engine)
-
-| 维度 | 当前状态 | 借鉴目标 | 优先级 |
-|------|---------|---------|--------|
-| 风控层级 | 仅基础组合优化 | vnpy 的 risk_manager 多层级风控 | 中 |
-| 仓位管理 | 固定比例资金分配 | ATR 自适应仓位、凯利公式 | 中 |
-| 熔断机制 | 无 | 单日最大回撤熔断、波动率自适应止损 | **高** |
-
-### 方向 6: 性能优化 - Rust/Cython 混合架构
-
-| 维度 | 当前状态 | 借鉴目标 | 优先级 |
-|------|---------|---------|--------|
-| 运行时性能 | 纯 Python | NautilusTrader 的 Rust 核心 + Cython 绑定 | 低 |
-| 回测速度 | Pandas 逐行循环 | Numba JIT 加速 / Rust 核心 | 低 |
+| 序号 | 优化方向 | 借鉴来源 | 影响模块 | 优先级 |
+|------|---------|---------|---------|--------|
+| 1 | 因子表达式引擎 | Qlib, quant-stream | factor-engine | 高 |
+| 2 | 向量化回测加速 | VectorBT | backtest-engine | 高 |
+| 3 | 标准化因子库扩展 | Qlib Alpha158 | factor-engine | 高 |
+| 4 | Point-in-Time 数据系统 | Qlib | data-engine | 中 |
+| 5 | 参数广播扫描 | VectorBT | backtest-engine | 中 |
+| 6 | 多智能体因子挖掘 | RD-Agent | strategy-model-engine | 中 |
+| 7 | 声明式 YAML 工作流 | Qlib | 全局 | 低 |
+| 8 | 流式回测/实盘统一 | quant-stream | execution-monitor-engine | 低 |
+| 9 | CBO 组合优化 | QUANTT | portfolio-risk-engine | 低 |
 
 ---
 
 ## 三、已完成的验证测试及结论
 
-### 测试文件清单
+### 3.1 因子表达式引擎 (13 个测试通过)
 
-| 文件 | 测试用例数 | 结果 | 借鉴来源 |
-|------|-----------|------|---------|
-| `test_expression_factor.py` | 12 | **全部通过** | Microsoft Qlib |
-| `test_event_driven_backtest.py` | 5 | **全部通过** | NautilusTrader, vnpy |
-| `test_point_in_time.py` | 5 | **全部通过** | Microsoft Qlib |
-| **总计** | **22** | **100% 通过** | |
+**验证文件**: `tests/study_2026/test_factor_expression_engine.py`
 
-### 详细测试结论
+**实现内容**:
+- 轻量级因子表达式解析器，支持递归下降解析
+- 支持变量引用: `$close`, `$open`, `$high`, `$low`, `$volume`, `$amount`, `$turnover`
+- 支持时序操作: `DELTA`, `DELAY`, `TS_MEAN`, `TS_STD`, `TS_MAX`, `TS_MIN`, `TS_CORR`
+- 支持截面操作: `RANK`, `ZSCORE`, `SCALE`
+- 支持数学函数: `ABS`, `LOG`, `SIGN`, `POW`, `SQRT`
+- 支持算术运算和括号: `+`, `-`, `*`, `/`, `(`, `)`
+- 正确处理一元负号（如 `* -1`）
+- 正确处理嵌套函数调用和括号
 
-#### 测试 1: 表达式因子引擎 (test_expression_factor.py)
+**测试结果**:
+- 变量引用测试: PASS
+- 简单/嵌套算术测试: PASS
+- DELTA/DELAY/TS_MEAN 操作符测试: PASS
+- RANK/ZSCORE 截面操作测试: PASS
+- 20日反转复合因子: PASS (与手动计算完全一致)
+- 量价复合因子: PASS
+- 表达式 vs 硬编码一致性: PASS (精度 8 位小数)
+- 因子注册表扩展性: PASS (6 个因子一次注册)
+- 性能测试 (50只股票, 252天, 6个因子): 1.38s
 
-```
-正确性验证:
-  - 基本列引用 ($close): ✓
-  - 简单表达式 ($close / $open - 1): ✓
-  - Ref 操作符 (Ref($close, 5)): ✓
-  - 动量因子 ($close / Ref($close, 20) - 1): ✓
-  - Mean 操作符 (Mean($volume, 20)): ✓
-  - Std 操作符 (Std($close, 20)): ✓
-  - GroupRank 操作符: ✓
-  - log/abs/sqrt 数学函数: ✓
-  - 缓存加速: ✓（缓存命中后加速显著）
+**结论**: 因子表达式引擎方案可行。用户可通过字符串表达式定义因子，无需修改源码，显著提升因子库可扩展性和策略研发效率。
 
-与硬编码对比:
-  - 8 个因子计算结果完全一致（max_diff < 1e-6）
-  - 新增 5 个因子仅需 5 行配置定义
-  - 无需修改任何引擎代码
+### 3.2 向量化回测引擎 (8 个测试通过)
 
-性能:
-  - 表达式方式: ~4x 于硬编码方式（主要是解析开销）
-  - 可通过预编译 AST 或 Numba JIT 进一步优化
-```
+**验证文件**: `tests/study_2026/test_vectorized_backtest.py`
 
-#### 测试 2: 事件驱动回测 (test_event_driven_backtest.py)
+**实现内容**:
+- 向量化回测核心，基于价格矩阵运算
+- 支持 A 股 T+1 交易规则
+- 支持涨跌停无法交易过滤
+- 支持信号类型: position (0/1/-1) 和 weight (权重)
+- 支持参数广播: 一次计算评估多组参数
+- 计算绩效指标: 收益、夏普、最大回撤、Calmar、胜率
+- 事件驱动回测引擎用于对比
 
-```
-基础功能:
-  - 完整回测运行: ✓（产出净值曲线和绩效指标）
-  - 事件队列 FIFO 顺序: ✓
-  - DataHandler 历史隔离: ✓
+**测试结果**:
+- T+1 规则验证: PASS (买入信号延迟一天执行)
+- 涨跌停过滤: PASS (涨停买不进，跌停卖不掉)
+- 参数广播: PASS (4 组调仓频率一次扫描)
+- 净值曲线一致性: 向量化与事件驱动相关系数 0.78
+- 单次回测速度对比: 向量化显著快于事件驱动
+- 参数扫描 (20 组): 向量化加速
+- 大规模扫描 (50 组, 100 只股票, 252 天): <0.1s/次
 
-前视偏差检测:
-  - 注入未来数据后，净值曲线显著变化 → 证明引擎正确使用当前数据
-  - 若引擎有前视泄漏，注入未来数据后结果应不变
+**结论**: 向量化回测引擎在参数扫描场景下性能优势明显，与事件驱动结果趋势一致。建议在 factor-engine 和 backtest-engine 中增加向量化回测模式。
 
-与向量化对比:
-  - 使用相同信号输入时，两种方式净值基本一致
-  - 事件驱动版本天然具备前视偏差防护
-```
+### 3.3 标准化因子库扩展 (9 个测试通过)
 
-#### 测试 3: Point-in-Time 数据验证 (test_point_in_time.py)
+**验证文件**: `tests/study_2026/test_factor_library.py`
 
-```
-PoT 存储:
-  - 按知识时间注入和查询: ✓
-  - 横截面时间对齐: ✓（正确区分不同发布时间的数据）
+**实现内容**:
+- 因子基类框架: `BaseFactor` + `FactorMetadata`
+- 六大分类: trend, reversal, volume, volatility, money_flow, composite
+- 30+ 个示例因子: 动量(5/10/20/60/120)、MACD、RSI、价格位置、反转、跳空、量比、换手率、波动率、最大回撤、振幅、资金流向、OBV、市值
+- 因子库管理器: 注册、查询、分类、批量计算
+- IC 分析器: Spearman/Pearson IC、ICIR、IC 胜率
+- 因子相关性分析: 识别冗余因子
 
-因子时间验证:
-  - rolling mean 时间对齐检查: ✓
+**测试结果**:
+- 因子库规模: 30+ 因子 (> 预期)
+- 分类覆盖: 6 大类全覆盖
+- 因子计算正确性: PASS (与手动计算一致)
+- 批量计算: PASS
+- IC 分析: PASS
+- 相关性筛选: 因子多样性良好
+- 自定义因子注册: PASS
+- 与现有因子库对比: 新增 16+ 个因子
 
-泄漏检测:
-  - 安全因子（shift(20)）: 正确检测为无泄漏
-  - 泄漏因子（shift(-1)）: 正确检测为有泄漏
-```
+**结论**: 标准化因子库框架具备良好的可扩展性。通过清晰的分类和注册机制，用户可以快速扩展因子库，结合 IC 分析筛选有效因子。
 
 ---
 
 ## 四、待用户确认的优化建议
 
-### 建议优先级排序
+### 建议 1: 高优先级 - 集成因子表达式引擎到 factor-engine
+- **影响**: factor-engine 的易用性和可扩展性
+- **改动范围**: 新增 `factor_expression.py`，修改 `factor-engine/engine.py`
+- **风险**: 低，表达式引擎可渐进引入，不影响现有代码
+- **建议**: 在 `feature/quant-stream-inspired` 分支上实现
 
-| 优先级 | 优化方向 | 预期收益 | 实现工作量 | 风险 |
-|--------|---------|---------|-----------|------|
-| **P0** | 表达式因子引擎 | 大幅提升因子扩展性，降低策略迭代成本 | 中（需重构 factor-engine） | 低（已验证可行性） |
-| **P0** | 前视泄漏检测框架 | 从测试层面保障回测可靠性 | 低（可独立引入） | 极低 |
-| **P1** | 事件驱动回测引擎 | 从架构层面杜绝前视偏差 | 高（需重构 backtest-engine） | 中（需充分验证与现有向量化结果一致性） |
-| **P1** | 熔断/风控机制 | 实盘安全保障 | 中 | 低 |
-| **P2** | 策略 API 标准化 | 提升策略开发体验 | 中 | 低 |
-| **P2** | Rust/Cython 性能优化 | 回测速度提升 | 高 | 高（需 Rust 技术栈） |
+### 建议 2: 高优先级 - 扩展标准化因子库
+- **影响**: factor-engine 的策略研发质量
+- **改动范围**: 新增 `factor_library.py`，扩展因子注册
+- **风险**: 低，新因子通过注册机制加入
+- **建议**: 将 30+ 个因子作为内置因子库发布
 
-### 建议实施路径
+### 建议 3: 高优先级 - 增加向量化回测模式
+- **影响**: backtest-engine 的批量参数扫描性能
+- **改动范围**: 新增 `vectorized_backtest.py`，作为现有回测的补充
+- **风险**: 中，需确保与事件驱动结果一致
+- **建议**: 先作为独立模块，后续逐步集成
 
-1. **短期（1-2 周）**: 先引入前视泄漏检测框架和 Point-in-Time 验证器到 CI 流程，不改变现有代码
-2. **中期（2-4 周）**: 实现表达式因子引擎作为 factor-engine 的并行方案，与原方案对比验证后逐步切换
-3. **长期（1-3 月）**: 评估事件驱动回测引擎的完整实现方案，考虑与现有向量化引擎并行运行
+### 建议 4: 中优先级 - Point-in-Time 数据系统
+- **影响**: data-engine 的回测准确性
+- **改动范围**: 新增数据时间戳标注，修改数据加载逻辑
+- **风险**: 中，需要重构数据存储格式
+- **建议**: 下一期研究后实施
+
+### 建议 5: 中优先级 - 多智能体因子挖掘
+- **影响**: strategy-model-engine 的自动化程度
+- **改动范围**: 新增 Agent 模块，集成 LLM
+- **风险**: 高，需要 LLM API 集成和大量测试
+- **建议**: 先做概念验证，再决定是否投入
 
 ---
 
-## 附录: 测试运行命令
+## 五、测试结果汇总
 
-```bash
-# 运行所有研究测试
-cd /workspace && python -m pytest tests/study_2026/ -v
-
-# 运行单个测试文件
-python -m pytest tests/study_2026/test_expression_factor.py -v
-python -m pytest tests/study_2026/test_event_driven_backtest.py -v
-python -m pytest tests/study_2026/test_point_in_time.py -v
 ```
+tests/study_2026/test_factor_expression_engine.py ..... 13 passed
+tests/study_2026/test_factor_library.py ................. 9 passed
+tests/study_2026/test_vectorized_backtest.py ........... 8 passed
+--------------------------------------------------------------
+Total: 30 passed, 1 warning
+```
+
+---
+
+## 六、附录: 验证文件清单
+
+| 文件 | 内容 | 借鉴来源 |
+|------|------|---------|
+| `test_factor_expression_engine.py` | 因子表达式解析器 + 13 测试 | Qlib, quant-stream |
+| `test_vectorized_backtest.py` | 向量化回测引擎 + 8 测试 | VectorBT |
+| `test_factor_library.py` | 标准化因子库 + 9 测试 | Qlib Alpha158 |
+| `LEARNING_REPORT.md` | 本报告 | - |
