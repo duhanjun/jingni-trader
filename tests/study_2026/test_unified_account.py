@@ -1,740 +1,799 @@
 """
-================================================================================
-优化方向: 统一账户/持仓数据模型（QIFI 协议风格）
-借鉴来源: QUANTAXIS (https://github.com/yutiansut/QUANTAXIS) — QIFI 协议
-         QUANTAXIS v2.1 引入了 QIFI (Quantitative Investment Financial Interface)
-         统一账户协议，定义了跨语言的标准账户数据结构，实现 Python 和 Rust
-         版本间的零拷贝数据交换和 100% API 兼容。
-
-优化目标:
-  当前 jingni-trader 的账户模型分散在多个模块中：
-  - execution-monitor-engine 中有 Account dataclass
-  - portfolio-risk-engine 中有独立的仓位计算逻辑
-  - backtest-engine 中的 equity_curve 计算与账户脱钩
-
-  缺乏统一的账户/持仓/交易记录数据模型，导致：
-  1. 各模块间的数据传递依赖 ad-hoc 字典
-  2. 账户状态无法跨模块共享
-  3. 难以支持多账户/多策略场景
-
-验证内容:
-  1. 定义 QIFI 风格的统一账户模型
-  2. 实现零拷贝式的跨模块数据传递
-  3. 多模块集成：账户变更可被回测/风控/执行引擎同时消费
-  4. 序列化/反序列化往返测试
-  5. 内存效率对比 — 字典 vs dataclass vs NamedTuple
+优化方向: 统一账户/仓位模型 (Unified Account & Position Model)
+借鉴来源: QUANTAXIS (https://github.com/yutiansut/QUANTAXIS)
+  - QUANTAXIS 的 QIFI (QUANTAXIS Interactive Financial Interface) 协议
+    定义了统一的账户模型，使得回测和实盘使用相同的账户结构
+  - 核心价值: 回测和实盘账户一致性，减少回测到实盘的部署风险
+  - 参考文件: QUANTAXIS/QIFI/QifiAccount.py, QUANTAXIS/QARSBridge/
+对比对象: jingni-trader 当前回测引擎中直接使用 dict 存储持仓
+          (skills/backtest-engine/scripts/adapters/native_adapter.py positions = {})
+          portfolio-risk-engine 中缺乏统一的仓位管理
 """
 
 import unittest
-import sys
-import os
-import json
-import time
-from typing import Dict, List, Optional, Any, Tuple, Union
-from dataclasses import dataclass, field, asdict, fields
+import pandas as pd
+import numpy as np
+from typing import Dict, List, Optional, Any, Tuple
+from dataclasses import dataclass, field
 from datetime import datetime, date
 from enum import Enum
-import copy
-
-import numpy as np
-import pandas as pd
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
-
-# ── 测试配置 ──────────────────────────────────
-_ACCOUNT_STATE_PATH = os.path.join(
-    os.path.dirname(__file__), '../../workspace/account_state.json'
-)
+from copy import deepcopy
+import json
 
 
-# ================================================================================
-# Part 1: QIFI 风格统一账户协议
-# ================================================================================
+# ============================================================
+# 1. 统一账户模型核心实现
+# ============================================================
 
-
-class OrderSide(str, Enum):
+class OrderSide(Enum):
+    """订单方向"""
     BUY = "buy"
     SELL = "sell"
 
-
-class OrderStatus(str, Enum):
-    PENDING = "pending"
-    SUBMITTED = "submitted"
-    PARTIAL = "partial_filled"
-    FILLED = "filled"
-    CANCELLED = "cancelled"
-    REJECTED = "rejected"
-    EXPIRED = "expired"
-
-
-class OrderType(str, Enum):
+class OrderType(Enum):
+    """订单类型"""
     MARKET = "market"
     LIMIT = "limit"
-    STOP = "stop"
 
+class OrderStatus(Enum):
+    """订单状态"""
+    PENDING = "pending"
+    FILLED = "filled"
+    PARTIALLY_FILLED = "partially_filled"
+    CANCELLED = "cancelled"
+    REJECTED = "rejected"
 
-class PositionSide(str, Enum):
+class PositionSide(Enum):
+    """持仓方向"""
     LONG = "long"
     SHORT = "short"
 
 
 @dataclass
-class Position:
-    """统一持仓模型（兼容多空、期货、现货）"""
-    code: str                              # 证券代码
-    side: PositionSide = PositionSide.LONG # 持仓方向
-    volume: int = 0                        # 持仓量（股/张）
-    available_volume: int = 0              # 可卖量
-    frozen_volume: int = 0                 # 冻结量（挂单中）
-    avg_cost: float = 0.0                  # 平均成本价
-    current_price: float = 0.0             # 当前价
-    market_value: float = 0.0              # 市值
-    unrealized_pnl: float = 0.0            # 浮动盈亏
-    realized_pnl: float = 0.0              # 已实现盈亏
-    open_date: str = ""                    # 开仓日期
-
-    def update_market_value(self, price: float):
-        """更新市价相关字段"""
-        self.current_price = price
-        self.market_value = self.volume * price
-        self.unrealized_pnl = (price - self.avg_cost) * self.volume
-
-
-@dataclass
 class Order:
-    """统一订单模型"""
-    order_id: str = ""
-    code: str = ""
-    side: OrderSide = OrderSide.BUY
-    order_type: OrderType = OrderType.LIMIT
-    price: float = 0.0
-    volume: int = 0
-    filled_volume: int = 0
+    """订单"""
+    order_id: str
+    code: str
+    side: OrderSide
+    price: float
+    quantity: int
+    order_type: OrderType = OrderType.MARKET
     status: OrderStatus = OrderStatus.PENDING
+    filled_quantity: int = 0
+    filled_price: float = 0.0
     commission: float = 0.0
-    stamp_tax: float = 0.0
-    slippage: float = 0.0
-    create_time: str = ""
-    update_time: str = ""
-    memo: str = ""
+    tax: float = 0.0
+    created_at: datetime = field(default_factory=datetime.now)
+    filled_at: Optional[datetime] = None
+    reason: str = ""  # 下单原因
 
-    @property
-    def notional(self) -> float:
-        return self.price * self.volume
-
-    @property
-    def filled_notional(self) -> float:
-        return self.price * self.filled_volume
+    def to_dict(self) -> dict:
+        return {
+            "order_id": self.order_id,
+            "code": self.code,
+            "side": self.side.value,
+            "price": self.price,
+            "quantity": self.quantity,
+            "order_type": self.order_type.value,
+            "status": self.status.value,
+            "filled_quantity": self.filled_quantity,
+            "filled_price": self.filled_price,
+            "commission": self.commission,
+            "tax": self.tax,
+            "created_at": self.created_at.isoformat(),
+            "filled_at": self.filled_at.isoformat() if self.filled_at else None,
+            "reason": self.reason,
+        }
 
 
 @dataclass
 class Trade:
-    """统一成交记录模型"""
-    trade_id: str = ""
-    order_id: str = ""
-    code: str = ""
-    side: OrderSide = OrderSide.BUY
-    price: float = 0.0
-    volume: int = 0
+    """成交记录"""
+    trade_id: str
+    order_id: str
+    code: str
+    side: OrderSide
+    price: float
+    quantity: int
+    amount: float
     commission: float = 0.0
-    stamp_tax: float = 0.0
-    trade_time: str = ""
+    tax: float = 0.0
+    trade_time: datetime = field(default_factory=datetime.now)
+
+    def to_dict(self) -> dict:
+        return {
+            "trade_id": self.trade_id,
+            "order_id": self.order_id,
+            "code": self.code,
+            "side": self.side.value,
+            "price": self.price,
+            "quantity": self.quantity,
+            "amount": self.amount,
+            "commission": self.commission,
+            "tax": self.tax,
+            "trade_time": self.trade_time.isoformat(),
+        }
 
 
 @dataclass
-class Account:
-    """统一账户模型（QIFI 协议风格）
+class Position:
+    """持仓"""
+    code: str
+    side: PositionSide = PositionSide.LONG
+    quantity: int = 0
+    avg_cost: float = 0.0
+    market_value: float = 0.0
+    unrealized_pnl: float = 0.0
+    realized_pnl: float = 0.0
+    total_cost: float = 0.0  # 含手续费的总成本
 
-    设计原则:
-    1. 所有字段有明确含义和类型
-    2. 支持序列化/反序列化
-    3. 包含完整的持仓、订单、成交记录
-    4. 可作为消息在不同模块间零拷贝传递（引用共享）
+    def update_market_value(self, current_price: float):
+        """更新市值和未实现盈亏"""
+        self.market_value = self.quantity * current_price
+        if self.quantity > 0:
+            self.unrealized_pnl = self.market_value - self.total_cost
+
+    def to_dict(self) -> dict:
+        return {
+            "code": self.code,
+            "side": self.side.value,
+            "quantity": self.quantity,
+            "avg_cost": round(self.avg_cost, 4),
+            "market_value": round(self.market_value, 2),
+            "unrealized_pnl": round(self.unrealized_pnl, 2),
+            "realized_pnl": round(self.realized_pnl, 2),
+            "total_cost": round(self.total_cost, 2),
+        }
+
+
+@dataclass
+class AccountSnapshot:
+    """账户快照（用于风控和审计）"""
+    timestamp: datetime
+    cash: float
+    positions: Dict[str, Position] = field(default_factory=dict)
+    total_equity: float = 0.0
+    total_market_value: float = 0.0
+    total_pnl: float = 0.0
+    position_count: int = 0
+
+    def to_dict(self) -> dict:
+        return {
+            "timestamp": self.timestamp.isoformat(),
+            "cash": round(self.cash, 2),
+            "total_equity": round(self.total_equity, 2),
+            "total_market_value": round(self.total_market_value, 2),
+            "total_pnl": round(self.total_pnl, 2),
+            "position_count": self.position_count,
+            "positions": {k: v.to_dict() for k, v in self.positions.items()},
+        }
+
+
+class UnifiedAccount:
+    """
+    统一账户模型 - 借鉴 QIFI 协议设计
+
+    核心设计原则:
+    1. 回测和实盘使用相同的账户结构
+    2. 订单→成交→持仓的完整生命周期管理
+    3. 内置风控检查
+    4. 支持账户快照（用于审计和回放）
+    5. 序列化支持（JSON 兼容）
+
+    与 QIFI 的对应关系:
+    - QIFI_Account → UnifiedAccount (账户主类)
+    - QIFI Position → Position (持仓)
+    - QIFI Order → Order (订单)
+    - QIFI Trade → Trade (成交)
     """
 
-    # 账户基本信息
-    account_id: str = "default"
-    account_name: str = ""
+    def __init__(
+        self,
+        account_id: str = "default",
+        init_cash: float = 1_000_000.0,
+        commission_rate: float = 0.00025,
+        stamp_tax_rate: float = 0.001,
+        min_commission: float = 5.0,
+        slippage: float = 0.001,
+        risk_limits: Dict[str, float] = None,
+    ):
+        self.account_id = account_id
+        self.initial_cash = init_cash
+        self.cash = init_cash
+        self.commission_rate = commission_rate
+        self.stamp_tax_rate = stamp_tax_rate
+        self.min_commission = min_commission
+        self.slippage = slippage
+        self.risk_limits = risk_limits or {
+            "max_position_pct": 0.05,  # 单票最大仓位
+            "max_daily_loss": 0.02,     # 单日最大亏损
+            "max_positions": 20,        # 最大持仓数
+        }
 
-    # 资金信息
-    initial_capital: float = 1_000_000.0
-    available_cash: float = 1_000_000.0
-    frozen_cash: float = 0.0                # 冻结资金（挂单占用）
-    total_assets: float = 1_000_000.0       # 总资产
-    total_liabilities: float = 0.0          # 总负债
+        # 持仓
+        self.positions: Dict[str, Position] = {}
 
-    # 净值和风控
-    nav: float = 1_000_000.0               # 净值
-    start_of_day_nav: float = 1_000_000.0   # 日初净值
-    daily_pnl: float = 0.0                  # 当日损益
-    cumulative_pnl: float = 0.0             # 累计损益
+        # 订单和成交记录
+        self.pending_orders: List[Order] = []
+        self.filled_orders: List[Order] = []
+        self.trades: List[Trade] = []
+        self._order_counter = 0
+        self._trade_counter = 0
 
-    # 组合数据
-    positions: Dict[str, Position] = field(default_factory=dict)
-    pending_orders: Dict[str, Order] = field(default_factory=dict)
-    trade_history: List[Trade] = field(default_factory=list)
+        # 快照历史
+        self.snapshots: List[AccountSnapshot] = []
 
-    # 元信息
-    last_update: str = ""
-    version: int = 1
+        # 当日统计
+        self._day_start_equity = init_cash
+        self._current_date = None
 
-    # ── 衍生属性 ──────────────────────
+    def _next_order_id(self) -> str:
+        self._order_counter += 1
+        return f"ORD{self._order_counter:08d}"
+
+    def _next_trade_id(self) -> str:
+        self._trade_counter += 1
+        return f"TRD{self._trade_counter:08d}"
+
+    # ---- 订单管理 ----
+
+    def submit_order(
+        self,
+        code: str,
+        side: OrderSide,
+        price: float,
+        quantity: int,
+        order_type: OrderType = OrderType.MARKET,
+        reason: str = "",
+    ) -> Order:
+        """提交订单"""
+        order = Order(
+            order_id=self._next_order_id(),
+            code=code,
+            side=side,
+            price=price,
+            quantity=quantity,
+            order_type=order_type,
+            reason=reason,
+        )
+
+        # 风控检查
+        reject_reason = self._risk_check(order)
+        if reject_reason:
+            order.status = OrderStatus.REJECTED
+            order.reason = f"风控拒绝: {reject_reason}"
+            self.filled_orders.append(order)
+            return order
+
+        self.pending_orders.append(order)
+        return order
+
+    def fill_order(self, order: Order, fill_price: float, fill_quantity: int = None,
+                   current_date: Any = None) -> Trade:
+        """成交订单"""
+        if fill_quantity is None:
+            fill_quantity = order.quantity
+
+        fill_quantity = min(fill_quantity, order.quantity - order.filled_quantity)
+
+        if fill_quantity <= 0:
+            return None
+
+        # 计算成本
+        amount = fill_price * fill_quantity
+        commission = max(amount * self.commission_rate, self.min_commission)
+        tax = amount * self.stamp_tax_rate if order.side == OrderSide.SELL else 0
+
+        # 更新订单
+        order.filled_quantity += fill_quantity
+        order.filled_price = (
+            (order.filled_price * (order.filled_quantity - fill_quantity) + fill_price * fill_quantity)
+            / order.filled_quantity
+        )
+        order.commission += commission
+        order.tax += tax
+        order.filled_at = datetime.now()
+
+        if order.filled_quantity >= order.quantity:
+            order.status = OrderStatus.FILLED
+            self.pending_orders = [o for o in self.pending_orders if o.order_id != order.order_id]
+            self.filled_orders.append(order)
+        else:
+            order.status = OrderStatus.PARTIALLY_FILLED
+
+        # 创建成交记录
+        trade = Trade(
+            trade_id=self._next_trade_id(),
+            order_id=order.order_id,
+            code=order.code,
+            side=order.side,
+            price=fill_price,
+            quantity=fill_quantity,
+            amount=amount,
+            commission=commission,
+            tax=tax,
+        )
+        self.trades.append(trade)
+
+        # 更新现金和持仓
+        if order.side == OrderSide.BUY:
+            self.cash -= (amount + commission)
+            self._update_position(order.code, fill_quantity, fill_price, amount + commission)
+        else:
+            self.cash += (amount - commission - tax)
+            self._update_position(order.code, -fill_quantity, fill_price, 0)
+
+        return trade
+
+    def cancel_order(self, order: Order):
+        """撤销订单"""
+        if order.status in [OrderStatus.PENDING, OrderStatus.PARTIALLY_FILLED]:
+            order.status = OrderStatus.CANCELLED
+            self.pending_orders = [o for o in self.pending_orders if o.order_id != order.order_id]
+            self.filled_orders.append(order)
+
+    # ---- 持仓管理 ----
+
+    def _update_position(self, code: str, delta_quantity: int,
+                         price: float, cost: float):
+        """更新持仓"""
+        if code not in self.positions:
+            self.positions[code] = Position(code=code, side=PositionSide.LONG)
+
+        pos = self.positions[code]
+
+        if delta_quantity > 0:  # 加仓
+            new_total_qty = pos.quantity + delta_quantity
+            pos.total_cost += cost
+            pos.avg_cost = pos.total_cost / new_total_qty if new_total_qty > 0 else 0
+            pos.quantity = new_total_qty
+        else:  # 减仓
+            sell_qty = -delta_quantity
+            if sell_qty > pos.quantity:
+                sell_qty = pos.quantity
+
+            realized_pnl = (price - pos.avg_cost) * sell_qty
+            pos.realized_pnl += realized_pnl
+            pos.quantity -= sell_qty
+            pos.total_cost -= pos.avg_cost * sell_qty
+
+            if pos.quantity <= 0:
+                del self.positions[code]
+
+    def update_market_prices(self, prices: Dict[str, float]):
+        """更新所有持仓的市值"""
+        for code, pos in self.positions.items():
+            if code in prices:
+                pos.update_market_value(prices[code])
+
+    def get_position(self, code: str) -> Optional[Position]:
+        """获取持仓"""
+        return self.positions.get(code)
+
+    # ---- 风控 ----
+
+    def _risk_check(self, order: Order) -> Optional[str]:
+        """风控检查"""
+        limits = self.risk_limits
+
+        # 持仓数量检查
+        if order.side == OrderSide.BUY:
+            current_positions = len([p for p in self.positions.values() if p.quantity > 0])
+            if order.code not in self.positions and current_positions >= limits.get("max_positions", 20):
+                return f"持仓数量已达上限 {limits['max_positions']}"
+
+        # 单票仓位检查
+        if order.side == OrderSide.BUY:
+            current_eq = self.total_equity
+            if current_eq > 0:
+                order_amount = order.price * order.quantity
+                position_pct = order_amount / current_eq
+                if position_pct > limits.get("max_position_pct", 0.05):
+                    return f"单票仓位 {position_pct:.2%} 超过上限 {limits['max_position_pct']:.2%}"
+
+        # 现金检查
+        if order.side == OrderSide.BUY:
+            estimated_cost = order.price * order.quantity * (1 + self.commission_rate)
+            if estimated_cost > self.cash:
+                return "现金不足"
+
+        return None
+
+    # ---- 账户快照 ----
+
+    def take_snapshot(self, current_date: Any = None) -> AccountSnapshot:
+        """创建账户快照"""
+        total_mv = sum(p.market_value for p in self.positions.values())
+        total_equity = self.cash + total_mv
+        total_pnl = total_equity - self.initial_cash
+
+        snapshot = AccountSnapshot(
+            timestamp=datetime.now(),
+            cash=self.cash,
+            positions=deepcopy(self.positions),
+            total_equity=total_equity,
+            total_market_value=total_mv,
+            total_pnl=total_pnl,
+            position_count=len([p for p in self.positions.values() if p.quantity > 0]),
+        )
+        self.snapshots.append(snapshot)
+        return snapshot
+
+    # ---- 属性 ----
+
+    @property
+    def total_equity(self) -> float:
+        total_mv = sum(p.market_value for p in self.positions.values())
+        return self.cash + total_mv
 
     @property
     def total_market_value(self) -> float:
         return sum(p.market_value for p in self.positions.values())
 
     @property
-    def daily_return(self) -> float:
-        if self.start_of_day_nav <= 0:
-            return 0.0
-        return (self.nav - self.start_of_day_nav) / self.start_of_day_nav
-
-    @property
-    def leverage(self) -> float:
-        if self.nav <= 0:
-            return 0.0
-        return self.total_assets / self.nav
+    def total_pnl(self) -> float:
+        return self.total_equity - self.initial_cash
 
     @property
     def position_count(self) -> int:
-        return len(self.positions)
+        return len([p for p in self.positions.values() if p.quantity > 0])
 
-    # ── 原子操作 ──────────────────────
+    # ---- 序列化 ----
 
-    def recalculate_nav(self, prices: Dict[str, float]):
-        """根据最新价格重新计算净值和市值"""
-        total_mv = 0.0
-        for code, pos in self.positions.items():
-            price = prices.get(code, pos.current_price)
-            pos.update_market_value(price)
-            total_mv += pos.market_value
-        self.total_assets = self.available_cash + self.frozen_cash + total_mv
-        self.nav = self.total_assets - self.total_liabilities
-        self.cumulative_pnl = self.nav - self.initial_capital
-        self.last_update = datetime.now().isoformat()
-
-    def reset_daily(self):
-        """交易日重置"""
-        self.start_of_day_nav = self.nav
-        self.daily_pnl = 0.0
-        self.version += 1
-
-    def apply_trade(self, trade: Trade, prices: Dict[str, float]):
-        """应用一笔成交到账户"""
-        if trade.side == OrderSide.BUY:
-            cost = trade.price * trade.volume + trade.commission
-            self.available_cash -= cost
-            if trade.code not in self.positions:
-                self.positions[trade.code] = Position(
-                    code=trade.code,
-                    side=PositionSide.LONG,
-                    open_date=trade.trade_time,
-                )
-            pos = self.positions[trade.code]
-            old_cost = pos.avg_cost * pos.volume
-            pos.volume += trade.volume
-            pos.available_volume += trade.volume
-            pos.avg_cost = (old_cost + cost) / pos.volume if pos.volume > 0 else 0.0
-            if trade.code in prices:
-                pos.update_market_value(prices[trade.code])
-        else:
-            total_fee = trade.commission + trade.stamp_tax
-            revenue = trade.price * trade.volume - total_fee
-            self.available_cash += revenue
-            if trade.code in self.positions:
-                pos = self.positions[trade.code]
-                pnl_per_share = trade.price - pos.avg_cost
-                pos.realized_pnl += pnl_per_share * trade.volume
-                pos.volume -= trade.volume
-                pos.available_volume -= trade.volume
-                if pos.volume <= 0:
-                    del self.positions[trade.code]
-
-        self.trade_history.append(trade)
-        self.recalculate_nav(prices)
-        self.daily_pnl = self.nav - self.start_of_day_nav
-        self.cumulative_pnl = self.nav - self.initial_capital
-
-    def to_dict(self) -> Dict:
-        """序列化为字典"""
+    def to_dict(self) -> dict:
         return {
             "account_id": self.account_id,
-            "account_name": self.account_name,
-            "initial_capital": self.initial_capital,
-            "available_cash": self.available_cash,
-            "frozen_cash": self.frozen_cash,
-            "nav": self.nav,
-            "daily_pnl": self.daily_pnl,
-            "cumulative_pnl": self.cumulative_pnl,
-            "daily_return": self.daily_return,
-            "leverage": self.leverage,
+            "initial_cash": self.initial_cash,
+            "cash": round(self.cash, 2),
+            "total_equity": round(self.total_equity, 2),
+            "total_market_value": round(self.total_market_value, 2),
+            "total_pnl": round(self.total_pnl, 2),
             "position_count": self.position_count,
-            "total_market_value": self.total_market_value,
-            "positions": {
-                code: asdict(pos) for code, pos in self.positions.items()
-            },
-            "last_update": self.last_update,
-            "version": self.version,
+            "positions": {k: v.to_dict() for k, v in self.positions.items()},
+            "pending_orders": [o.to_dict() for o in self.pending_orders],
+            "trades": [t.to_dict() for t in self.trades[-10:]],  # 最近10笔
+            "risk_limits": self.risk_limits,
         }
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=2, default=str)
 
-    @classmethod
-    def from_dict(cls, data: Dict) -> "Account":
-        """从字典恢复"""
-        positions = {}
-        for code, pos_data in data.get("positions", {}).items():
-            pos_data["side"] = PositionSide(pos_data["side"])
-            positions[code] = Position(**pos_data)
 
-        acct = cls(
-            account_id=data.get("account_id", "default"),
-            account_name=data.get("account_name", ""),
-            initial_capital=data.get("initial_capital", 1_000_000.0),
-            available_cash=data.get("available_cash", 1_000_000.0),
-            frozen_cash=data.get("frozen_cash", 0.0),
-            nav=data.get("nav", 1_000_000.0),
-            daily_pnl=data.get("daily_pnl", 0.0),
-            cumulative_pnl=data.get("cumulative_pnl", 0.0),
-            positions=positions,
-            last_update=data.get("last_update", ""),
-            version=data.get("version", 1),
-        )
-        return acct
+# ============================================================
+# 2. 测试用例
+# ============================================================
 
-
-# ================================================================================
-# Part 2: 跨模块事件总线
-# ================================================================================
-
-@dataclass
-class AccountEvent:
-    """账户变更事件 — 用于跨模块通知"""
-    event_type: str  # "trade", "position_change", "nav_update", "stop_triggered"
-    account_id: str
-    data: Dict[str, Any]
-    timestamp: str = ""
-    source_module: str = ""
-
-    def __post_init__(self):
-        if not self.timestamp:
-            self.timestamp = datetime.now().isoformat()
-
-
-class AccountEventBus:
-    """轻量级事件总线 — 解耦模块间的账户变更通知"""
-
-    def __init__(self):
-        self._listeners: Dict[str, List[callable]] = {}
-
-    def subscribe(self, event_type: str, callback: callable):
-        """订阅事件类型"""
-        if event_type not in self._listeners:
-            self._listeners[event_type] = []
-        self._listeners[event_type].append(callback)
-
-    def publish(self, event: AccountEvent):
-        """发布事件"""
-        listeners = self._listeners.get(event.event_type, [])
-        for cb in listeners:
-            cb(event)
-        # "all" 类型监听所有事件
-        for cb in self._listeners.get("all", []):
-            cb(event)
-
-
-# ================================================================================
-# Part 3: 测试用例
-# ================================================================================
-
-
-class TestUnifiedAccountModel(unittest.TestCase):
-    """统一账户模型单元测试"""
+class TestOrderLifecycle(unittest.TestCase):
+    """订单生命周期测试"""
 
     def setUp(self):
-        self.account = Account(
-            account_id="test_001",
-            account_name="Test Account",
-            initial_capital=1_000_000.0,
-            available_cash=1_000_000.0,
-        )
+        self.account = UnifiedAccount(account_id="test_001", init_cash=1_000_000.0)
 
-    def test_account_initialization(self):
-        """测试账户初始化"""
-        self.assertEqual(self.account.nav, 1_000_000.0)
-        self.assertEqual(self.account.available_cash, 1_000_000.0)
-        self.assertEqual(self.account.position_count, 0)
-        self.assertEqual(self.account.daily_return, 0.0)
-        self.assertEqual(self.account.leverage, 1.0)
-
-    def test_apply_buy_trade(self):
-        """测试买入成交"""
-        trade = Trade(
-            trade_id="T001",
-            order_id="O001",
-            code="000001.SZ",
-            side=OrderSide.BUY,
-            price=10.0,
-            volume=10000,
-            commission=25.0,
-            trade_time="2024-01-15 09:35:00",
-        )
-        self.account.apply_trade(trade, {"000001.SZ": 10.0})
-
-        self.assertIn("000001.SZ", self.account.positions)
-        pos = self.account.positions["000001.SZ"]
-        self.assertEqual(pos.volume, 10000)
-        self.assertAlmostEqual(pos.avg_cost, 10.0025, places=4)
-        self.assertAlmostEqual(self.account.available_cash, 1_000_000 - 100025, places=2)
-
-    def test_apply_sell_trade(self):
-        """测试卖出成交"""
-        # 先买入
-        trade_buy = Trade(
-            trade_id="T001", order_id="O001",
+    def test_submit_and_fill_buy_order(self):
+        """测试提交和成交买入订单"""
+        order = self.account.submit_order(
             code="000001.SZ", side=OrderSide.BUY,
-            price=10.0, volume=10000,
-            commission=25.0, trade_time="2024-01-15",
+            price=10.0, quantity=2000, reason="测试买入"  # 降低数量避免风控拒绝
         )
-        self.account.apply_trade(trade_buy, {"000001.SZ": 10.0})
+        self.assertEqual(order.status, OrderStatus.PENDING)
+        self.assertEqual(len(self.account.pending_orders), 1)
+
+        trade = self.account.fill_order(order, fill_price=10.0)
+        self.assertIsNotNone(trade)
+        self.assertEqual(order.status, OrderStatus.FILLED)
+        self.assertEqual(len(self.account.pending_orders), 0)
+        self.assertEqual(len(self.account.filled_orders), 1)
+
+        # 检查持仓
+        pos = self.account.get_position("000001.SZ")
+        self.assertIsNotNone(pos)
+        self.assertEqual(pos.quantity, 2000)
+        self.assertAlmostEqual(pos.avg_cost, 10.0, delta=0.01)
+
+        # 检查现金
+        expected_cost = 10.0 * 2000 + max(10.0 * 2000 * 0.00025, 5.0)
+        self.assertAlmostEqual(self.account.cash, 1_000_000.0 - expected_cost, delta=0.01)
+
+    def test_submit_and_fill_sell_order(self):
+        """测试提交和成交卖出订单"""
+        # 先买入
+        order_buy = self.account.submit_order(
+            code="000001.SZ", side=OrderSide.BUY,
+            price=10.0, quantity=2000
+        )
+        self.account.fill_order(order_buy, fill_price=10.0)
 
         # 再卖出
-        trade_sell = Trade(
-            trade_id="T002", order_id="O002",
+        order_sell = self.account.submit_order(
             code="000001.SZ", side=OrderSide.SELL,
-            price=11.0, volume=5000,
-            commission=13.75, stamp_tax=55.0,
-            trade_time="2024-01-16",
+            price=12.0, quantity=2000
         )
-        self.account.apply_trade(trade_sell, {"000001.SZ": 11.0})
+        trade = self.account.fill_order(order_sell, fill_price=12.0)
 
-        self.assertEqual(self.account.positions["000001.SZ"].volume, 5000)
-        self.assertEqual(len(self.account.trade_history), 2)
+        self.assertIsNotNone(trade)
+        # 卖出后持仓应为0
+        pos = self.account.get_position("000001.SZ")
+        self.assertIsNone(pos)
 
-    def test_recalculate_nav(self):
-        """测试净值重算"""
-        # 买入 10000 股 @ 10 元
-        trade = Trade(
-            trade_id="T001", order_id="O001",
+        # 卖出产生印花税
+        self.assertGreater(trade.tax, 0)
+
+    def test_partial_fill(self):
+        """测试部分成交"""
+        order = self.account.submit_order(
             code="000001.SZ", side=OrderSide.BUY,
-            price=10.0, volume=10000,
-            commission=25.0, trade_time="2024-01-15",
-        )
-        self.account.apply_trade(trade, {"000001.SZ": 10.0})
-
-        # 股价涨到 11 元
-        self.account.recalculate_nav({"000001.SZ": 11.0})
-        self.assertAlmostEqual(self.account.nav, 899975.0 + 110000.0, places=2)
-        self.assertAlmostEqual(self.account.cumulative_pnl,
-                               1009975.0 - 1_000_000.0, places=2)
-
-    def test_reset_daily(self):
-        """测试日重置"""
-        self.account.apply_trade(
-            Trade(trade_id="T001", order_id="O001",
-                  code="000001.SZ", side=OrderSide.BUY,
-                  price=10.0, volume=10000,
-                  commission=25.0, trade_time="2024-01-15"),
-            {"000001.SZ": 10.0},
-        )
-        self.account.recalculate_nav({"000001.SZ": 10.5})
-
-        old_version = self.account.version
-        self.account.reset_daily()
-        self.assertEqual(self.account.start_of_day_nav, self.account.nav)
-        self.assertEqual(self.account.daily_pnl, 0.0)
-        self.assertEqual(self.account.version, old_version + 1)
-
-    def test_serialization_roundtrip(self):
-        """测试序列化/反序列化往返"""
-        # 做几笔交易
-        self.account.apply_trade(
-            Trade(trade_id="T001", order_id="O001",
-                  code="000001.SZ", side=OrderSide.BUY,
-                  price=10.0, volume=10000, commission=25.0,
-                  trade_time="2024-01-15"),
-            {"000001.SZ": 10.0},
-        )
-        self.account.apply_trade(
-            Trade(trade_id="T002", order_id="O002",
-                  code="600000.SH", side=OrderSide.BUY,
-                  price=8.0, volume=5000, commission=10.0,
-                  trade_time="2024-01-16"),
-            {"000001.SZ": 10.0, "600000.SH": 8.0},
+            price=10.0, quantity=2000
         )
 
-        # 导出为字典
-        data = self.account.to_dict()
+        trade1 = self.account.fill_order(order, fill_price=10.0, fill_quantity=1000)
+        self.assertEqual(order.status, OrderStatus.PARTIALLY_FILLED)
+        self.assertEqual(order.filled_quantity, 1000)
 
-        # 还原
-        restored = Account.from_dict(data)
+        trade2 = self.account.fill_order(order, fill_price=10.5, fill_quantity=1000)
+        self.assertEqual(order.status, OrderStatus.FILLED)
+        self.assertEqual(order.filled_quantity, 2000)
 
-        # 验证关键字段
-        self.assertEqual(restored.nav, self.account.nav)
-        self.assertEqual(restored.available_cash, self.account.available_cash)
-        self.assertEqual(restored.position_count, self.account.position_count)
-        self.assertEqual(len(restored.positions), len(self.account.positions))
+        # 均价应为 (10*1000 + 10.5*1000) / 2000 = 10.25
+        pos = self.account.get_position("000001.SZ")
+        self.assertAlmostEqual(pos.avg_cost, 10.25, delta=0.02)
 
-    def test_to_json(self):
-        """测试 JSON 序列化"""
-        self.account.apply_trade(
-            Trade(trade_id="T001", order_id="O001",
-                  code="000001.SZ", side=OrderSide.BUY,
-                  price=10.0, volume=10000, commission=25.0,
-                  trade_time="2024-01-15"),
-            {"000001.SZ": 10.0},
+    def test_cancel_order(self):
+        """测试撤销订单"""
+        order = self.account.submit_order(
+            code="000001.SZ", side=OrderSide.BUY,
+            price=10.0, quantity=2000  # 降低数量以避免风控拒绝
         )
-        json_str = self.account.to_json()
-        self.assertIn("account_id", json_str)
-        self.assertIn("000001.SZ", json_str)
-        # 确保 JSON 可解析
-        parsed = json.loads(json_str)
-        self.assertIsInstance(parsed, dict)
+        self.assertEqual(order.status, OrderStatus.PENDING)
+        self.account.cancel_order(order)
+        self.assertEqual(order.status, OrderStatus.CANCELLED)
+        self.assertEqual(len(self.account.pending_orders), 0)
+
+    def test_order_rejection_due_to_cash(self):
+        """测试现金不足时的订单拒绝"""
+        order = self.account.submit_order(
+            code="000001.SZ", side=OrderSide.BUY,
+            price=1000000.0, quantity=2000
+        )
+        self.assertEqual(order.status, OrderStatus.REJECTED)
 
 
-class TestAccountEventBus(unittest.TestCase):
-    """跨模块事件总线测试"""
+class TestPositionManagement(unittest.TestCase):
+    """持仓管理测试"""
 
     def setUp(self):
-        self.bus = AccountEventBus()
-        self.received_events: List[AccountEvent] = []
+        self.account = UnifiedAccount(account_id="test_002", init_cash=1_000_000.0)
 
-    def test_subscribe_and_publish(self):
-        """测试订阅和发布"""
-
-        def on_trade(event: AccountEvent):
-            self.received_events.append(event)
-
-        self.bus.subscribe("trade", on_trade)
-
-        event = AccountEvent(
-            event_type="trade",
-            account_id="test_001",
-            data={"code": "000001.SZ", "volume": 1000},
-        )
-        self.bus.publish(event)
-        self.assertEqual(len(self.received_events), 1)
-        self.assertEqual(self.received_events[0].event_type, "trade")
-
-    def test_all_subscription(self):
-        """测试 'all' 监听所有事件"""
-
-        def on_any(event: AccountEvent):
-            self.received_events.append(event)
-
-        self.bus.subscribe("all", on_any)
-
-        self.bus.publish(AccountEvent("trade", "t1", {}))
-        self.bus.publish(AccountEvent("nav_update", "t1", {}))
-        self.bus.publish(AccountEvent("stop_triggered", "t1", {}))
-
-        self.assertEqual(len(self.received_events), 3)
-
-    def test_cross_module_simulation(self):
-        """模拟跨模块事件通知"""
-        risk_events = []
-        exec_events = []
-        report_events = []
-
-        def risk_handler(e): risk_events.append(e)
-        def exec_handler(e): exec_events.append(e)
-        def report_handler(e): report_events.append(e)
-
-        self.bus.subscribe("nav_update", risk_handler)
-        self.bus.subscribe("nav_update", exec_handler)
-        self.bus.subscribe("nav_update", report_handler)
-
-        self.bus.publish(AccountEvent(
-            "nav_update", "acct_1",
-            {"nav": 1_050_000.0, "daily_pnl": 50000.0},
-            source_module="execution-engine",
-        ))
-
-        self.assertEqual(len(risk_events), 1)
-        self.assertEqual(len(exec_events), 1)
-        self.assertEqual(len(report_events), 1)
-
-
-class TestAccountMemoryEfficiency(unittest.TestCase):
-    """内存效率对比测试"""
-
-    def test_memory_comparison(self):
-        """对比 dataclass vs dict vs NamedTuple 的内存占用"""
-        import sys as _sys
-
-        # 模拟一个 50 只股票的持仓账户
-        stocks = [f"{i:06d}.SZ" for i in range(50)]
-
-        # dataclass 版本
-        t0 = time.perf_counter()
-        acct_dc = Account(account_id="mem_test")
-        for i, code in enumerate(stocks):
-            acct_dc.positions[code] = Position(
-                code=code, volume=1000 * (i + 1), avg_cost=10.0 + i * 0.5,
-                current_price=11.0 + i * 0.3,
+    def test_buy_multiple_stocks(self):
+        """测试买入多只股票"""
+        codes = ["000001.SZ", "000002.SZ", "000003.SZ"]
+        for code in codes:
+            order = self.account.submit_order(
+                code=code, side=OrderSide.BUY,
+                price=10.0, quantity=1000
             )
-        acct_dc.recalculate_nav({code: 11.0 + i * 0.3 for i, code in enumerate(stocks)})
-        t_dc = time.perf_counter() - t0
-        dc_size = _sys.getsizeof(acct_dc) + sum(
-            _sys.getsizeof(p) for p in acct_dc.positions.values()
-        )
+            self.account.fill_order(order, fill_price=10.0)
 
-        # dict 版本（类似现有实现）
-        t0 = time.perf_counter()
-        acct_dict: Dict[str, Any] = {
-            "nav": 1_000_000.0,
-            "available_cash": 1_000_000.0,
-            "positions": {},
-        }
-        for i, code in enumerate(stocks):
-            acct_dict["positions"][code] = {
-                "volume": 1000 * (i + 1),
-                "avg_cost": 10.0 + i * 0.5,
-                "current_price": 11.0 + i * 0.3,
-                "market_value": 1000 * (i + 1) * (11.0 + i * 0.3),
+        self.assertEqual(self.account.position_count, 3)
+
+    def test_update_market_prices(self):
+        """测试更新市值"""
+        order = self.account.submit_order(
+            code="000001.SZ", side=OrderSide.BUY,
+            price=10.0, quantity=2000
+        )
+        self.account.fill_order(order, fill_price=10.0)
+
+        # 价格上涨
+        self.account.update_market_prices({"000001.SZ": 12.0})
+        pos = self.account.get_position("000001.SZ")
+        self.assertEqual(pos.market_value, 24000.0)
+        self.assertGreater(pos.unrealized_pnl, 0)
+
+    def test_realized_pnl(self):
+        """测试已实现盈亏"""
+        order_buy = self.account.submit_order(
+            code="000001.SZ", side=OrderSide.BUY,
+            price=10.0, quantity=2000
+        )
+        self.account.fill_order(order_buy, fill_price=10.0)
+
+        # 卖出1000股，价格12
+        order_sell = self.account.submit_order(
+            code="000001.SZ", side=OrderSide.SELL,
+            price=12.0, quantity=1000
+        )
+        self.account.fill_order(order_sell, fill_price=12.0)
+
+        pos = self.account.get_position("000001.SZ")
+        self.assertEqual(pos.quantity, 1000)
+        # 已实现盈亏 = (12-10)*1000 = 2000，减去佣金和税费
+        self.assertGreater(pos.realized_pnl, 0)
+
+    def test_position_removal_on_zero(self):
+        """测试持仓清零后删除"""
+        order_buy = self.account.submit_order(
+            code="000001.SZ", side=OrderSide.BUY,
+            price=10.0, quantity=2000
+        )
+        self.account.fill_order(order_buy, fill_price=10.0)
+        self.assertIn("000001.SZ", self.account.positions)
+
+        order_sell = self.account.submit_order(
+            code="000001.SZ", side=OrderSide.SELL,
+            price=10.0, quantity=2000
+        )
+        self.account.fill_order(order_sell, fill_price=10.0)
+        self.assertNotIn("000001.SZ", self.account.positions)
+
+
+class TestRiskManagement(unittest.TestCase):
+    """风控测试"""
+
+    def setUp(self):
+        self.account = UnifiedAccount(
+            account_id="test_003",
+            init_cash=1_000_000.0,
+            risk_limits={
+                "max_position_pct": 0.1,
+                "max_daily_loss": 0.05,
+                "max_positions": 3,
             }
-        t_dict = time.perf_counter() - t0
-        dict_size = _sys.getsizeof(acct_dict) + sum(
-            _sys.getsizeof(p) for p in acct_dict["positions"].values()
         )
 
-        print(f"\n  内存占用对比 (50 只持仓):")
-        print(f"  QIFI dataclass: {dc_size:,} bytes, 构建耗时: {t_dc:.6f}s")
-        print(f"  字典方案:       {dict_size:,} bytes, 构建耗时: {t_dict:.6f}s")
-        print(f"  内存比率: dataclass/dict = {dc_size/dict_size:.2f}x")
-        print(f"  速度比率: dataclass/dict = {t_dc/t_dict:.2f}x (越接近1越相似)")
-
-    def test_serialization_speed(self):
-        """对比序列化速度"""
-        stocks = [f"{i:06d}.SZ" for i in range(50)]
-        acct = Account(account_id="ser_test")
-        for i, code in enumerate(stocks):
-            acct.positions[code] = Position(
-                code=code, volume=1000 * (i + 1), avg_cost=10.0 + i * 0.5,
-                current_price=11.0 + i * 0.3,
+    def test_position_limit(self):
+        """测试持仓数量限制"""
+        codes = [f"{i:06d}.SZ" for i in range(1, 6)]
+        for code in codes[:3]:
+            order = self.account.submit_order(
+                code=code, side=OrderSide.BUY,
+                price=10.0, quantity=1000
             )
+            self.account.fill_order(order, fill_price=10.0)
 
-        n_iterations = 1000
+        # 第4个应该被拒绝
+        order = self.account.submit_order(
+            code=codes[3], side=OrderSide.BUY,
+            price=10.0, quantity=1000
+        )
+        self.assertEqual(order.status, OrderStatus.REJECTED)
 
-        # JSON 序列化
-        t0 = time.perf_counter()
-        for _ in range(n_iterations):
-            _ = acct.to_json()
-        t_json = time.perf_counter() - t0
+    def test_single_position_limit(self):
+        """测试单票仓位限制"""
+        # 买入超过10%仓位
+        order = self.account.submit_order(
+            code="000001.SZ", side=OrderSide.BUY,
+            price=10.0, quantity=15000  # 150k > 10% of 1M
+        )
+        self.assertEqual(order.status, OrderStatus.REJECTED)
 
-        # dict 序列化
-        t0 = time.perf_counter()
-        for _ in range(n_iterations):
-            _ = acct.to_dict()
-        t_dict = time.perf_counter() - t0
+    def test_snapshot(self):
+        """测试账户快照"""
+        order = self.account.submit_order(
+            code="000001.SZ", side=OrderSide.BUY,
+            price=10.0, quantity=2000
+        )
+        self.account.fill_order(order, fill_price=10.0)
+        self.account.update_market_prices({"000001.SZ": 10.5})
 
-        print(f"\n  序列化速度对比 ({n_iterations} 次):")
-        print(f"  to_json(): {t_json:.4f}s ({t_json/n_iterations*1e6:.0f} us/次)")
-        print(f"  to_dict(): {t_dict:.4f}s ({t_dict/n_iterations*1e6:.0f} us/次)")
+        snapshot = self.account.take_snapshot()
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.position_count, 1)
+        self.assertIn("000001.SZ", snapshot.positions)
+        self.assertEqual(len(self.account.snapshots), 1)
+
+    def test_multiple_snapshots(self):
+        """测试多次快照"""
+        for i in range(10):
+            self.account.take_snapshot()
+        self.assertEqual(len(self.account.snapshots), 10)
 
 
-class TestAccountCrossModuleIntegration(unittest.TestCase):
-    """跨模块集成测试"""
+class TestSerialization(unittest.TestCase):
+    """序列化测试"""
 
-    def test_backtest_risk_exec_flow(self):
-        """模拟 回测 → 风控 → 执行 三模块协作流程"""
-        bus = AccountEventBus()
-        account = Account(account_id="integration_test")
-        account.reset_daily()
+    def setUp(self):
+        self.account = UnifiedAccount(account_id="test_004", init_cash=1_000_000.0)
+        order = self.account.submit_order(
+            code="000001.SZ", side=OrderSide.BUY,
+            price=10.0, quantity=2000
+        )
+        self.account.fill_order(order, fill_price=10.0)
 
-        # 风控模块收到的通知
-        risk_alerts = []
+    def test_to_dict(self):
+        """测试转换为字典"""
+        d = self.account.to_dict()
+        self.assertEqual(d["account_id"], "test_004")
+        self.assertIn("positions", d)
+        self.assertIn("trades", d)
+        self.assertIn("risk_limits", d)
 
-        def risk_checker(event: AccountEvent):
-            nav = event.data.get("nav", 0)
-            start_nav = event.data.get("start_of_day_nav", 1)
-            daily_loss = (nav - start_nav) / start_nav if start_nav > 0 else 0
-            if daily_loss < -0.03:
-                risk_alerts.append({
-                    "type": "stop_trading",
-                    "daily_loss": daily_loss,
-                    "nav": nav,
-                })
+    def test_to_json(self):
+        """测试转换为JSON"""
+        j = self.account.to_json()
+        self.assertIsInstance(j, str)
+        parsed = json.loads(j)
+        self.assertEqual(parsed["account_id"], "test_004")
 
-        bus.subscribe("nav_update", risk_checker)
+    def test_position_serialization(self):
+        """测试持仓序列化"""
+        pos = self.account.get_position("000001.SZ")
+        d = pos.to_dict()
+        self.assertEqual(d["code"], "000001.SZ")
+        self.assertEqual(d["quantity"], 2000)
+        self.assertIn("avg_cost", d)
+        self.assertIn("market_value", d)
 
-        # 模拟交易日循环
-        prices = {"000001.SZ": 10.0, "600000.SH": 8.0}
-        for day in range(5):
-            account.reset_daily()
 
-            # 买入
-            account.apply_trade(
-                Trade(trade_id=f"T{day}_1", order_id=f"O{day}_1",
-                      code="000001.SZ", side=OrderSide.BUY,
-                      price=prices["000001.SZ"], volume=1000,
-                      commission=2.5, trade_time=f"2024-01-{15+day:02d}"),
-                prices,
-            )
+class TestAccountIntegration(unittest.TestCase):
+    """集成测试：模拟完整回测流程"""
 
-            # 更新价格（模拟市场波动）
-            prices["000001.SZ"] *= (1 + np.random.normal(0.001, 0.01))
-            prices["600000.SH"] *= (1 + np.random.normal(0.001, 0.01))
-            account.recalculate_nav(prices)
-
-            # 发布净值更新事件
-            bus.publish(AccountEvent(
-                "nav_update", account.account_id,
-                {"nav": account.nav, "start_of_day_nav": account.start_of_day_nav},
-                source_module="backtest-engine",
-            ))
-
-        # 验证流程完整性
-        self.assertGreater(len(account.trade_history), 0)
-        self.assertTrue(account.nav > 0, "净值为正")
-        self.assertGreaterEqual(account.version, 5)
-
-        print(f"\n  模拟 5 日交易完成:")
-        print(f"  最终净值: {account.nav:.2f}")
-        print(f"  累计损益: {account.cumulative_pnl:.2f}")
-        print(f"  持仓数: {account.position_count}")
-        print(f"  成交笔数: {len(account.trade_history)}")
-        print(f"  风控告警: {len(risk_alerts)} 次")
-
-    def test_existing_account_compatibility(self):
-        """测试与现有 execution-monitor-engine 中 Account 的兼容性"""
-        if not os.path.exists(_ACCOUNT_STATE_PATH):
-            self.skipTest("无现有账户状态文件")
-
-        with open(_ACCOUNT_STATE_PATH, "r") as f:
-            existing_state = json.load(f)
-
-        # 将现有状态映射到统一模型
-        unified = Account(
-            account_id="migrated",
-            nav=existing_state.get("nav", 1_000_000.0),
-            available_cash=existing_state.get("available_cash", 1_000_000.0),
-            last_update=existing_state.get("updated_at", ""),
+    def test_full_backtest_simulation(self):
+        """模拟完整回测流程"""
+        np.random.seed(42)
+        account = UnifiedAccount(
+            account_id="backtest_001",
+            init_cash=1_000_000.0,
         )
 
-        for code, pos_data in existing_state.get("positions", {}).items():
-            unified.positions[code] = Position(
-                code=code,
-                volume=pos_data.get("volume", 0),
-                avg_cost=pos_data.get("avg_cost", 0.0),
-            )
+        n_dates = 100
+        codes = [f"{i:06d}.SZ" for i in range(1, 11)]
+        dates = pd.date_range('2023-01-01', periods=n_dates, freq='B')
 
-        unified.recalculate_nav({code: pos.avg_cost for code, pos in unified.positions.items()})
+        # 生成模拟价格
+        prices = {}
+        for code in codes:
+            base = np.random.uniform(5, 50)
+            prices[code] = base + np.cumsum(np.random.randn(n_dates) * 0.3)
 
-        print(f"\n  现有状态迁移结果:")
-        print(f"  净值: {existing_state.get('nav', 'N/A')} → {unified.nav:.2f}")
-        print(f"  持仓数: {len(existing_state.get('positions', {}))} → {unified.position_count}")
+        equity_curve = []
+
+        for t in range(n_dates):
+            dt = dates[t]
+
+            # 更新市值
+            current_prices = {code: prices[code][t] for code in codes}
+            account.update_market_prices(current_prices)
+
+            # 每10天调仓
+            if t % 10 == 0:
+                # 卖出所有
+                for code, pos in list(account.positions.items()):
+                    order = account.submit_order(
+                        code=code, side=OrderSide.SELL,
+                        price=current_prices[code], quantity=pos.quantity,
+                        reason="定期调仓"
+                    )
+                    account.fill_order(order, fill_price=current_prices[code])
+
+                # 买入前3只
+                selected = codes[:3]
+                budget = account.cash * 0.3 / len(selected)
+                for code in selected:
+                    price = current_prices[code]
+                    qty = int(budget / price / 100) * 100
+                    if qty > 0:
+                        order = account.submit_order(
+                            code=code, side=OrderSide.BUY,
+                            price=price, quantity=qty, reason="定期调仓"
+                        )
+                        account.fill_order(order, fill_price=price)
+
+            # 记录快照
+            snapshot = account.take_snapshot()
+            equity_curve.append(snapshot.total_equity)
+
+        # 验证
+        self.assertEqual(len(account.snapshots), n_dates)
+        self.assertGreater(len(account.trades), 0)
+
+        # 检查净值曲线变化
+        self.assertNotEqual(equity_curve[0], equity_curve[-1])
+
+        print(f"\n  初始权益: {equity_curve[0]:.2f}")
+        print(f"  最终权益: {equity_curve[-1]:.2f}")
+        print(f"  总收益: {(equity_curve[-1]/equity_curve[0] - 1)*100:.2f}%")
+        print(f"  总成交笔数: {len(account.trades)}")
 
 
-# ================================================================================
-# 运行入口
-# ================================================================================
-
-if __name__ == "__main__":
-    print("=" * 70)
-    print("统一账户模型（QIFI 风格）验证测试")
-    print("借鉴来源: QUANTAXIS QIFI 协议")
-    print("=" * 70)
+if __name__ == '__main__':
     unittest.main(verbosity=2)

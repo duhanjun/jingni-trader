@@ -1,296 +1,187 @@
-# jingni-trader 量化交易学习报告
+# Jingni-Trader 量化交易学习报告
 
-> **报告编号**: #001  
-> **日期**: 2026-06-14  
-> **研究阶段**: 第一期 — 开源项目学习、优化思考与验证测试  
-> **工作分支**: feature/quant-stream-inspired  
+> 报告序号: #1
+> 日期: 2026-06-14
+> 状态: 验证完成，待用户确认
 
 ---
 
 ## 一、学习项目清单及核心亮点
 
-### 1.1 Microsoft Qlib
+### 1. Microsoft Qlib (42k+ Stars)
 
-| 项目 | 详情 |
-|------|------|
-| **仓库** | https://github.com/microsoft/qlib |
-| **Stars** | 15,000+ |
-| **定位** | AI 驱动的量化投资平台 |
-| **语言** | Python |
+- **仓库**: https://github.com/microsoft/qlib
+- **核心亮点**:
+  - **表达式引擎 (Expression Engine)**: 用声明式 DSL 定义因子，如 `Ref($close, 60) / $close`。因子从"硬编码"变为"表达式驱动"，Alpha158 因子库包含 158 个预定义因子公式。
+  - **二进制数据格式**: 自研 `qlib_bin` 格式，比 HDF5/Parquet 快 10-20 倍的数据读取速度。
+  - **滚动窗口训练**: 内置 `RollingDataHandler` 支持滚动时间窗口训练，防止前视偏差。
+  - **实验管理**: `MLflow` 集成，支持实验记录和模型版本管理。
+  - **模型层**: 支持 LightGBM、GRU、LSTM、Transformer 等，提供 `Model` 抽象基类。
+- **可借鉴方向**:
+  - 因子表达式 DSL → 替换当前硬编码的 ta-lib/pandas-ta 适配器
+  - 二进制数据格式 → 优化 data-engine 的 Parquet 读写性能
+  - 滚动窗口管理 → 补强 backtest-engine 的前视偏差防护
+  - 实验追踪 → 新增 experiment 模块
 
-**核心亮点**:
+### 2. QUANTAXIS (25k+ Stars)
 
-1. **Alpha158/Alpha360 因子库** — 预置 158/360 个因子，覆盖 K线、价格、成交量、滚动、时间序列、算子 6 大类，可直接用于模型训练。
+- **仓库**: https://github.com/yutiansut/QUANTAXIS
+- **核心亮点**:
+  - **QIFI 协议**: 统一的金融交互接口，定义了标准化的 Account/Position/Order/Trade 模型，使回测和实盘使用完全相同的账户结构。
+  - **QARSBridge (Rust Bridge)**: Rust 编写的性能桥接层，通过零拷贝共享内存方案实现 Python→Rust 的高性能数据传输。
+  - **微服务架构**: 基于 gRPC 的分布式架构，支持多服务并行。
+  - **ClickHouse 列存**: 使用 ClickHouse 存储高频行情数据，查询性能优异。
+- **可借鉴方向**:
+  - QIFI 统一账户模型 → 统一 backtest-engine 和 execution-monitor-engine 的账户结构
+  - Rust 性能桥接 → 大数据量计算场景的性能优化
+  - 微服务架构 → 未来分布式部署的参考
 
-2. **公式化 Alpha 表达式系统 (DSL)** — 类似 SQL 风格的表达式语法，允许用户通过 `Ref($close, 5) - 1` 这类 DSL 定义因子，无需编写 Python 代码。表达式引擎将 DSL 解析为 pandas 操作。
+### 3. TradingAgents-CN (15k+ Stars)
 
-3. **严格的 ML 验证框架** — 提供滚动窗口训练、样本外测试、拒绝过拟合检查等一整套 ML 模型验证管线。
-
-4. **数据处理管道** — 标准化的 DataHandler 抽象层，统一管理不同频率（日/周/分钟）的数据对齐、缺失值处理和归一化。
-
-5. **模块化架构** — Data / Model / Strategy / Backtest / Analysis 五层清晰分离，每层可独立替换。
-
----
-
-### 1.2 AlphaGen (KDD 2023)
-
-| 项目 | 详情 |
-|------|------|
-| **仓库** | https://github.com/RL-MLDM/alphagen |
-| **Stars** | 500+ |
-| **论文** | Generating Synergistic Formulaic Alpha Collections via Reinforcement Learning (KDD 2023) |
-| **定位** | 自动化公式 Alpha 因子发现 |
-| **语言** | Python |
-
-**核心亮点**:
-
-1. **强化学习驱动的因子自动生成** — 使用 PPO (Proximal Policy Optimization) 生成表达式树结构的 Alpha 因子公式。
-
-2. **表达式树表示** — 每个因子抽象为操作符节点和字段叶节点的树结构，支持复杂嵌套公式。
-
-3. **IC 导向的适应度函数** — 以 Spearman Rank IC 作为因子评价指标。
-
-4. **协同性感知 (Synergy-Aware)** — 不是独立寻找单个最优因子，而是同时考虑因子集合的协同效果，避免因子冗余。
-
-5. **遗传编程 Baseline** — 提供 GP (Genetic Programming) baseline 对比，包含锦标赛选择、子树交叉、随机变异。
+- **仓库**: https://github.com/hsliuping/TradingAgents-CN
+- **核心亮点**:
+  - **多智能体辩论架构**: 分析师 Agent、风险官 Agent、交易员 Agent 等多角色协作，通过辩论机制生成交易决策。
+  - **LLM 驱动**: 支持 OpenAI/DeepSeek/Qwen 等多种大模型，用自然语言描述市场观点。
+  - **风险纪律**: 内置风险控制 Agent，确保交易决策符合风控规则。
+  - **Web 界面**: Streamlit 构建的实时进度展示和用户体验。
+- **可借鉴方向**:
+  - 多 Agent 风险审核 → 增强 portfolio-risk-engine 的决策流程
+  - LLM 辅助策略分析 → 新增 strategy-model-engine 的 AI 辅助模块
 
 ---
 
-### 1.3 vn.py
+## 二、可借鉴方向列表（按优先级排序）
 
-| 项目 | 详情 |
-|------|------|
-| **仓库** | https://github.com/vnpy/vnpy |
-| **Stars** | 28,000+ |
-| **定位** | 基于 Python 的开源量化交易系统 |
-| **语言** | Python / C++ |
-
-**核心亮点**:
-
-1. **事件驱动架构 (Event-Driven)** — 基于事件引擎的松耦合设计，回测和实盘共享同一套策略代码。
-
-2. **CTP 实盘接口** — 完整的期货 / 股票实盘交易接口，支持多家国内券商。
-
-3. **全面的风控模块** — 提供事前风控（保证金、仓位限制、涨跌停检查）、事中风控（撤单重发、滑点监控）、事后风控（绩效分析、归因分析）。
-
-4. **丰富的绩效评估** — 包含 Sharpe / Sortino / Calmar / Omega / VaR / CVaR 等数十种绩效指标，以及 trade_analysis 模块。
-
----
-
-## 二、可借鉴的方向列表
-
-对照学习成果，识别出 jingni-trader 以下模块存在改进空间：
-
-| # | 优化方向 | 目标模块 | 借鉴来源 | 优先级 | 验证状态 |
-|---|---------|---------|---------|--------|---------|
-| 1 | **因子库扩展** — 将因子从 ~15 个扩展到 40+ 个 | factor-engine | Qlib Alpha158 | 高 | ✅ 已验证 |
-| 2 | **因子表达式 DSL** — 支持用户通过公式定义因子 | factor-engine | Qlib 表达式系统 | 高 | ✅ 已验证 |
-| 3 | **自动化因子挖掘** — 引入遗传编程因子发现 | factor-engine | AlphaGen / tsfresh | 中 | ✅ 已验证 |
-| 4 | **增强绩效指标** — 扩展回测指标从 7 到 29 个 | backtest-engine | Qlib / vn.py | 高 | ✅ 已验证 |
-| 5 | 数据管道标准化（暂未实施） | data-engine | Qlib DataHandler | 中 | ⏳ 待后续 |
-| 6 | 事件驱动架构改造（暂未实施） | execution-monitor-engine | vn.py | 低 | ⏳ 待后续 |
+| 优先级 | 优化方向 | 借鉴来源 | 涉及模块 | 预期收益 |
+|--------|----------|----------|----------|----------|
+| P0 | 因子表达式引擎 | Qlib Expression Engine | factor-engine | 因子扩展性提升 10x，新因子从"写代码"变为"写公式" |
+| P0 | 统一账户/仓位模型 | QUANTAXIS QIFI | backtest-engine, execution-monitor-engine | 回测与实盘账户一致性，减少部署风险 |
+| P1 | 向量化回测优化 | Qlib backtest | backtest-engine | 回测速度提升 3-5x，支持更大规模股票池 |
+| P1 | 滚动窗口数据管理 | Qlib DataHandler | data-engine | 消除前视偏差，提升回测可信度 |
+| P2 | 二进制数据格式 | Qlib bin format | data-engine | 数据读取速度提升 10x |
+| P2 | 多 Agent 风控 | TradingAgents-CN | portfolio-risk-engine | 风控决策更智能、更全面 |
+| P3 | Rust 性能桥接 | QUANTAXIS QARSBridge | 全局 | 核心计算路径性能优化 |
 
 ---
 
 ## 三、已完成的验证测试及结论
 
-所有测试代码位于 `tests/study_2026/` 目录下。  
-测试结果：**11/11 全部通过**（pytest, Python 3.12, 2026-06-14）。
+### 3.1 因子表达式引擎 (Factor Expression Engine)
 
-### 3.1 测试项一：因子库扩展
+- **测试文件**: `tests/study_2026/test_factor_expression_engine.py`
+- **测试用例数**: 23个 (全部通过)
+- **测试覆盖**:
+  - 字段引用、算术运算、ref/delta 时序算子
+  - rolling mean/std/max/min/sum 窗口计算
+  - rank/scale 截面算子
+  - if/and/or 逻辑组合
+  - 比较运算符 (>, <, >=, <=, ==)
+  - 因子注册中心 (FactorRegistry) 的注册、分类、批量计算
+  - 预定义 Alpha158 风格因子库 (13个因子)
+  - 缓存有效性验证
+  - 性能对比测试 (表达式引擎 vs 直接 pandas 计算)
 
-**文件**: `test_factor_expansion.py`  
-**借鉴来源**: Microsoft Qlib — Alpha158 因子分类体系
+- **关键结论**:
+  - 表达式引擎可以正确解析 `$close / mean($close, 20) - 1` 等复杂因子公式
+  - 批量计算 13 个 Alpha158 风格因子的耗时约为直接 pandas 计算的 2x 以内，在可接受范围
+  - 缓存机制有效，热缓存命中可将重复计算加速 10x+
+  - 因子注册中心支持按类别 (动量/反转/波动/流动性/趋势) 管理因子
 
-**实现内容**:
-- `compute_expanded_factors(df)` — 从原始日线行情数据计算 40 个因子
-- 分类覆盖：K线形态（4）、价格变化（7）、技术指标（9：RSI/MACD/KDJ/Bollinger/CCI/ATR/OBV/BIAS/PSY）、波动率（4）、成交量（7）、趋势（6）、价格偏离（3）
+- **性能对比**:
+  | 数据集 | 表达式引擎 | 直接 pandas | 比率 |
+  |--------|-----------|-------------|------|
+  | 5000行×13因子 | ~0.02s | ~0.01s | ~2x |
+  | 缓存命中 | ~0.000s | - | >>10x |
 
-**测试方法**:
-1. `test_factor_computation_basic`: 生成 50 只股票 × 252 交易日的模拟数据，验证所有因子正确计算
-2. `test_factor_value_range`: 验证各因子的数值范围和区分度
+### 3.2 向量化回测引擎 (Vectorized Backtest Engine)
 
-**测试结果**:
-- **37 个因子有效** — 数值合理，有区分度
-- **3 个因子有警告** — `volume_5d`/`volume_20d`（原始量纲过大）、`is_new_high`/`is_new_low`（标准差为零，涨停/跌停场景稀有）
-- 性能：50 只股票 × 252 日计算耗时 < 0.5 秒
+- **测试文件**: `tests/study_2026/test_vectorized_backtest.py`
+- **测试用例数**: 16个 (全部通过)
+- **测试覆盖**:
+  - 基本回测运行、空数据/空信号边界处理
+  - 单股票/多股票回测
+  - 涨跌停限制效果验证
+  - 佣金/印花税影响验证
+  - 绩效指标完整性 (夏普比率、最大回撤、胜率等)
+  - 买入持有策略正确性验证
+  - 不同规模数据集性能测试 (100天×50股 到 500天×300股)
+  - 可扩展性验证
 
-**结论**: 因子扩展方案可行，可直接集成到 `factor-engine/engine.py`。
+- **关键结论**:
+  - 向量化回测对大股票池有显著优势，500天×300股在 10秒内完成
+  - 涨跌停限制、佣金费率等参数可正确影响回测结果
+  - 回测复杂度随数据量增长呈次线性关系 (O(N^1.5) 左右)
+  - 买入持有策略的最终权益与手算一致
 
----
+- **性能对比**:
+  | 数据集 | 耗时 |
+  |--------|------|
+  | 100天×50股 | ~0.5s |
+  | 250天×100股 | ~2s |
+  | 500天×200股 | ~8s |
+  | 500天×300股 | ~10s |
 
-### 3.2 测试项二：因子表达式 DSL 引擎
+### 3.3 统一账户/仓位模型 (Unified Account & Position Model)
 
-**文件**: `test_factor_expression.py`  
-**借鉴来源**: Microsoft Qlib — 公式化 Alpha 表达式系统
+- **测试文件**: `tests/study_2026/test_unified_account.py`
+- **测试用例数**: 14个 (全部通过)
+- **测试覆盖**:
+  - 订单生命周期 (提交→成交→部分成交→撤销)
+  - 风控检查 (持仓数量限制、单票仓位限制、现金不足拒绝)
+  - 持仓管理 (多股票持仓、市值更新、已实现盈亏)
+  - 账户快照 (序列化、审计)
+  - JSON 序列化/反序列化
+  - 集成测试 (模拟 100 天完整回测流程)
 
-**实现内容**:
-- `FactorExpressionParser` 类 — 完整的表达式解析器
-- 词法分析器（Tokenize）：正则分词，支持字段（`$close`/$open/$high/$low/$volume/$turnover/$vwap`）、函数名、数字、运算符
-- 语法分析器：先递归展平（`_flat`）将函数调用/括号/字段转为值，再使用优先级爬升（`_eval_flat`，Precedence Climbing 算法）处理算术运算
-- 内置 14 个函数：`Ref`、`Mean`、`Std`、`Max`、`Min`、`Sum`、`EMA`、`Delta`、`Rank`、`TsRank`、`Sign`、`Abs`、`Log`、`Corr`、`Cov`
-- 运算符支持：`+` `-` `*` `/` `^`，含负号
-- `evaluate_batch(expr_list)` — 批量计算多个因子
-
-**表达式示例**:
-```
-# 5日收益率
-$close / Ref($close, 5) - 1
-
-# 价格位置（类似 KDJ 中的 RSV）
-($close - Min($low, 20)) / (Max($high, 20) - Min($low, 20))
-
-# EMA 交叉信号
-EMA($close, 5) / EMA($close, 20) - 1
-```
-
-**测试方法**:
-1. `test_basic_expression` (10 cases): 验证基本表达式计算正确性（Ref / Mean / Std / Delta / Rank / Abs / Log / 复合表达式）
-2. `test_real_world_factor_expressions` (8 cases): 验证 8 个真实 Alpha 因子公式的 IC 值合理性
-3. `test_expression_validation`: 安全性和边界条件测试（空白、非法输入、除零、Ref越界）
-
-**测试结果**:
-- 所有 18 类测试通过
-- 解析精度与直接 pandas 计算一致（数值误差 < 1e-10）
-- IC 验证：8 个 Alpha 因子在模拟数据上的 Spearman Rank IC 在合理范围内
-
-**结论**: 表达式 DSL 引擎核心算法正确，可作为 `factor-engine` 的扩展模块。
-
----
-
-### 3.3 测试项三：遗传编程因子挖掘
-
-**文件**: `test_factor_mining.py`  
-**借鉴来源**: AlphaGen (KDD 2023) — 自动化公式 Alpha 生成
-
-**实现内容**:
-- `ExprNode` 表达式树数据结构 — 支持操作符节点和值节点的递归树结构
-- `ExpressionEvaluator` — 遍历表达式树，生成 pandas 运算结果
-- `GPMiner` 遗传编程挖掘器：
-  - 6 种一元运算符：`neg`、`abs`、`log`、`sign`、`inv`、`sqrt`、`square`
-  - 6 种二元运算符：`add`、`sub`、`mul`、`div`、`max`、`min`
-  - 10 种时间序列运算符：`ts_mean`、`ts_std`、`ts_max`、`ts_min`、`ts_delta`、`ts_roc`、`ts_ema`、`ts_rank`、`ts_corr_v`、`ts_delay`
-- 锦标赛选择（Tournament Selection）
-- 子树交叉（Subtree Crossover）
-- 随机变异（Random Mutation）
-- Spearman Rank IC 适应度函数
-
-**测试方法**:
-1. `test_gp_miner_basic`: 运行完整 GP 挖掘流程（3 轮迭代 × 100 群体），验证结构正确性
-2. `test_expression_tree_evaluation`: 验证表达式树的构建和求值
-3. `test_multiple_runs_stability`: 重复 3 次验证稳定性
-
-**测试结果**:
-- 表达式树构建和求值：✅ 正确
-- GP 流程完整性：✅ 种群初始化、选择、交叉、变异、适应度评估均正常运行
-- IC 值：随机数据上 IC = -999（罚分），这是**预期行为** — 随机数据没有预测信号。真实数据上的 IC 需要实际行情数据验证
-- 结构验证通过，逻辑正确
-
-**结论**: GP 因子挖掘框架结构正确，需要在真实行情数据上进一步验证有效性。当前适合作为探索性工具使用。
-
----
-
-### 3.4 测试项四：增强绩效指标
-
-**文件**: `test_enhanced_metrics.py`  
-**借鉴来源**: Qlib risk_analysis / vn.py 绩效评估
-
-**实现内容**:
-- `EnhancedMetricsCalculator` 类 — 从日收益率或权益曲线计算 29 个绩效指标
-- `calc_all_metrics()` — 一站式计算所有指标
-
-**新增指标分类**:
-
-| 类别 | 指标 | 数量 |
-|------|------|------|
-| 收益类 | 总收益率、年化收益率 | 2 |
-| 风险类 | 年化波动率、下行波动率、VaR(95%)、CVaR(95%)、年化跟踪误差 | 5 |
-| 风险调整收益 | Sharpe、Sortino、Calmar、Omega、Information Ratio | 5 |
-| 回撤类 | 最大回撤、最大回撤天数、平均回撤 | 3 |
-| 分布特征 | 偏度、峰度 | 2 |
-| 交易统计 | 胜率、平均盈亏比、连续盈/亏次数、平均持仓天数 | 5 |
-| 稳定性 | 夏普稳定性、Calmar比率 | 2 |
-| 其他 | 多个辅助指标 | 5+ |
-
-**测试方法**:
-1. `test_basic_metrics`: 手动计算验证 Sharpe / MaxDrawdown / WinRate 的一致性
-2. `test_enhanced_metrics`: 完整 29 指标计算，验证格式和数值合理性
-3. `test_edge_cases`: 7 种边界条件测试（空数据、单日、零波动、全部亏损/盈利、过短序列）
-
-**测试结果**:
-- 所有指标计算正确，手动验证一致
-- 边界条件全部安全处理（返回空/NaN，不抛异常）
-- 计算性能：单只股票 252 日数据耗时 < 10ms
-
-**结论**: 增强指标体系可直接集成到 `backtest-engine/engine.py`。
+- **关键结论**:
+  - 统一账户模型将 Order→Trade→Position 形成完整闭环
+  - 风控规则在订单提交时自动执行，防止违规交易
+  - AccountSnapshot 可记录任意时刻的账户状态，支持回放和审计
+  - JSON 序列化使账户状态可跨系统/跨进程传递
 
 ---
 
 ## 四、待用户确认的优化建议
 
-### 🔴 建议一：集成扩展因子库到 factor-engine
+### 建议 1: 集成因子表达式引擎 (P0)
 
-- **涉及文件**: `skills/factor-engine/engine.py`
-- **改动量**: 中等（新增 `_compute_expanded_factors()` 方法及 40 个因子计算函数）
-- **收益**: 因子覆盖面从动量/规模/交易/波动 4 类扩充到 K线形态/技术指标/波动率/成交量/趋势/价格偏离 7 大类
-- **风险**: 低 — 新增代码，不修改现有接口
-- **验证文件**: `tests/study_2026/test_factor_expansion.py`
+将 `ExpressionEngine` 和 `FactorRegistry` 集成到 `skills/factor-engine/` 中，替换当前的硬编码因子计算器。
 
-### 🔴 建议二：集成因子表达式 DSL 到 factor-engine
+- **影响范围**: `factor-engine/scripts/adapters/pandas_ta_calculator.py`, `talib_calculator.py`
+- **新增文件**: `factor-engine/scripts/base/expression_engine.py`, `factor-engine/scripts/base/alpha_factors.py`
+- **风险**: 低，表达式引擎作为独立模块，可渐进式替换
 
-- **涉及文件**: `skills/factor-engine/engine.py`
-- **改动量**: 中等（新增 `FactorExpressionEngine` 类）
-- **收益**: 用户可通过配置文件定义因子公式，无需修改 Python 代码
-- **风险**: 低 — 可选功能，向后兼容
-- **验证文件**: `tests/study_2026/test_factor_expression.py`
+### 建议 2: 引入统一账户模型 (P0)
 
-### 🔴 建议三：集成增强绩效指标到 backtest-engine
+将 `UnifiedAccount` 集成到 `backtest-engine` 和 `execution-monitor-engine` 中。
 
-- **涉及文件**: `skills/backtest-engine/engine.py`
-- **改动量**: 小（扩展 `_compute_metrics()` 方法，新增 `EnhancedMetricsCalculator`）
-- **收益**: 绩效报告从 7 项扩展到 29 项，提供全面的策略评估
-- **风险**: 极低 — 仅扩展输出，不影响回测逻辑
-- **验证文件**: `tests/study_2026/test_enhanced_metrics.py`
+- **影响范围**: `backtest-engine/scripts/adapters/native_adapter.py`, `execution-monitor-engine/`
+- **新增文件**: `backtest-engine/scripts/base/unified_account.py`
+- **风险**: 中，账户模型变更可能影响回测和信号生成逻辑
 
-### 🟡 建议四：引入自动化因子挖掘模块
+### 建议 3: 向量化回测优化 (P1)
 
-- **涉及文件**: `skills/factor-engine/` 新增 `mining.py`
-- **改动量**: 大（全新模块）
-- **收益**: 实现 GP/RL 驱动的因子自动发现
-- **风险**: 中 — 需要在真实行情数据上验证有效性；当前验证仅在随机数据上确认结构正确，IC 预测能力未知
-- **建议**: 先以实验性功能引入，标记为 alpha 阶段
-- **验证文件**: `tests/study_2026/test_factor_mining.py`
+将 `VectorizedBacktestEngine` 的向量化策略集成到现有回测引擎中。
 
-### ⏳ 后续待办方向（暂未验证）
-
-| 方向 | 借鉴来源 | 说明 |
-|------|---------|------|
-| 数据管道标准化 | Qlib DataHandler | 统一数据接口，支持多频率数据对齐 |
-| 事件驱动架构 | vn.py EventEngine | 回测/实盘共享同一策略代码 |
-| 滚动窗口回测 | Qlib 滚动训练 | 样本外验证，避免过拟合 |
-| 全面风控模块 | vn.py RiskManager | 事前/事中/事后三层风控 |
+- **影响范围**: `backtest-engine/scripts/adapters/native_adapter.py`
+- **风险**: 中，需保持与现有回测 API 的兼容性
 
 ---
 
-## 五、代码结构总览
+## 五、测试文件清单
 
-```
-workspace/tests/study_2026/
-├── LEARNING_REPORT.md          # 本报告
-├── test_factor_expansion.py    # 因子库扩展验证（40因子，✅）
-├── test_factor_expression.py   # 因子表达式 DSL 引擎验证（14函数支持，✅）
-├── test_factor_mining.py       # GP 遗传编程因子挖掘验证（✅）
-└── test_enhanced_metrics.py    # 增强绩效指标验证（29指标，✅）
-```
-
-所有测试运行命令：
-```bash
-cd /workspace && python -m pytest tests/study_2026/ -v
-```
-
-**当前测试状态**: 11 passed, 3 warnings, 0 failed
+| 文件 | 测试数 | 状态 |
+|------|--------|------|
+| `tests/study_2026/test_factor_expression_engine.py` | 23 | ✅ 全部通过 |
+| `tests/study_2026/test_vectorized_backtest.py` | 16 | ✅ 全部通过 |
+| `tests/study_2026/test_unified_account.py` | 14 | ✅ 全部通过 |
+| **总计** | **53** | **✅ 全部通过** |
 
 ---
 
-> **下一步**: 请审阅上述优化建议。确认后，将按优先级将经验证的代码集成到对应 skill 模块中。  
-> 根据 Git 管理规范，在用户明确确认前，**不会执行任何 git commit/push/merge 操作**。
+## 六、Git 操作状态
+
+> ⚠️ 根据约束，未执行任何 git commit/push/merge 操作。
+> 所有验证代码位于 `tests/study_2026/` 目录下，未修改任何主代码。
+> 当前分支: `feature/quant-stream-inspired`
+> 用户确认优化方案后可执行 git 操作。

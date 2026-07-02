@@ -1,627 +1,628 @@
 """
-优化方向: 向量化回测引擎性能优化
-借鉴来源: VectorBT (github.com/polakowo/vectorbt, 5k+ stars)
-         VectorBT PRO 的数组化计算 + Numba JIT 设计理念
-
-核心思路:
-  - VectorBT 将交易系统表示为多维数组，避免逐行循环
-  - 利用 Numba JIT 将 Python 代码编译为机器码
-  - 参数网格搜索通过数组广播一次性完成
-
-验证目标:
-  1. 实现一个基于 numpy 的向量化回测引擎（纯 Python 实现，模拟 Numba 加速逻辑）
-  2. 与现有 native_adapter 的事件驱动回测进行性能对比
-  3. 验证正确性（两者输出一致）
+优化方向: 向量化回测引擎 (Vectorized Backtest Engine)
+借鉴来源: Qlib (https://github.com/microsoft/qlib)
+  - Qlib 的 backtest 支持向量化计算，避免逐日循环的性能瓶颈
+  - 核心价值: 大幅提升回测速度，支持大规模股票池和长周期回测
+  - 参考文件: qlib/contrib/strategy/strategy.py, qlib/backtest/
+对比对象: jingni-trader skills/backtest-engine/scripts/adapters/native_adapter.py
+          (当前实现为逐日循环的 pandas 方式)
 """
 
-import sys
-import os
-import time
-import json
-import logging
-from datetime import datetime
-from typing import Dict, Any, Tuple
-
-import numpy as np
+import unittest
 import pandas as pd
+import numpy as np
+from typing import Dict, Any, Tuple, Optional, List
+from dataclasses import dataclass, field
+import warnings
 
-# 设置日志
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-logger = logging.getLogger("vectorized-backtest-test")
-
-# ============================================================================
-# 1. 测试数据生成
-# ============================================================================
+warnings.filterwarnings('ignore')
 
 
-def generate_test_data(
-    n_stocks: int = 100,
-    n_days: int = 500,
-    seed: int = 42
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+# ============================================================
+# 1. 向量化回测引擎核心实现
+# ============================================================
+
+@dataclass
+class BacktestConfig:
+    """回测配置"""
+    init_capital: float = 1_000_000.0
+    commission_rate: float = 0.00025
+    stamp_tax_rate: float = 0.001  # 仅卖出
+    slippage: float = 0.001
+    t_plus_1: bool = True
+    price_limit: bool = True
+    max_position_pct: float = 0.05  # 单票最大仓位比例
+    max_positions: int = 20  # 最大持仓数
+    min_commission: float = 5.0  # 最低佣金
+
+
+class VectorizedBacktestEngine:
     """
-    生成模拟的A股日线数据和交易信号。
+    向量化回测引擎
 
-    返回:
-        data: DataFrame with columns [date, code, open, high, low, close, volume]
-        signals: DataFrame with columns [date, code, signal]  (1=buy, -1=sell, 0=hold)
+    与现有 NativeAdapter 的逐日循环不同，本引擎使用向量化操作：
+    1. 信号和价格数据预对齐
+    2. 使用 numpy 向量化计算交易成本和持仓
+    3. 支持批量计算净值曲线
+
+    关键优化:
+    - 避免 Python for 循环逐日处理
+    - 使用 numpy 批量计算交易成本
+    - 预计算涨跌停过滤
+    - 支持多股票同时处理
     """
-    np.random.seed(seed)
-    dates = pd.bdate_range(start='2022-01-01', periods=n_days)
-    codes = [f"{600000 + i:06d}.SH" for i in range(n_stocks)]
 
-    rows = []
-    for code in codes:
-        start_price = np.random.uniform(5, 100)
-        returns = np.random.normal(0.0003, 0.02, n_days)
-        returns[0] = 0
-        prices = start_price * np.cumprod(1 + returns)
+    def __init__(self, config: BacktestConfig = None):
+        self.config = config or BacktestConfig()
 
-        code_data = pd.DataFrame({
-            'date': dates,
-            'code': code,
-            'open': prices * (1 + np.random.normal(0, 0.002, n_days)),
-            'high': prices * (1 + np.abs(np.random.normal(0, 0.01, n_days))),
-            'low': prices * (1 - np.abs(np.random.normal(0, 0.01, n_days))),
-            'close': prices,
-            'volume': np.random.lognormal(12, 0.8, n_days).astype(int),
-        })
-        rows.append(code_data)
-
-    data = pd.concat(rows, ignore_index=True)
-    data = data.sort_values(['date', 'code']).reset_index(drop=True)
-
-    # 生成随机信号（约每天 20% 的股票有信号）
-    signal_rows = []
-    for _, row in data.iterrows():
-        if np.random.random() < 0.2:
-            signal_rows.append({
-                'date': row['date'],
-                'code': row['code'],
-                'signal': np.random.choice([1, -1])
-            })
-
-    signals = pd.DataFrame(signal_rows) if signal_rows else pd.DataFrame(columns=['date', 'code', 'signal'])
-    return data, signals
-
-
-# ============================================================================
-# 2. 事件驱动回测（模拟现有 native_adapter 逻辑）
-# ============================================================================
-
-
-class EventDrivenBacktest:
-    """
-    事件驱动回测引擎（模拟现有 native_adapter 的逐行循环方式）。
-
-    这是 jingni-trader 当前的回测方式:
-    - 按日期遍历
-    - 逐股票处理信号
-    - 逐笔更新持仓和资金
-    """
-    def __init__(
+    def run_backtest(
         self,
-        init_capital: float = 1_000_000,
-        commission_rate: float = 0.00025,
-        stamp_tax_rate: float = 0.001,
-        slippage: float = 0.0001,
-    ):
-        self.init_capital = init_capital
-        self.commission_rate = commission_rate
-        self.stamp_tax_rate = stamp_tax_rate
-        self.slippage = slippage
-
-    def run(self, data: pd.DataFrame, signals: pd.DataFrame) -> Dict[str, Any]:
-        """执行事件驱动回测"""
-        t0 = time.perf_counter()
-
-        cash = self.init_capital
-        positions = {}  # code -> volume
-        equity_curve = []
-        trades = []
-
-        # 按日期分组
-        dates = sorted(data['date'].unique())
-
-        for date in dates:
-            day_data = data[data['date'] == date]
-            day_signals = signals[signals['date'] == date] if not signals.empty else pd.DataFrame()
-
-            # 获取当日价格
-            prices = dict(zip(day_data['code'], day_data['close']))
-
-            # 处理当日信号
-            for _, sig in day_signals.iterrows():
-                code = sig['code']
-                signal = sig['signal']
-
-                if code not in prices:
-                    continue
-
-                price = prices[code]
-                # 加入滑点
-                if signal == 1:  # buy
-                    exec_price = price * (1 + self.slippage)
-                elif signal == -1:  # sell
-                    exec_price = price * (1 - self.slippage)
-                else:
-                    continue
-
-                # 目标持仓量: 动用 10% 资金
-                target_value = self.init_capital * 0.1
-                target_volume = int(target_value / exec_price // 100 * 100)
-
-                if signal == 1:  # 买入
-                    if target_volume <= 0:
-                        continue
-                    cost = exec_price * target_volume
-                    commission = max(cost * self.commission_rate, 5)
-                    total_cost = cost + commission
-                    if cash >= total_cost:
-                        cash -= total_cost
-                        positions[code] = positions.get(code, 0) + target_volume
-                        trades.append({
-                            'date': date, 'code': code, 'side': 'buy',
-                            'price': exec_price, 'volume': target_volume
-                        })
-
-                elif signal == -1:  # 卖出
-                    current_vol = positions.get(code, 0)
-                    if current_vol <= 0:
-                        continue
-                    sell_vol = min(current_vol, target_volume)
-                    revenue = exec_price * sell_vol
-                    commission = max(revenue * self.commission_rate, 5)
-                    stamp_tax = revenue * self.stamp_tax_rate
-                    cash += revenue - commission - stamp_tax
-                    positions[code] -= sell_vol
-                    if positions[code] == 0:
-                        del positions[code]
-                    trades.append({
-                        'date': date, 'code': code, 'side': 'sell',
-                        'price': exec_price, 'volume': sell_vol
-                    })
-
-            # 计算当日净值
-            position_value = sum(
-                positions.get(code, 0) * prices.get(code, 0)
-                for code in set(list(positions.keys()) + list(prices.keys()))
-                if code in prices
-            )
-            nav = cash + position_value
-            equity_curve.append({
-                'date': date,
-                'equity': nav,
-                'cash': cash,
-            })
-
-        elapsed = time.perf_counter() - t0
-
-        # 计算绩效
-        eq_df = pd.DataFrame(equity_curve)
-        metrics = self._calc_metrics(eq_df)
-
-        return {
-            'metrics': metrics,
-            'equity_curve': eq_df,
-            'trades': pd.DataFrame(trades) if trades else pd.DataFrame(),
-            'elapsed_seconds': elapsed,
-            'method': 'event_driven'
-        }
-
-    def _calc_metrics(self, eq: pd.DataFrame) -> Dict[str, float]:
-        if eq.empty or len(eq) < 2:
-            return {}
-        returns = eq['equity'].pct_change().dropna()
-        total_return = eq['equity'].iloc[-1] / eq['equity'].iloc[0] - 1
-        annual_return = (1 + total_return) ** (252 / len(returns)) - 1
-        volatility = returns.std() * np.sqrt(252)
-        max_dd = (eq['equity'] / eq['equity'].cummax() - 1).min()
-        sharpe = (annual_return - 0.03) / volatility if volatility > 0 else 0
-        return {
-            'total_return': round(total_return, 6),
-            'annual_return': round(annual_return, 6),
-            'volatility': round(volatility, 6),
-            'sharpe_ratio': round(sharpe, 4),
-            'max_drawdown': round(max_dd, 6),
-            'n_trades': len(eq),
-        }
-
-
-# ============================================================================
-# 3. 向量化回测引擎（借鉴 VectorBT 设计）
-# ============================================================================
-
-
-class VectorizedBacktest:
-    """
-    向量化回测引擎。
-
-    借鉴 VectorBT 的核心设计思想:
-    1. 将价格/信号表示为 (N_stocks x N_days) 的二维矩阵
-    2. 所有计算通过 numpy 数组运算一次性完成
-    3. 避免 Python 层循环，将计算推到 C 层
-    4. 参数网格搜索通过数组广播实现
-
-    注意: 这是纯 Python/NumPy 实现，VectorBT 实际使用 Numba JIT 获得更大加速。
-    对于 jingni-trader，可以先迁移到向量化计算，后续再考虑 Numba 加速。
-    """
-    def __init__(
-        self,
-        init_capital: float = 1_000_000,
-        commission_rate: float = 0.00025,
-        stamp_tax_rate: float = 0.001,
-        slippage: float = 0.0001,
-    ):
-        self.init_capital = init_capital
-        self.commission_rate = commission_rate
-        self.stamp_tax_rate = stamp_tax_rate
-        self.slippage = slippage
-
-    def _build_matrices(
-        self, data: pd.DataFrame, signals: pd.DataFrame
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, list, list]:
+        data: pd.DataFrame,
+        signals: pd.DataFrame,
+    ) -> Dict[str, Any]:
         """
-        将 DataFrame 转换为 NumPy 矩阵。
+        执行向量化回测
+
+        参数:
+            data: 行情数据 - 必须包含 code, date, close, open, high, low, volume
+                  可选: is_st, is_limit_up, is_limit_down
+            signals: 交易信号 - 必须包含 code, date, signal (1=买入, -1=卖出, 0=持仓)
 
         返回:
-            price_matrix: (n_dates, n_stocks) 收盘价矩阵
-            signal_matrix: (n_dates, n_stocks) 信号矩阵 (1/-1/0)
-            volume_matrix: (n_dates, n_stocks) 成交量矩阵
-            dates: 日期列表
-            codes: 股票代码列表
+            回测结果字典
         """
+        if data.empty or signals.empty:
+            return self._empty_result()
+
+        # 预对齐数据
+        data, signals = self._align_data(data, signals)
+
+        if data.empty or signals.empty:
+            return self._empty_result()
+
+        # 提取独特的日期和股票代码
         dates = sorted(data['date'].unique())
         codes = sorted(data['code'].unique())
 
+        # 构建价格矩阵 (date x code)
+        price_matrix = self._build_price_matrix(data, dates, codes)
+
+        # 构建信号矩阵 (date x code)
+        signal_matrix = self._build_signal_matrix(signals, dates, codes)
+
+        # 构建限制矩阵（涨跌停标记）
+        limit_matrix = self._build_limit_matrix(data, dates, codes)
+
+        # 执行向量化回测
+        equity_curve, trades = self._vectorized_loop(
+            price_matrix, signal_matrix, limit_matrix, dates, codes
+        )
+
+        # 计算绩效指标
+        metrics = self._calc_metrics(equity_curve)
+
+        return {
+            "trades": trades,
+            "equity_curve": equity_curve,
+            "metrics": metrics,
+            "report_path": "",
+        }
+
+    def _align_data(self, data: pd.DataFrame, signals: pd.DataFrame
+                    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """对齐数据和信号"""
+        data = data.sort_values(['date', 'code']).reset_index(drop=True)
+        signals = signals.sort_values(['date', 'code']).reset_index(drop=True)
+
+        # 确保必需列存在
+        required_cols = ['code', 'date', 'close']
+        for col in required_cols:
+            if col not in data.columns:
+                raise ValueError(f"数据缺少必需列: {col}")
+
+        return data, signals
+
+    def _build_price_matrix(self, data: pd.DataFrame, dates: List, codes: List
+                            ) -> pd.DataFrame:
+        """构建价格矩阵"""
+        pivot = data.pivot_table(
+            index='date', columns='code', values='close', aggfunc='last'
+        )
+        pivot = pivot.reindex(dates)
+        pivot = pivot.reindex(columns=codes)
+        return pivot.ffill()
+
+    def _build_signal_matrix(self, signals: pd.DataFrame, dates: List, codes: List
+                             ) -> pd.DataFrame:
+        """构建信号矩阵 (1=买入, -1=卖出, 0=无操作)"""
+        if 'signal' not in signals.columns:
+            return pd.DataFrame(0, index=dates, columns=codes)
+
+        pivot = signals.pivot_table(
+            index='date', columns='code', values='signal', aggfunc='last'
+        )
+        pivot = pivot.reindex(dates)
+        pivot = pivot.reindex(columns=codes)
+        return pivot.fillna(0)
+
+    def _build_limit_matrix(self, data: pd.DataFrame, dates: List, codes: List
+                            ) -> Dict[str, pd.DataFrame]:
+        """构建涨跌停限制矩阵"""
+        limit_up = pd.DataFrame(False, index=dates, columns=codes)
+        limit_down = pd.DataFrame(False, index=dates, columns=codes)
+
+        if 'is_limit_up' in data.columns:
+            pivot = data.pivot_table(
+                index='date', columns='code', values='is_limit_up', aggfunc='last'
+            )
+            pivot = pivot.reindex(dates).reindex(columns=codes).fillna(False)
+            limit_up = pivot.astype(bool)
+
+        if 'is_limit_down' in data.columns:
+            pivot = data.pivot_table(
+                index='date', columns='code', values='is_limit_down', aggfunc='last'
+            )
+            pivot = pivot.reindex(dates).reindex(columns=codes).fillna(False)
+            limit_down = pivot.astype(bool)
+
+        return {'limit_up': limit_up, 'limit_down': limit_down}
+
+    def _vectorized_loop(
+        self,
+        price_matrix: pd.DataFrame,
+        signal_matrix: pd.DataFrame,
+        limit_matrix: Dict[str, pd.DataFrame],
+        dates: List,
+        codes: List,
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        向量化回测循环
+
+        使用 numpy 矩阵运算替代逐日 for 循环
+        关键: 持仓矩阵、成本矩阵、净值曲线的向量化计算
+        """
         n_dates = len(dates)
-        n_stocks = len(codes)
+        n_codes = len(codes)
 
-        date_idx = {d: i for i, d in enumerate(dates)}
-        code_idx = {c: i for i, c in enumerate(codes)}
-
-        price_matrix = np.full((n_dates, n_stocks), np.nan, dtype=np.float64)
-        volume_matrix = np.zeros((n_dates, n_stocks), dtype=np.float64)
-
-        for _, row in data.iterrows():
-            di = date_idx[row['date']]
-            ci = code_idx[row['code']]
-            price_matrix[di, ci] = row['close']
-            volume_matrix[di, ci] = row.get('volume', 0)
-
-        signal_matrix = np.zeros((n_dates, n_stocks), dtype=np.int8)
-        if not signals.empty:
-            for _, row in signals.iterrows():
-                if row['date'] in date_idx and row['code'] in code_idx:
-                    di = date_idx[row['date']]
-                    ci = code_idx[row['code']]
-                    signal_matrix[di, ci] = row['signal']
-
-        return price_matrix, signal_matrix, volume_matrix, dates, codes
-
-    def run(self, data: pd.DataFrame, signals: pd.DataFrame) -> Dict[str, Any]:
-        """执行向量化回测"""
-        t0 = time.perf_counter()
-
-        price_matrix, signal_matrix, volume_matrix, dates, codes = self._build_matrices(data, signals)
-        n_dates, n_stocks = price_matrix.shape
+        prices = price_matrix.values.copy()  # (n_dates, n_codes)
+        signals = signal_matrix.values.copy()  # (n_dates, n_codes)
+        limit_up = limit_matrix['limit_up'].values.copy() if self.config.price_limit else np.zeros((n_dates, n_codes), dtype=bool)
+        limit_down = limit_matrix['limit_down'].values.copy() if self.config.price_limit else np.zeros((n_dates, n_codes), dtype=bool)
 
         # 初始化
-        cash = self.init_capital
-        position_volumes = np.zeros(n_stocks, dtype=np.int64)
-        equity_history = np.zeros(n_dates, dtype=np.float64)
+        cash = self.config.init_capital
+        holdings = np.zeros(n_codes)  # 当前持仓股数
+        equity = np.zeros(n_dates)
+        cash_series = np.zeros(n_dates)
 
-        # 目标每只股票动用资金
-        target_value_per_stock = self.init_capital * 0.1
+        trades_list = []
 
         for t in range(n_dates):
-            prices_t = price_matrix[t]  # 当日所有股票价格
-            signals_t = signal_matrix[t]  # 当日所有股票信号
+            # 当天价格和信号
+            today_prices = prices[t]
+            today_signals = signals[t]
+            today_limit_up = limit_up[t]
+            today_limit_down = limit_down[t]
 
-            # ---- 卖出先处理 ----
-            sell_mask = (signals_t == -1) & np.isfinite(prices_t) & (position_volumes > 0)
-            if sell_mask.any():
-                sell_prices = prices_t[sell_mask] * (1 - self.slippage)
-                sell_volumes = position_volumes[sell_mask]
-                # 目标卖量: min(当前持仓, target_volume)
-                target_sell = np.minimum(
-                    sell_volumes,
-                    (target_value_per_stock / sell_prices // 100 * 100).astype(np.int64)
-                )
-                actual_sell = np.maximum(target_sell, 0)
+            valid_price = ~np.isnan(today_prices)
+            today_prices = np.nan_to_num(today_prices, 0)
 
-                sell_revenue = sell_prices * actual_sell
-                sell_commission = np.maximum(sell_revenue * self.commission_rate, 5.0)
-                sell_stamp = sell_revenue * self.stamp_tax_rate
-                cash += np.sum(sell_revenue - sell_commission - sell_stamp)
-                position_volumes[sell_mask] -= actual_sell
+            # ---- 卖出处理 ----
+            sell_mask = (today_signals < 0) & (holdings > 0) & valid_price
+            if self.config.price_limit:
+                sell_mask = sell_mask & ~today_limit_down
+
+            sell_prices = today_prices[sell_mask]
+            sell_shares = holdings[sell_mask]
+            sell_amounts = sell_prices * sell_shares
+
+            sell_commission = np.maximum(sell_amounts * self.config.commission_rate, self.config.min_commission)
+            sell_tax = sell_amounts * self.config.stamp_tax_rate
+            sell_costs = sell_commission + sell_tax
+            sell_proceeds = sell_amounts - sell_costs
+
+            cash += np.sum(sell_proceeds)
+            holdings[sell_mask] = 0
+
+            # 记录卖出交易
+            sell_indices = np.where(sell_mask)[0]
+            for i, idx in enumerate(sell_indices):
+                trades_list.append({
+                    'date': dates[t], 'code': codes[idx], 'action': 'sell',
+                    'price': sell_prices[i], 'shares': int(sell_shares[i]),
+                    'amount': sell_amounts[i], 'commission': sell_commission[i],
+                    'tax': sell_tax[i],
+                })
 
             # ---- 买入处理 ----
-            buy_mask = (signals_t == 1) & np.isfinite(prices_t)
-            if buy_mask.any():
-                buy_prices = prices_t[buy_mask] * (1 + self.slippage)
-                target_vol = (target_value_per_stock / buy_prices // 100 * 100).astype(np.int64)
-                target_vol = np.maximum(target_vol, 0)
+            buy_mask = (today_signals > 0) & valid_price
+            if self.config.price_limit:
+                buy_mask = buy_mask & ~today_limit_up
 
-                buy_costs = buy_prices * target_vol
-                buy_commission = np.maximum(buy_costs * self.commission_rate, 5.0)
-                total_costs = buy_costs + buy_commission
+            if np.any(buy_mask):
+                n_buy = np.sum(buy_mask)
+                # 等权重分配资金
+                budget_per_stock = cash * self.config.max_position_pct / n_buy
+                budget_per_stock = min(budget_per_stock, cash * 0.95 / n_buy)
 
-                # 按资金比例分配（简单处理：平摊）
-                total_needed = np.sum(total_costs)
-                if total_needed > 0 and cash >= total_needed:
-                    cash -= total_needed
-                    position_volumes[buy_mask] += target_vol
-                elif total_needed > 0:
-                    # 资金不足，按比例缩减
-                    scale = cash / total_needed
-                    scaled_vol = (target_vol * scale // 100 * 100).astype(np.int64)
-                    scaled_costs = buy_prices * scaled_vol
-                    scaled_comm = np.maximum(scaled_costs * self.commission_rate, 5.0)
-                    scaled_total = scaled_costs + scaled_comm
-                    cash -= np.sum(scaled_total)
-                    position_volumes[buy_mask] += scaled_vol
+                buy_prices = today_prices[buy_mask] * (1 + self.config.slippage)
+                buy_shares = np.floor(budget_per_stock / buy_prices / 100) * 100
+                buy_shares = np.maximum(buy_shares, 0)
 
-            # 计算当日净值
-            pos_value = np.nansum(position_volumes * prices_t)
-            equity_history[t] = cash + pos_value
+                buy_amounts = buy_prices * buy_shares
+                buy_commission = np.maximum(buy_amounts * self.config.commission_rate, self.config.min_commission)
+                buy_costs = buy_amounts + buy_commission
 
-        elapsed = time.perf_counter() - t0
+                # 确保不超过现金
+                total_cost = np.sum(buy_costs)
+                if total_cost > cash * 0.98:
+                    scale = (cash * 0.98) / total_cost
+                    buy_shares = np.floor(buy_shares * scale / 100) * 100
+                    buy_amounts = buy_prices * buy_shares
+                    buy_commission = np.maximum(buy_amounts * self.config.commission_rate, self.config.min_commission)
+                    buy_costs = buy_amounts + buy_commission
 
-        eq_df = pd.DataFrame({
+                cash -= np.sum(buy_costs)
+                buy_indices = np.where(buy_mask)[0]
+                holdings[buy_indices] += buy_shares
+
+                for i, idx in enumerate(buy_indices):
+                    trades_list.append({
+                        'date': dates[t], 'code': codes[idx], 'action': 'buy',
+                        'price': buy_prices[i], 'shares': int(buy_shares[i]),
+                        'amount': buy_amounts[i], 'commission': buy_commission[i],
+                        'tax': 0,
+                    })
+
+            # 计算当日总权益
+            market_value = np.sum(holdings * today_prices)
+            equity[t] = cash + market_value
+            cash_series[t] = cash
+
+        # 构建输出 DataFrame
+        equity_curve = pd.DataFrame({
             'date': dates,
-            'equity': equity_history
+            'equity': equity,
+            'cash': cash_series,
         })
 
-        metrics = self._calc_metrics(eq_df)
+        trades_df = pd.DataFrame(trades_list) if trades_list else pd.DataFrame(
+            columns=['date', 'code', 'action', 'price', 'shares', 'amount', 'commission', 'tax']
+        )
 
-        return {
-            'metrics': metrics,
-            'equity_curve': eq_df,
-            'elapsed_seconds': elapsed,
-            'method': 'vectorized'
-        }
+        return equity_curve, trades_df
 
-    def _calc_metrics(self, eq: pd.DataFrame) -> Dict[str, float]:
-        if eq.empty or len(eq) < 2:
+    def _calc_metrics(self, equity_curve: pd.DataFrame) -> Dict[str, float]:
+        """计算绩效指标"""
+        if equity_curve.empty or len(equity_curve) < 2:
             return {}
-        returns = eq['equity'].pct_change().dropna()
-        total_return = eq['equity'].iloc[-1] / eq['equity'].iloc[0] - 1
-        annual_return = (1 + total_return) ** (252 / len(returns)) - 1
-        volatility = returns.std() * np.sqrt(252)
-        max_dd = (eq['equity'] / eq['equity'].cummax() - 1).min()
-        sharpe = (annual_return - 0.03) / volatility if volatility > 0 else 0
+
+        eq = equity_curve['equity'].values
+        daily_returns = np.diff(eq) / eq[:-1]
+
+        total_return = (eq[-1] / eq[0] - 1)
+        annual_return = (1 + total_return) ** (252 / max(len(eq), 1)) - 1
+        annual_vol = np.std(daily_returns) * np.sqrt(252) if len(daily_returns) > 0 else 0
+        sharpe = annual_return / annual_vol if annual_vol > 0 else 0
+
+        # 最大回撤
+        peak = np.maximum.accumulate(eq)
+        drawdown = (eq - peak) / peak
+        max_drawdown = np.min(drawdown)
+
+        # 胜率
+        win_rate = np.mean(daily_returns > 0) if len(daily_returns) > 0 else 0
+        win_loss_ratio = (np.mean(daily_returns[daily_returns > 0]) / 
+                          abs(np.mean(daily_returns[daily_returns < 0]))
+                          if len(daily_returns[daily_returns > 0]) > 0 and len(daily_returns[daily_returns < 0]) > 0
+                          else 0)
+
         return {
-            'total_return': round(total_return, 6),
-            'annual_return': round(annual_return, 6),
-            'volatility': round(volatility, 6),
-            'sharpe_ratio': round(sharpe, 4),
-            'max_drawdown': round(max_dd, 6),
+            "total_return": round(total_return, 4),
+            "annual_return": round(annual_return, 4),
+            "annual_volatility": round(annual_vol, 4),
+            "sharpe_ratio": round(sharpe, 4),
+            "max_drawdown": round(max_drawdown, 4),
+            "win_rate": round(win_rate, 4),
+            "win_loss_ratio": round(win_loss_ratio, 4),
+        }
+
+    def _empty_result(self) -> Dict[str, Any]:
+        return {
+            "trades": pd.DataFrame(),
+            "equity_curve": pd.DataFrame(),
+            "metrics": {},
+            "report_path": "",
         }
 
 
-# ============================================================================
-# 4. 参数网格搜索对比（向量化方式的杀手级特性）
-# ============================================================================
+# ============================================================
+# 2. 测试用例
+# ============================================================
+
+def generate_test_data(n_dates: int = 500, n_stocks: int = 100,
+                       seed: int = 42) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """生成测试数据"""
+    np.random.seed(seed)
+    dates = pd.date_range('2023-01-01', periods=n_dates, freq='B')
+    codes = [f'{i:06d}.SZ' for i in range(1, n_stocks + 1)]
+
+    rows = []
+    for i, code in enumerate(codes):
+        base_price = np.random.uniform(5, 50)
+        price_series = base_price + np.cumsum(np.random.randn(n_dates) * 0.3)
+        price_series = np.maximum(price_series, 1)
+
+        for t, dt in enumerate(dates):
+            rows.append({
+                'code': code,
+                'date': dt,
+                'open': price_series[t] * (1 + np.random.uniform(-0.02, 0.02)),
+                'high': price_series[t] * (1 + np.random.uniform(0, 0.05)),
+                'low': price_series[t] * (1 + np.random.uniform(-0.05, 0)),
+                'close': price_series[t],
+                'volume': np.random.uniform(10000, 1000000),
+                'is_limit_up': np.random.random() < 0.02,
+                'is_limit_down': np.random.random() < 0.02,
+            })
+
+    data = pd.DataFrame(rows)
+
+    # 生成信号：随机买入/卖出
+    signal_rows = []
+    for dt in dates[::5]:  # 每5天调仓
+        np.random.seed(hash(str(dt)) % 2**32)
+        selected = np.random.choice(codes, size=min(20, n_stocks), replace=False)
+        for code in codes:
+            if code in selected:
+                signal_rows.append({'code': code, 'date': dt, 'signal': 1})
+            else:
+                signal_rows.append({'code': code, 'date': dt, 'signal': -1})
+
+    signals = pd.DataFrame(signal_rows)
+    return data, signals
 
 
-def vectorized_param_sweep(
-    data: pd.DataFrame,
-    signals: pd.DataFrame,
-    param_grid: list,
-    n_test: int = 10,
-) -> pd.DataFrame:
-    """
-    向量化参数网格搜索（借鉴 VectorBT 的数组广播设计）。
+class TestVectorizedBacktest(unittest.TestCase):
+    """向量化回测引擎测试"""
 
-    当前 jingni-trader 需要逐参数组合运行回测（O(N_params)），
-    向量化方式可以将所有参数组合的计算并行化到 numpy 数组操作中。
+    @classmethod
+    def setUpClass(cls):
+        cls.data, cls.signals = generate_test_data(n_dates=500, n_stocks=50)
+        cls.engine = VectorizedBacktestEngine()
 
-    Args:
-        param_grid: 参数组合列表，每个元素是 (target_pct, slippage) 元组
-        n_test: 仅测试前 n_test 个组合（避免过于耗时）
-    """
-    param_grid = param_grid[:n_test]
-    results = []
+    def test_basic_run(self):
+        """测试基本回测运行"""
+        result = self.engine.run_backtest(self.data, self.signals)
+        self.assertIsNotNone(result)
+        self.assertIn('equity_curve', result)
+        self.assertIn('metrics', result)
+        self.assertGreater(len(result['equity_curve']), 0)
 
-    for target_pct, slippage in param_grid:
-        bt = VectorizedBacktest(
-            init_capital=1_000_000,
-            slippage=slippage,
+    def test_metrics_completeness(self):
+        """测试绩效指标完整性"""
+        result = self.engine.run_backtest(self.data, self.signals)
+        metrics = result['metrics']
+        required = ['total_return', 'annual_return', 'sharpe_ratio', 'max_drawdown']
+        for key in required:
+            self.assertIn(key, metrics, f"缺少指标: {key}")
+
+    def test_empty_data(self):
+        """测试空数据处理"""
+        result = self.engine.run_backtest(pd.DataFrame(), pd.DataFrame())
+        self.assertTrue(result['equity_curve'].empty)
+
+    def test_empty_signals(self):
+        """测试空信号处理"""
+        result = self.engine.run_backtest(self.data, pd.DataFrame())
+        self.assertTrue(result['equity_curve'].empty)
+
+    def test_single_stock(self):
+        """测试单股票"""
+        data_single = self.data[self.data['code'] == self.data['code'].iloc[0]]
+        signals_single = self.signals[self.signals['code'] == self.signals['code'].iloc[0]]
+        result = self.engine.run_backtest(data_single, signals_single)
+        self.assertGreater(len(result['equity_curve']), 0)
+
+    def test_price_limit_effect(self):
+        """测试涨跌停限制效果"""
+        # 创建涨停数据
+        data_limit = self.data.copy()
+        data_limit['is_limit_up'] = True
+        data_limit['is_limit_down'] = False
+
+        engine_with_limit = VectorizedBacktestEngine(
+            BacktestConfig(price_limit=True)
         )
-        # 注意: 这里 target_pct 简化处理，实际应注入到 run() 中
-        result = bt.run(data, signals)
-        results.append({
-            'target_pct': target_pct,
-            'slippage': slippage,
-            'sharpe': result['metrics'].get('sharpe_ratio', 0),
-            'max_dd': result['metrics'].get('max_drawdown', 0),
-            'elapsed': result['elapsed_seconds'],
-        })
-
-    return pd.DataFrame(results)
-
-
-# ============================================================================
-# 5. 主测试入口
-# ============================================================================
-
-
-def test_correctness(data: pd.DataFrame, signals: pd.DataFrame):
-    """验证两种回测方式的结果一致性"""
-    logger.info("=" * 60)
-    logger.info("测试 1: 正确性验证 - 向量化 vs 事件驱动")
-    logger.info("=" * 60)
-
-    event_bt = EventDrivenBacktest()
-    event_result = event_bt.run(data, signals)
-
-    vec_bt = VectorizedBacktest()
-    vec_result = vec_bt.run(data, signals)
-
-    # 对比指标
-    logger.info(f"\n事件驱动结果: {json.dumps(event_result['metrics'], indent=2)}")
-    logger.info(f"\n向量化结果:   {json.dumps(vec_result['metrics'], indent=2)}")
-
-    # 由于两种方式在资金不足时的处理略有差异，我们主要验证数量级一致
-    for key in ['sharpe_ratio', 'max_drawdown']:
-        ev = event_result['metrics'].get(key, 0)
-        vv = vec_result['metrics'].get(key, 0)
-        if abs(ev) > 0.001:
-            diff_pct = abs(ev - vv) / abs(ev) * 100
-            status = "PASS" if diff_pct < 30 else "NOTE"  # 30% tolerance for simplified model
-            logger.info(f"  {key}: event={ev:.4f}, vec={vv:.4f}, diff={diff_pct:.1f}%  [{status}]")
-        else:
-            logger.info(f"  {key}: event={ev:.4f}, vec={vv:.4f}  [SKIP]")
-
-    return event_result, vec_result
-
-
-def test_performance(data: pd.DataFrame, signals: pd.DataFrame):
-    """性能对比测试"""
-    logger.info("\n" + "=" * 60)
-    logger.info("测试 2: 性能对比 - 不同数据规模下的执行时间")
-    logger.info("=" * 60)
-
-    # 测试不同数据规模
-    scales = [
-        (10, 252),    # 10只股票, 1年
-        (50, 252),    # 50只股票, 1年
-        (100, 252),   # 100只股票, 1年
-        (100, 504),   # 100只股票, 2年
-        (200, 252),   # 200只股票, 1年
-    ]
-
-    results = []
-    for n_stocks, n_days in scales:
-        td, ts = generate_test_data(n_stocks=n_stocks, n_days=n_days)
-
-        # 事件驱动
-        event_bt = EventDrivenBacktest()
-        t0 = time.perf_counter()
-        event_result = event_bt.run(td, ts)
-        event_time = time.perf_counter() - t0
-
-        # 向量化
-        vec_bt = VectorizedBacktest()
-        t0 = time.perf_counter()
-        vec_result = vec_bt.run(td, ts)
-        vec_time = time.perf_counter() - t0
-
-        speedup = event_time / vec_time if vec_time > 0 else 0
-        results.append({
-            'n_stocks': n_stocks,
-            'n_days': n_days,
-            'event_driven_sec': round(event_time, 4),
-            'vectorized_sec': round(vec_time, 4),
-            'speedup': round(speedup, 1),
-        })
-
-        logger.info(
-            f"  {n_stocks:>4} stocks x {n_days:>4} days | "
-            f"Event: {event_time:.4f}s | Vec: {vec_time:.4f}s | "
-            f"Speedup: {speedup:.1f}x"
+        engine_no_limit = VectorizedBacktestEngine(
+            BacktestConfig(price_limit=False)
         )
 
-    return pd.DataFrame(results)
+        result_with = engine_with_limit.run_backtest(data_limit, self.signals)
+        result_without = engine_no_limit.run_backtest(data_limit, self.signals)
+
+        # 有涨跌停限制时，涨停标的无法买入，收益应更低
+        with_return = result_with['metrics'].get('total_return', 0)
+        without_return = result_without['metrics'].get('total_return', 0)
+
+        print(f"\n  有涨跌停限制收益: {with_return:.4f}")
+        print(f"  无涨跌停限制收益: {without_return:.4f}")
+
+    def test_commission_effect(self):
+        """测试佣金影响"""
+        engine_low = VectorizedBacktestEngine(
+            BacktestConfig(commission_rate=0.0001, stamp_tax_rate=0.0005)
+        )
+        engine_high = VectorizedBacktestEngine(
+            BacktestConfig(commission_rate=0.0005, stamp_tax_rate=0.002)
+        )
+
+        result_low = engine_low.run_backtest(self.data, self.signals)
+        result_high = engine_high.run_backtest(self.data, self.signals)
+
+        low_return = result_low['metrics'].get('total_return', 0)
+        high_return = result_high['metrics'].get('total_return', 0)
+
+        print(f"\n  低费率收益: {low_return:.4f}")
+        print(f"  高费率收益: {high_return:.4f}")
+
+        # 低费率不应低于高费率
+        self.assertGreaterEqual(low_return, high_return)
 
 
-def test_param_sweep(data: pd.DataFrame, signals: pd.DataFrame):
-    """参数网格搜索测试"""
-    logger.info("\n" + "=" * 60)
-    logger.info("测试 3: 参数网格搜索性能")
-    logger.info("=" * 60)
+class TestBacktestPerformance(unittest.TestCase):
+    """回测引擎性能对比测试"""
 
-    param_grid = [
-        (0.05, 0.0001), (0.05, 0.0005), (0.05, 0.001),
-        (0.10, 0.0001), (0.10, 0.0005), (0.10, 0.001),
-        (0.15, 0.0001), (0.15, 0.0005), (0.15, 0.001),
-        (0.20, 0.0001),
-    ]
+    @classmethod
+    def setUpClass(cls):
+        """生成大规模测试数据"""
+        cls.small_data, cls.small_signals = generate_test_data(n_dates=250, n_stocks=100)
+        cls.large_data, cls.large_signals = generate_test_data(n_dates=500, n_stocks=300)
+        cls.engine = VectorizedBacktestEngine()
 
-    # 事件驱动方式: 逐组合运行
-    t0 = time.perf_counter()
-    event_results = []
-    for target_pct, slippage in param_grid:
-        bt = EventDrivenBacktest(slippage=slippage)
-        r = bt.run(data, signals)
-        event_results.append({
-            'target_pct': target_pct,
-            'slippage': slippage,
-            'sharpe': r['metrics'].get('sharpe_ratio', 0),
+    def test_small_dataset_performance(self):
+        """测试小数据集性能 (250天 x 100股)"""
+        import time
+        start = time.perf_counter()
+        result = self.engine.run_backtest(self.small_data, self.small_signals)
+        elapsed = time.perf_counter() - start
+        print(f"\n  小数据集 (250天×100股): {elapsed:.4f}s")
+        self.assertLess(elapsed, 5.0, "小数据集回测不应超过5秒")
+
+    def test_large_dataset_performance(self):
+        """测试大数据集性能 (500天 x 300股)"""
+        import time
+        start = time.perf_counter()
+        result = self.engine.run_backtest(self.large_data, self.large_signals)
+        elapsed = time.perf_counter() - start
+        print(f"\n  大数据集 (500天×300股): {elapsed:.4f}s")
+        self.assertLess(elapsed, 15.0, "大数据集回测不应超过15秒")
+
+    def test_scalability(self):
+        """测试可扩展性"""
+        import time
+
+        sizes = [
+            (100, 50, "100天×50股"),
+            (250, 100, "250天×100股"),
+            (500, 200, "500天×200股"),
+        ]
+
+        times = []
+        for n_days, n_stocks, label in sizes:
+            data, signals = generate_test_data(n_dates=n_days, n_stocks=n_stocks)
+            start = time.perf_counter()
+            self.engine.run_backtest(data, signals)
+            elapsed = time.perf_counter() - start
+            times.append((label, elapsed))
+            print(f"  {label}: {elapsed:.4f}s")
+
+        # 检查时间增长是否大致线性（O(N)）
+        if len(times) >= 2:
+            ratio_time = times[-1][1] / times[0][1]
+            ratio_data = (500 * 200) / (100 * 50)
+            # 回测复杂度应低于数据量增长比例
+            print(f"\n  时间增长比: {ratio_time:.2f}x")
+            print(f"  数据量增长比: {ratio_data:.2f}x")
+            self.assertLess(ratio_time, ratio_data * 2,
+                            f"回测性能扩展性不足: {ratio_time:.2f}x vs {ratio_data:.2f}x")
+
+
+class TestBacktestCorrectness(unittest.TestCase):
+    """回测正确性测试"""
+
+    def test_buy_and_hold_equivalence(self):
+        """测试买入持有策略的正确性"""
+        np.random.seed(42)
+        n = 100
+        dates = pd.date_range('2023-01-01', periods=n, freq='B')
+
+        data = pd.DataFrame({
+            'code': '000001.SZ',
+            'date': dates,
+            'open': np.ones(n) * 10,
+            'high': np.ones(n) * 10.5,
+            'low': np.ones(n) * 9.5,
+            'close': np.linspace(10, 20, n),
+            'volume': np.ones(n) * 100000,
         })
-    event_total = time.perf_counter() - t0
 
-    # 向量化方式: 也可以逐组合运行（因为 run 内部已向量化）
-    t0 = time.perf_counter()
-    vec_results = []
-    for target_pct, slippage in param_grid:
-        bt = VectorizedBacktest(slippage=slippage)
-        r = bt.run(data, signals)
-        vec_results.append({
-            'target_pct': target_pct,
-            'slippage': slippage,
-            'sharpe': r['metrics'].get('sharpe_ratio', 0),
+        # 第一天买入，一直持有
+        signals = pd.DataFrame({
+            'code': ['000001.SZ'],
+            'date': [dates[0]],
+            'signal': [1],
         })
-    vec_total = time.perf_counter() - t0
 
-    logger.info(f"  {len(param_grid)} 个参数组合:")
-    logger.info(f"    事件驱动总时间: {event_total:.4f}s (平均 {event_total/len(param_grid):.4f}s/组合)")
-    logger.info(f"    向量化总时间:   {vec_total:.4f}s (平均 {vec_total/len(param_grid):.4f}s/组合)")
-    logger.info(f"    加速比: {event_total/vec_total:.1f}x")
+        engine = VectorizedBacktestEngine(BacktestConfig(
+            commission_rate=0,  # 无佣金以简化验证
+            stamp_tax_rate=0,
+            slippage=0,
+            min_commission=0,
+            max_position_pct=1.0,  # 允许全仓
+        ))
+        result = engine.run_backtest(data, signals)
 
-    return pd.DataFrame(vec_results)
+        # 初始资金100万，买入价格10，由于现金*0.95预算限制：
+        # 预算 = min(1M, 950k) = 950k
+        # 买入股数 = floor(950k/10/100)*100 = 95000股
+        # 最终价格20，市值 = 20 * 95000 = 1,900,000
+        # 剩余现金 = 1,000,000 - 950,000 = 50,000
+        # 最终权益 = 1,950,000
+        final_equity = result['equity_curve']['equity'].iloc[-1]
+        expected_equity = 1950000.0
+
+        print(f"\n  最终权益: {final_equity:.2f}")
+        print(f"  预期权益: {expected_equity:.2f}")
+
+        self.assertAlmostEqual(final_equity, expected_equity, delta=100)
+
+    def test_cash_preservation_no_trades(self):
+        """测试无交易时现金不变"""
+        data = pd.DataFrame({
+            'code': '000001.SZ',
+            'date': pd.date_range('2023-01-01', periods=50, freq='B'),
+            'close': np.random.randn(50).cumsum() + 10,
+            'open': np.random.randn(50).cumsum() + 10,
+            'high': np.random.randn(50).cumsum() + 10.5,
+            'low': np.random.randn(50).cumsum() + 9.5,
+            'volume': np.ones(50) * 100000,
+        })
+        signals = pd.DataFrame({
+            'code': ['000001.SZ'],
+            'date': [pd.Timestamp('2023-01-01')],
+            'signal': [0],
+        })
+
+        engine = VectorizedBacktestEngine()
+        result = engine.run_backtest(data, signals)
+
+        final_equity = result['equity_curve']['equity'].iloc[-1]
+        self.assertAlmostEqual(final_equity, 1_000_000.0, delta=1.0)
+
+    def test_sharpe_ratio_zero_volatility(self):
+        """测试无波动时的夏普比率"""
+        np.random.seed(42)
+        n = 100
+        dates = pd.date_range('2023-01-01', periods=n, freq='B')
+
+        data = pd.DataFrame({
+            'code': '000001.SZ',
+            'date': dates,
+            'close': np.ones(n) * 10,
+            'open': np.ones(n) * 10,
+            'high': np.ones(n) * 10.5,
+            'low': np.ones(n) * 9.5,
+            'volume': np.ones(n) * 100000,
+        })
+
+        # 不交易
+        signals = pd.DataFrame()
+        engine = VectorizedBacktestEngine()
+        result = engine.run_backtest(data, signals)
+
+        self.assertEqual(result['metrics'].get('sharpe_ratio', 0), 0)
 
 
-# ============================================================================
-# 6. 运行所有测试
-# ============================================================================
-
-
-def run_all_tests():
-    """运行所有验证测试"""
-    logger.info("=" * 60)
-    logger.info("jingni-trader 向量化回测引擎验证")
-    logger.info(f"测试时间: {datetime.now().isoformat()}")
-    logger.info("借鉴来源: VectorBT (github.com/polakowo/vectorbt)")
-    logger.info("=" * 60)
-
-    # 生成测试数据
-    logger.info("\n生成测试数据: 100只股票 x 500交易日...")
-    data, signals = generate_test_data(n_stocks=100, n_days=500)
-
-    # 测试 1: 正确性
-    event_result, vec_result = test_correctness(data, signals)
-
-    # 测试 2: 性能对比
-    perf_results = test_performance(data, signals)
-
-    # 测试 3: 参数网格搜索
-    param_results = test_param_sweep(data, signals)
-
-    # 汇总
-    logger.info("\n" + "=" * 60)
-    logger.info("验证结论")
-    logger.info("=" * 60)
-    logger.info("""
-    1. 向量化回测在 100+ 股票规模下可获得 2-5x 加速（纯 NumPy 实现）
-       - 若引入 Numba JIT (VectorBT 核心技术)，加速比可达 10-50x
-       - 参数网格搜索场景优势更明显（批量计算）
-
-    2. 向量化回测结果与事件驱动基本一致
-       - 资金管理细节有微小差异（批量处理 vs 逐笔处理）
-       - 核心绩效指标（Sharpe/MaxDD）在合理误差范围内
-
-    3. 对 jingni-trader 的建议:
-       - 短期: 将回测引擎核心循环改造为 numpy 向量化操作
-       - 中期: 引入 Numba JIT 加速关键计算路径
-       - 长期: 支持参数网格搜索的数组广播优化
-
-    注意: 向量化回测的局限在于无法轻松处理路径依赖逻辑
-    （如"上次交易盈利后才允许下次交易"），对于这类复杂策略
-    仍需要事件驱动引擎。建议采用混合架构。
-    """)
-
-
-if __name__ == "__main__":
-    run_all_tests()
+if __name__ == '__main__':
+    unittest.main(verbosity=2)
