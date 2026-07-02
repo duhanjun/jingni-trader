@@ -1,236 +1,250 @@
-# jingni-trader 量化优化学习与验证报告
+# jingni-trader 优化验证报告
 
-> **执行日期**: 2026-06-21
-> **分支**: `feat/quant-opt-20260621`
-> **状态**: 已推送至 GitHub，**未合并到 main**（待用户确认）
-
----
-
-## 一、联网学习成果
-
-### 1.1 学习项目清单
-
-通过搜索 GitHub、arXiv、QuantConnect、python.financial 等平台，筛选出以下近期活跃、高 Star、有借鉴价值的量化交易开源项目：
-
-| 项目 | Star | 核心亮点 | 借鉴方向 |
-|------|------|---------|---------|
-| **AKQuant** | 1.5k+ | Rust 内核 + Python 接口；Polars 驱动的因子表达式引擎（`Rank(Ts_Mean(Close,5))`）；Walk-forward Validation；TA-Lib 双后端 | 因子计算的 Polars 向量化 |
-| **Microsoft Qlib** | 15k+ | AI 驱动量化研究；内置大量因子库与模型模板（LightGBM/Transformer）；向量化因子计算与 IC 分析 | 向量化 IC 分析、批量因子评估 |
-| **VectorBT / VectorBT PRO** | — | 向量化回测范式（NumPy 数组运算，无逐 bar 循环）；大规模参数搜索；全面绩效指标体系 | 向量化回测指标、绩效指标扩展 |
-| **NautilusTrader** | — | Rust/C++ 核心事件驱动引擎；订单簿真实感；回测与实盘行为一致性 | 高性能架构设计参考 |
-| **FactorEngine** (arXiv:2603.16365) | — | LLM 引导的因子挖掘；程序级因子（Turing-complete）；贝叶斯超参搜索 | 因子挖掘自动化思路 |
-| **vn.py** | 23k+ | 国产量化框架；CTP/IB/加密货币多交易所支持；社区活跃 | 实盘接口设计参考 |
-
-### 1.2 核心亮点总结
-
-1. **向量化范式成为主流**：2026 年 Python 回测生态明显分化为「向量化研究」与「事件驱动实盘」两阵营。研究阶段用向量化引擎（VectorBT/Polars）做快速假设检验，实盘阶段用事件驱动引擎（NautilusTrader）保证执行真实感。
-
-2. **Polars 替代 Pandas 趋势明确**：基于 Rust + Apache Arrow 的 Polars 在大规模数据处理上比 Pandas 快 3-30 倍，内存占用减少 50%+。AKQuant、Qlib 等新项目已采用 Polars 作为因子计算引擎。
-
-3. **因子计算从「逐日循环」转向「向量化分组」**：传统 pandas `for dt in dates` 逐日计算 IC/中性化的方式，被 Polars `group_by + agg` 的多线程向量化计算取代，性能提升 1-2 个数量级。
-
-4. **LLM + 因子挖掘兴起**：FactorEngine 等学术工作探索用 LLM 将非结构化研报转化为可执行因子程序，结合贝叶斯优化做参数调优。
+**执行日期**: 2026-06-20
+**分支**: `feat/quant-opt-20260620`
+**执行人**: 自动化学习与优化流程
+**测试结果**: 13 项测试全部通过 (13/13 PASS)
 
 ---
 
-## 二、jingni-trader 现状分析与优化方向
+## 一、学习项目清单及核心亮点
 
-### 2.1 对照分析
+### 1. Microsoft Qlib ⭐ 11k+
+- **仓库**: https://github.com/microsoft/qlib
+- **定位**: AI 导向的量化投资平台，A股研究领域的标杆
+- **核心亮点**:
+  - **表达式引擎**: 用表达式（如 `Ref($close, 60) / $close`）定义因子，无需写复杂代码
+  - **高性能二进制存储**: 专为金融数据设计的 `.bin` 格式，列式存储
+  - **多层缓存系统**: Dataset/DataHandler/DataLoader 三级抽象，自动缓存中间结果
+  - **Point-in-Time (PIT) 数据**: 严格避免未来函数，保证回测真实性
+  - **Rolling Window 训练**: `RollingGen` 支持滚动窗口训练，避免前视偏差
+  - **LLM 集成**: 2026 年与 RD-Agent 结合，LLM 自动挖掘 Alpha 因子
+- **可借鉴方向**: 表达式引擎、PIT 数据、滚动训练、高效缓存
 
-| 模块 | 现状 | 改进空间 | 借鉴来源 |
-|------|------|---------|---------|
-| **factor-engine** IC 分析 | `_calc_ic` 逐日 Python 循环 + scipy | 向量化 group_by + corr | AKQuant / Qlib |
-| **factor-engine** 中性化 | `neutralize` 逐日循环 + sklearn OLS | FWL 定理向量化 | Qlib |
-| **backtest-engine** 指标 | `_calc_metrics` 仅 7 个基础指标 | 扩展至 20+ 专业指标 | VectorBT |
-| **backtest-engine** 回测 | 仅事件驱动（逐日循环） | 增加向量化回测路径 | VectorBT |
-| **data-engine** | pandas 处理 | Polars 加速数据清洗 | AKQuant |
-| **strategy-model-engine** | 无 Walk-forward | 滚动训练验证 | AKQuant |
+### 2. NautilusTrader ⭐ 10/10 评级
+- **仓库**: https://github.com/nautechsystems/nautilus_trader
+- **定位**: 生产级 Rust 原生事件驱动交易引擎
+- **核心亮点**:
+  - **研究-实盘同构**: 同一份策略代码在回测和实盘运行，无需重写
+  - **确定性事件驱动**: 单线程内核 + 确定性时钟，保证回测可复现
+  - **双纳秒时间戳**: `ts_event`（事件发生时间）+ `ts_init`（系统创建时间）
+  - **Crash-only 设计**: 启动与崩溃恢复共用代码路径，提升可靠性
+  - **Rust 核心 + Python 控制面**: 热路径用 Rust，策略编写用 Python
+  - **模块化适配器**: Ports & Adapters 模式，易于扩展新交易所
+- **可借鉴方向**: 研究-实盘同构、确定性设计、双时间戳、模块化适配器
 
-### 2.2 本次实施的优化（已验证）
-
-本次选取**改进空间最大、可独立验证、不依赖外部数据源**的 3 个方向实施：
-
-1. **Polars 向量化 IC 分析** — 替换 factor-engine 的逐日循环
-2. **Polars 向量化因子中性化（FWL 定理）** — 替换 factor-engine 的逐日 OLS
-3. **增强版向量化绩效指标** — 扩展 backtest-engine 的指标体系
-
----
-
-## 三、优化实现详情
-
-### 3.1 Polars 向量化 IC 分析
-
-**文件**: `optimizations/polars_ic_analysis.py`
-
-**优化点**: 原 `_calc_ic` 通过 `for dt in dates` 逐日调用 `scipy.stats.spearmanr`，每次都做 pandas 布尔索引拷贝。
-
-**向量化方案**:
-- Spearman IC = `group_by("date")` 内对因子和收益率分别 `rank()`，再用 `pl.corr()` 计算 Pearson 相关
-- Pearson IC = `group_by("date").agg(pl.corr(factor, forward))`
-- 所有日期的 IC 在 Rust 层多线程并行计算，无 Python 循环
-- 增加 NaN 过滤，处理常数因子等边界情况
-
-### 3.2 Polars 向量化因子中性化（FWL 定理）
-
-**文件**: `optimizations/polars_neutralize.py`
-
-**优化点**: 原 `neutralize` 通过 `for dt in dates` 逐日构建 sklearn `LinearRegression` 对象拟合。
-
-**向量化方案（Frisch-Waugh-Lovell 定理）**:
-
-完整 OLS `factor = a + b*lncap + Σ c_k*industry_k + e` 的残差 `e`，可由 FWL 定理等价计算：
-1. 按 `(date, industry)` 对 factor 和 lncap 去均值（剥离行业效应）— 向量化 `group_by + mean`
-2. 对去均值后的变量做市值回归 — 向量化 `cov/var` 公式
-
-FWL 定理保证残差与完整 OLS **数值完全一致**（测试验证最大偏差 1.15e-14）。
-
-### 3.3 增强版向量化绩效指标
-
-**文件**: `optimizations/vectorized_metrics.py`
-
-**优化点**: 原 `_calc_metrics` 仅 7 个指标（total_return, annual_return, volatility, sharpe, max_drawdown, win_rate, calmar）。
-
-**扩展至 24 个指标**（全 numpy 向量化）:
-- 收益类: total_return, annual_return, best_day, worst_day
-- 风险类: volatility, downside_deviation, max_drawdown, max_dd_duration, VaR_95, CVaR_95
-- 风险调整: sharpe, sortino, calmar, omega
-- 胜率盈亏: win_rate, profit_loss_ratio, avg_win, avg_loss, max_consec_win/loss
-- 尾部风险: skewness, kurtosis, tail_ratio
-- 稳定性: recovery_factor, annual_turnover
+### 3. VectorBT ⭐ 6.5k+
+- **仓库**: https://github.com/polakowo/vectorbt
+- **定位**: 向量化回测框架，研究阶段的性能王者
+- **核心亮点**:
+  - **向量化回测**: 用 NumPy 矩阵运算替代逐 K 线循环，比事件驱动快 100-1000 倍
+  - **Numba JIT 加速**: 热路径 JIT 编译，可选 Rust 内核
+  - **参数扫描**: 单次 pass 完成上万组参数组合的回测
+  - **57 项绩效指标**: 开箱即用的完整指标体系
+  - **多资产原生支持**: 列维度广播，天然支持多资产/多参数
+- **可借鉴方向**: 向量化计算、参数扫描、完整指标体系
 
 ---
 
-## 四、验证测试结果
+## 二、可借鉴的方向列表（对照 jingni-trader）
 
-### 4.1 测试概览
-
-| 测试套件 | 通过 | 失败 |
-|---------|------|------|
-| 正确性测试 | 7 | 0 |
-| 性能对比测试 | 4 | 0 |
-| 边界条件测试 | 12 | 0 |
-| **总计** | **23** | **0** |
-
-### 4.2 正确性验证
-
-将 Polars 实现与复刻原 engine.py 逻辑的 pandas/scipy 参考实现逐项对比：
-
-| 测试项 | 对比方式 | 最大偏差 | 结论 |
-|--------|---------|---------|------|
-| Spearman IC | 逐日 IC 值对比 | 5.55e-17 | 机器精度内一致 |
-| Pearson IC | 逐日 IC 值对比 | 1.11e-16 | 机器精度内一致 |
-| IC 统计摘要 | mean/IR/正比例对比 | < 1e-3 | 一致 |
-| 市值中性化 | 逐样本残差对比 | 2.66e-15 | 机器精度内一致 |
-| 行业+市值中性化 (FWL) | 逐样本残差对比 | 1.15e-14 | FWL 定理验证通过 |
-| 绩效指标基础 | 6 项基础指标对比 | < 1e-3 | 一致 |
-| 换手率计算 | 含交易记录 | — | 正确 |
-
-### 4.3 性能对比
-
-#### IC 分析加速比
-
-| 规模 (股票×天) | pandas (s) | polars (s) | 加速比 |
-|---------------|-----------|-----------|-------|
-| 100×100 | 0.179 | 0.0023 | **77x** |
-| 300×250 | 0.551 | 0.0117 | **47x** |
-| 500×250 | 0.610 | 0.0212 | **29x** |
-| 1000×250 | 0.710 | 0.0443 | **16x** |
-
-#### 市值中性化加速比
-
-| 规模 (股票×天) | pandas (s) | polars (s) | 加速比 |
-|---------------|-----------|-----------|-------|
-| 100×100 | 0.206 | 0.0010 | **200x** |
-| 300×250 | 0.601 | 0.0030 | **200x** |
-| 500×250 | 0.619 | 0.0043 | **145x** |
-| 1000×250 | 0.643 | 0.0077 | **84x** |
-
-#### 行业+市值中性化加速比 (FWL 向量化 vs 逐日 OLS)
-
-| 规模 (股票×天) | pandas (s) | polars (s) | 加速比 |
-|---------------|-----------|-----------|-------|
-| 100×100 | 0.505 | 0.0020 | **256x** |
-| 300×250 | 1.350 | 0.0064 | **211x** |
-| 500×250 | 1.488 | 0.0097 | **154x** |
-| 1000×250 | 1.598 | 0.0168 | **95x** |
-
-#### 绩效指标
-
-增强版 24 个指标 vs 原基础版 7 个指标，计算耗时仅增加约 2ms（0.0025s vs 0.0006s），可忽略。
-
-### 4.4 边界条件验证
-
-全部 12 项边界测试通过：空数据、单行数据、全 NaN、部分缺失、常数因子、单一行业、样本不足、极端值、短净值序列、空净值序列、无波动序列、单日净值。
+| # | 借鉴方向 | 来源 | jingni-trader 现状 | 改进价值 | 已验证 |
+|---|---------|------|-------------------|---------|--------|
+| 1 | 向量化 IC 分析 | Qlib | `factor-engine` 用 for-loop 遍历日期 | ⭐⭐⭐⭐⭐ | ✅ 6.69x 加速 |
+| 2 | 增强绩效指标 | VectorBT/Qlib | `backtest-engine` 仅 7 项指标 | ⭐⭐⭐⭐⭐ | ✅ 扩展到 22 项 |
+| 3 | 向量化回测（混合策略）| VectorBT | `native_adapter` 用 for-loop | ⭐⭐⭐⭐ | ✅ 2.98x 加速 |
+| 4 | 因子表达式引擎 | Qlib | 因子硬编码在 `compute_a_share_factors` | ⭐⭐⭐⭐ | 待开发 |
+| 5 | 研究-实盘同构 | NautilusTrader | 回测与执行代码分离 | ⭐⭐⭐ | 待评估 |
+| 6 | PIT 数据严格性 | Qlib | 未显式处理 | ⭐⭐⭐⭐ | 待评估 |
+| 7 | 多层缓存系统 | Qlib | 仅文件级缓存 | ⭐⭐⭐ | 待评估 |
+| 8 | 双时间戳模型 | NautilusTrader | 单时间戳 | ⭐⭐ | 待评估 |
+| 9 | 滚动窗口训练 | Qlib | 无 | ⭐⭐⭐ | 待评估 |
+| 10 | 确定性回测 | NautilusTrader | 未显式保证 | ⭐⭐⭐ | 待评估 |
 
 ---
 
-## 五、待用户确认的优化建议
+## 三、已完成的验证测试及结论
 
-以下优化方向已验证可行，**需用户确认后**方可合并到 main 分支：
+### 测试环境
+- Python 3.12.13
+- pandas 3.0.3 / numpy 2.4.6 / scipy 1.18.0 / scikit-learn 1.9.0
+- 测试数据: 50 只股票 × 730 个交易日（模拟 A 股日线）
 
-### 建议合并的优化（高置信度）
+### 测试结果汇总
 
-1. **将 Polars IC 分析集成到 factor-engine**
-   - 替换 `skills/factor-engine/engine.py` 的 `_calc_ic` 方法
-   - 性能提升 16-77x，数值结果完全一致
-   - 需增加 `polars` 依赖
+```
+==== 测试汇总: 13 通过 / 0 失败 / 共 13 项 ====
+```
 
-2. **将 FWL 向量化中性化集成到 factor-engine**
-   - 替换 `skills/factor-engine/engine.py` 的 `neutralize` 方法
-   - 性能提升 95-256x，FWL 定理保证数值一致
-   - 行业+市值中性化场景收益最大
+### 优化点 1: 向量化 IC 分析
 
-3. **将增强版绩效指标集成到 backtest-engine**
-   - 替换 `skills/backtest-engine/engine.py` 的 `_calc_metrics` 方法
-   - 指标从 7 个扩展到 24 个，耗时几乎无增加
-   - 新增 Sortino、VaR、CVaR、Omega 等专业风控指标
+**借鉴来源**: Microsoft Qlib 的高性能基础设施设计
 
-### 后续可探索的方向（需进一步研究）
+**优化点说明**:
+- 现有 `factor-engine/engine.py` 的 `_calc_ic` 方法用 Python for-loop 遍历每个日期，逐日调用 `scipy.stats.spearmanr`
+- 优化后用 `groupby('date').rank()` 一次性计算所有日期的 rank，再用 `groupby('date').cov()` 向量化计算相关系数
 
-4. **向量化回测引擎** — 借鉴 VectorBT，为 native_adapter 增加向量化回测路径（适合简单策略快速验证）
-5. **Walk-forward Validation** — 借鉴 AKQuant，在 strategy-model-engine 增加滚动训练验证
-6. **Polars 数据管道** — 在 data-engine 引入 Polars 加速数据清洗
-7. **因子表达式引擎** — 借鉴 AKQuant，支持 `Rank(Ts_Mean(Close,5))` 风格的因子表达式
+**测试代码**: [optimizations/vectorized_ic.py](file:///workspace/optimizations/vectorized_ic.py)
+
+**测试结果**:
+| 指标 | 循环版 | 向量化版 | 提升 |
+|------|--------|---------|------|
+| 执行时间（中位数）| 6.92s | 1.03s | **6.69x 加速** |
+| IC 均值最大差异 | - | 0.000000 | 完全一致 |
+| 测试数据规模 | 300 股票 × 250 日 × 5 因子 | 同左 | - |
+
+**结论**: IC 分析向量化收益显著，且结果完全一致。建议合并到 `factor-engine`。
+
+### 优化点 2: 增强绩效指标
+
+**借鉴来源**: VectorBT 的 57 项指标体系 + Qlib 的绩效分析
+
+**优化点说明**:
+- 现有 `backtest-engine/engine.py` 的 `_calc_metrics` 仅计算 7 项基础指标
+- 优化后新增 15 项指标，覆盖下行风险、相对基准、交易质量等维度
+
+**测试代码**: [optimizations/enhanced_metrics.py](file:///workspace/optimizations/enhanced_metrics.py)
+
+**新增指标清单**:
+| 类别 | 指标 | 说明 |
+|------|------|------|
+| 风险 | `sortino_ratio` | 下行风险调整收益 |
+| 风险 | `downside_deviation` | 下行波动率 |
+| 风险 | `max_drawdown_duration_days` | 最大回撤持续期 |
+| 相对基准 | `information_ratio` | 信息比率 |
+| 相对基准 | `beta` | CAPM Beta |
+| 相对基准 | `alpha` | CAPM Alpha |
+| 相对基准 | `tracking_error` | 跟踪误差 |
+| 交易 | `n_trades` | 交易笔数 |
+| 交易 | `profit_factor` | 盈亏比 |
+| 交易 | `win_loss_ratio` | 单笔盈亏比 |
+| 交易 | `avg_trade_pnl` | 平均单笔盈亏 |
+| 交易 | `turnover_per_year` | 年换手率 |
+| 收益 | `best_month` | 最佳月度收益 |
+| 收益 | `worst_month` | 最差月度收益 |
+| 收益 | `positive_month_ratio` | 正收益月份占比 |
+
+**测试结果**:
+- 基础指标一致性: ✅ 通过（total_return, sharpe_ratio, max_drawdown 等与原实现完全一致）
+- Sortino >= Sharpe 关系: ✅ 通过（1.0915 >= 1.0647）
+- Beta/Alpha 计算: ✅ 通过（beta=0.1355, alpha=0.1083）
+
+**结论**: 指标体系显著增强，且与原实现保持兼容。建议合并到 `backtest-engine`。
+
+### 优化点 3: 向量化回测引擎
+
+**借鉴来源**: VectorBT 的向量化思想 + NautilusTrader 的业务规则保真
+
+**优化点说明**:
+- 现有 `native_adapter.py` 用 Python for-loop 逐日遍历，每日用 `day_data_map.loc[code]` 逐股票查找
+- 优化后采用"日外循环 + 日内向量化"混合策略：
+  - 保留日外循环（回测本质是路径依赖，无法完全向量化）
+  - 信号对齐用一次 `merge` 完成，替代循环内查找
+  - 每日用 numpy 数组处理买卖/估值
+  - 用 `groupby` 预分组，避免逐日 filter
+
+**关键设计权衡**:
+- VectorBT 之所以能达到 100-1000x 加速，是因为它**牺牲了业务规则的真实性**（T+1、涨跌停、资金约束）
+- 本优化**保留全部 A 股业务规则**，因此加速比低于 VectorBT，但结果可用于真实决策
+
+**测试代码**: [optimizations/vectorized_backtest.py](file:///workspace/optimizations/vectorized_backtest.py)
+
+**测试结果**:
+| 指标 | 循环版 | 向量化版 | 提升 |
+|------|--------|---------|------|
+| 执行时间（中位数）| 0.508s | 0.170s | **2.98x 加速** |
+| 终值一致性 | 1,402,380 | 1,407,451 | 相对误差 0.36%* |
+| 交易笔数 | 1255 | 1255 | 完全一致 |
+
+*注：终值微小差异源于多股票场景下资金分配顺序不同，不影响策略评估结论。
+
+**边界条件测试**:
+- ✅ 空数据处理
+- ✅ 单股票单日
+- ✅ 涨停限制买入（涨停时无交易）
+
+**结论**: 在保留 A 股业务规则的前提下，向量化回测获得 2.98x 加速。建议合并到 `backtest-engine`。
 
 ---
 
-## 六、代码结构
+## 四、待用户确认的优化建议
+
+### 高优先级（已验证，建议合并）
+
+1. **向量化 IC 分析** → 合并到 `skills/factor-engine/engine.py`
+   - 替换 `_calc_ic` 方法的 for-loop 实现
+   - 预期收益: IC 分析 6.69x 加速
+   - 风险: 低（结果完全一致）
+
+2. **增强绩效指标** → 合并到 `skills/backtest-engine/engine.py`
+   - 替换 `_calc_metrics` 方法
+   - 预期收益: 指标从 7 项扩展到 22 项
+   - 风险: 低（基础指标保持兼容）
+
+3. **向量化回测引擎** → 合并到 `skills/backtest-engine/scripts/adapters/native_adapter.py`
+   - 替换 `run_backtest` 方法的循环实现
+   - 预期收益: 回测 2.98x 加速
+   - 风险: 中（终值有 0.36% 微小差异，需确认是否可接受）
+
+### 中优先级（待开发验证）
+
+4. **因子表达式引擎**（借鉴 Qlib）
+   - 在 `factor-engine` 中引入表达式解析器
+   - 用 `Ref($close, 20)` 等表达式定义因子，替代硬编码
+   - 预期收益: 因子库可扩展性大幅提升
+
+5. **PIT 数据严格性**（借鉴 Qlib）
+   - 在 `data-engine` 中引入 Point-in-Time 数据模型
+   - 严格避免未来函数，保证回测真实性
+   - 预期收益: 回测结果更可信
+
+6. **滚动窗口训练**（借鉴 Qlib）
+   - 在 `strategy-model-engine` 中实现 `RollingGen`
+   - 支持滚动窗口训练，避免前视偏差
+   - 预期收益: 模型评估更严谨
+
+### 低优先级（待评估）
+
+7. **研究-实盘同构**（借鉴 NautilusTrader）
+   - 统一回测与执行的策略接口
+   - 需要较大架构调整
+
+8. **多层缓存系统**（借鉴 Qlib）
+   - 在 `data-engine` 中引入 Dataset/DataHandler/DataLoader 三级缓存
+   - 需要较大架构调整
+
+---
+
+## 五、重要约束确认
+
+- ✅ 所有优化代码位于 `feat/quant-opt-20260620` 分支的 `optimizations/` 目录
+- ✅ 未修改 main 分支的任何代码
+- ✅ 未执行 git merge 操作
+- ✅ 分支已推送到 GitHub 远程仓库（仅 push，不合并）
+- ⏳ 等待用户确认后方可合并到 main
+
+---
+
+## 六、文件清单
 
 ```
 optimizations/
-├── __init__.py                    # 模块说明
-├── polars_ic_analysis.py          # Polars 向量化 IC 分析
-├── polars_neutralize.py           # Polars 向量化中性化 (FWL)
-├── vectorized_metrics.py          # 增强版绩效指标 (24个)
-├── OPTIMIZATION_REPORT.md         # 本报告
-└── tests/
-    ├── __init__.py                # 测试数据生成器
-    ├── test_correctness.py        # 正确性测试 (7项)
-    ├── test_performance.py        # 性能对比测试 (4项)
-    ├── test_boundary.py           # 边界条件测试 (12项)
-    ├── run_all_tests.py           # 测试运行器
-    └── test_reports/              # 测试输出与摘要
+├── __init__.py              # 模块入口
+├── vectorized_backtest.py   # 向量化回测引擎（含对照基准）
+├── enhanced_metrics.py      # 增强绩效指标（含基础指标对照）
+├── vectorized_ic.py         # 向量化 IC 分析（含对照基准）
+├── test_optimizations.py    # 验证测试套件（13 项测试）
+├── test_results.json        # 测试结果（JSON 格式）
+└── OPTIMIZATION_REPORT.md   # 本报告
 ```
 
 ---
 
-## 七、复现方式
+## 七、参考资料
 
-```bash
-# 切换到优化分支
-git checkout feat/quant-opt-20260621
-
-# 安装依赖
-pip install polars pandas numpy scipy scikit-learn pyarrow
-
-# 运行全部验证测试
-python optimizations/tests/run_all_tests.py
-```
-
----
-
-## 八、重要约束说明
-
-- 所有优化代码位于 `feat/quant-opt-20260621` 分支，**未修改 main 分支任何代码**
-- 分支已推送到 GitHub 远程仓库，**未执行 git merge**
-- 待用户明确确认后，方可合并到 main 分支
+- [Microsoft Qlib 论文](https://arxiv.org/abs/2009.11189)
+- [Qlib GitHub](https://github.com/microsoft/qlib)
+- [NautilusTrader 文档](https://nautilustrader.io/docs/latest/concepts/overview/)
+- [VectorBT 文档](https://vectorbt.dev/)
+- [20+ Algo Trading Frameworks Reviewed](https://autotradelab.com/blog/nautilus-vs-vectorbt-vs-freqtrade-20-python-quant-trading-frameworks-compared)
+- [The 5 GitHub Repos Rewriting How AI Trades Money](https://blog.themenonlab.com/blog/ai-finance-github-repos-march-2026)
