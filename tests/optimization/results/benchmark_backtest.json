@@ -1,0 +1,126 @@
+{
+  "test_type": "vectorized_backtest_benchmark",
+  "reference": "QUANTAXIS (Python+Rust architecture)",
+  "results": [
+    {
+      "test_name": "10stocks_252days",
+      "n_stocks": 10,
+      "n_days": 252,
+      "native_time_sec": 0.4303309810020437,
+      "vectorized_time_sec": 0.01289945499956957,
+      "speedup": 33.360400188721385,
+      "vectorized_metrics": {
+        "total_return": 0.2241363377002359,
+        "annual_return": 0.22512304552523488,
+        "volatility": 0.1731230371671955,
+        "sharpe_ratio": 1.1270773013113942,
+        "max_drawdown": -0.07812904731520631
+      }
+    },
+    {
+      "test_name": "10stocks_504days",
+      "n_stocks": 10,
+      "n_days": 504,
+      "native_time_sec": 0.8697606709974934,
+      "vectorized_time_sec": 0.011932335000892635,
+      "speedup": 72.89107043444794,
+      "vectorized_metrics": {
+        "total_return": 0.34316298454450056,
+        "annual_return": 0.15928901839359555,
+        "volatility": 0.15927476405146151,
+        "sharpe_ratio": 0.8117357395790735,
+        "max_drawdown": -0.11956150889818751
+      }
+    },
+    {
+      "test_name": "50stocks_252days",
+      "n_stocks": 50,
+      "n_days": 252,
+      "native_time_sec": 0.7061342429988144,
+      "vectorized_time_sec": 0.009809924998990027,
+      "speedup": 71.98161485144014,
+      "vectorized_metrics": {
+        "total_return": -0.1022587256873535,
+        "annual_return": -0.10264446897556856,
+        "volatility": 0.07329970163832634,
+        "sharpe_ratio": -1.8096181295533746,
+        "max_drawdown": -0.15648900136187538
+      }
+    },
+    {
+      "test_name": "50stocks_504days",
+      "n_stocks": 50,
+      "n_days": 504,
+      "native_time_sec": 1.4647218059981242,
+      "vectorized_time_sec": 0.013817863000440411,
+      "speedup": 106.00205009641793,
+      "vectorized_metrics": {
+        "total_return": 0.07508249039863957,
+        "annual_return": 0.03693646837621789,
+        "volatility": 0.07613934951109509,
+        "sharpe_ratio": 0.09110228049961346,
+        "max_drawdown": -0.07948509030898587
+      }
+    },
+    {
+      "test_name": "100stocks_252days",
+      "n_stocks": 100,
+      "n_days": 252,
+      "native_time_sec": 1.0650596250015951,
+      "vectorized_time_sec": 0.011880948000907665,
+      "speedup": 89.64433014269805,
+      "vectorized_metrics": {
+        "total_return": 0.08071350037312763,
+        "annual_return": 0.08104776150626769,
+        "volatility": 0.07495064616857125,
+        "sharpe_ratio": 0.681085008813084,
+        "max_drawdown": -0.043775206674421696
+      }
+    },
+    {
+      "test_name": "100stocks_504days",
+      "n_stocks": 100,
+      "n_days": 504,
+      "native_time_sec": 2.120294060998276,
+      "vectorized_time_sec": 0.018659485001990106,
+      "speedup": 113.63089928645611,
+      "vectorized_metrics": {
+        "total_return": -0.03174266739557796,
+        "annual_return": -0.016030874337320755,
+        "volatility": 0.07509140055003137,
+        "sharpe_ratio": -0.6129979465045619,
+        "max_drawdown": -0.11161382362089212
+      }
+    },
+    {
+      "test_name": "200stocks_252days",
+      "n_stocks": 200,
+      "n_days": 252,
+      "native_time_sec": 1.661636583001382,
+      "vectorized_time_sec": 0.0159935210031108,
+      "speedup": 103.89435713863054,
+      "vectorized_metrics": {
+        "total_return": -0.0710363473854182,
+        "annual_return": -0.07130902172424225,
+        "volatility": 0.07793939648423566,
+        "sharpe_ratio": -1.2998435488878006,
+        "max_drawdown": -0.11925805595964978
+      }
+    },
+    {
+      "test_name": "200stocks_504days",
+      "n_stocks": 200,
+      "n_days": 504,
+      "native_time_sec": 3.422068063999177,
+      "vectorized_time_sec": 0.027289368001220282,
+      "speedup": 125.39931536143139,
+      "vectorized_metrics": {
+        "total_return": -0.01016527789334598,
+        "annual_return": -0.0051057261812818,
+        "volatility": 0.07519248853229497,
+        "sharpe_ratio": -0.46687810001399255,
+        "max_drawdown": -0.12659226314844707
+      }
+    }
+  ]
+}

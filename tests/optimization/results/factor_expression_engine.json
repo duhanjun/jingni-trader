@@ -1,0 +1,61 @@
+{
+  "test_type": "factor_expression_engine",
+  "reference": "Microsoft Qlib (Expression Engine)",
+  "correctness_tests": {
+    "results": [
+      {
+        "test": "ret_20d_correctness",
+        "correlation": 1.0,
+        "passed": "True"
+      },
+      {
+        "test": "vol_adj_reversal_correctness",
+        "correlation": 1.0,
+        "passed": "True"
+      },
+      {
+        "test": "cs_rank_range",
+        "all_dates_valid": false,
+        "passed": false
+      }
+    ],
+    "all_passed": false
+  },
+  "extensibility_tests": {
+    "custom_factor_registered": true,
+    "custom_expression_registered": true,
+    "computed_columns": [
+      "code",
+      "date",
+      "ret_20d",
+      "rsi_14",
+      "rsi_diff"
+    ],
+    "non_null_ratio": 0.93,
+    "passed": true
+  },
+  "comparison_with_current": {
+    "factor_correlations": {
+      "ret_1d": 1.0,
+      "ret_5d": 1.0,
+      "ret_20d": 1.0,
+      "ret_60d": 1.0,
+      "reversal_5d": 1.0,
+      "reversal_20d": 1.0,
+      "volatility_20d": 1.0
+    },
+    "all_match": true,
+    "engine_factors_count": 12,
+    "configurable": true
+  },
+  "factor_definitions": {
+    "alpha_basic_factors": 11,
+    "alpha_enhanced_factors": 14
+  },
+  "conclusions": {
+    "correctness": false,
+    "extensibility": true,
+    "current_compatibility": true,
+    "configurable": true
+  }
+}
