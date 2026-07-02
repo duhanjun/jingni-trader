@@ -1,164 +1,209 @@
-# 量化交易开源项目学习报告
+# Jingni-Trader 量化交易学习报告
 
-## 学习日期: 2026-06-12 | 序号: 01
+**日期**: 2026-06-12 | **序号**: #1
+**执行者**: AI 量化研究助手
 
 ---
 
 ## 一、学习项目清单及核心亮点
 
-### 1. Microsoft Qlib (github.com/microsoft/qlib) ⭐ 14,000+
-**类型**: AI 驱动的量化投资平台  
-**核心亮点**:
-- **表达式引擎 (Expression Engine)**: 使用 DSL 语法声明因子，如 `$close`, `Ref($close, 1)`, `Mean($close, 20)`，将因子定义从命令式 pandas 操作变为声明式表达式
-- **Alpha158/Alpha360 因子库**: 预置 158/360 个标准化因子，提供开箱即用的因子体系
-- **列式二进制数据格式**: 专为金融时序数据优化的存储格式，访问速度远超 CSV/HDF5
-- **ML 模型库**: 内置 LightGBM、LSTM、Transformer 等模型，支持多模型训练/评估/集成
-- **数据缓存层**: 自动缓存滚动计算结果，避免重复计算
+### 1. Microsoft Qlib (https://github.com/microsoft/qlib) — 15,000+ Stars
 
-### 2. AKQuant (github.com/akfamily/akquant) ⭐ 1,400+
-**类型**: Rust+Python 混合高性能量化回测框架  
 **核心亮点**:
-- **Polars 驱动因子引擎**: 使用 Polars (Rust 编写) 替代 Pandas，因子计算性能大幅提升
-- **Walk-Forward 验证**: 内置滚动窗口验证，避免过拟合
-- **TA-Lib 双后端**: 同时支持 C 版 TA-Lib 和纯 Python 实现
-- **Rust 核心计算层**: 性能敏感操作（回测循环、信号生成）用 Rust 实现，Python 做编排
-- **交互式回测报告**: 内置 Plotly 可视化，生成可交互的分析报告
+- **Alpha158 标准化因子库**: 预定义 158 个因子，覆盖动量、反转、波动率、量价、技术指标等维度，提供即开即用的因子集
+- **表达式引擎**: 支持用 DSL 定义新因子 (`Ref($close, -5) / Mean($close, 20)`)，自动推导计算图，避免重复计算
+- **严格滚动窗口回测**: `RollingWindow` 划分训练/验证/测试集，确保无未来信息泄露；支持多轮滚动，评估样本外稳定性
+- **因子 IC 衰减分析**: 计算不同前瞻期的 IC 均值、标准差、IR，追踪因子有效性随时间衰减
+- **因子分组回测**: 按因子值分为 5/10 组，验证 Top-Bottom 收益差的单调性，判断因子区分度
+- **模型 Zoo**: 内置 LightGBM、GRU、LSTM、Transformer 等 20+ 模型，统一接口
 
-### 3. FactorHub (github.com/cn-vhql/FactorHub) ⭐ 新兴
-**类型**: 因子管理平台  
-**核心亮点**:
-- **完整因子评估体系**: IC 衰减分析、分层单调性检验、换手率分析、Fama-MacBeth 回归
-- **遗传算法因子挖掘**: 自动组合基础算子生成新因子
-- **因子衰减监控**: 持续监控因子在线表现，及时预警因子失效
-- **Web 管理界面**: 提供因子库的可视化管理
+**可借鉴之处**:
+1. 因子表达式引擎设计 → 提升因子定义灵活性，用户无需修改代码即可测试新因子
+2. 滚动窗口回测机制 → 解决过拟合识别问题，当前 jingni-trader 仅支持全量回测
+3. 因子 IC 衰减分析 → 量化因子时效性，避免使用已衰减的因子
+4. 因子分组回测 → 替代简单的 IC 排序，更直观地展示因子区分能力
 
 ---
 
-## 二、可借鉴的方向列表
+### 2. Freqtrade (https://github.com/freqtrade/freqtrade) — 44,000+ Stars
 
-### 方向 1: 引入因子表达式引擎 (借鉴 Qlib)
-- **优先级**: 高
-- **影响模块**: factor-engine
-- **改进点**: 当前因子计算使用命令式 pandas 操作，代码冗长且不易维护。引入表达式引擎后，因子定义更简洁、可读、可组合
-- **验证结果**: 见下方"已完成的验证测试"
+**核心亮点**:
+- **Hyperopt 超参优化**: 基于 Optuna，支持 backtesting-based 的超参搜索；内置 Walk-Forward Optimization（滚动窗口优化）
+- **FreqAI ML 集成**: 自动特征工程、模型训练、预测生成；支持 LightGBM、XGBoost、PyTorch、Keras；自动处理数据漂移
+- **动态风险管理**: ATR trailing stop（自适应波动率的移动止损）、StopLoss 守卫、最大回撤保护、日亏损限制
+- **仓位管理**: 支持固定金额、风险比例、波动率自适应、Kelly 公式等多种仓位计算策略
+- **事件驱动架构**: 支持消息/回调机制，策略可响应 tick、candle、trade 等事件
+- **实盘对接**: 支持 Binance、OKX、Bybit 等 20+ 交易所，透传实盘 API
 
-### 方向 2: 完善因子评估体系 (借鉴 FactorHub)
-- **优先级**: 高
-- **影响模块**: factor-engine, reports-engine
-- **改进点**: 当前仅止于 IC 均值和 IR 计算，缺少 IC 衰减分析、分层单调性检验、换手率分析等
-- **验证结果**: 见下方"已完成的验证测试"
-
-### 方向 3: 回测引擎性能优化 (借鉴 AKQuant)
-- **优先级**: 高
-- **影响模块**: backtest-engine
-- **改进点**: 当前 Pandas 逐行循环回测性能低下，可引入 NumPy/Polars 向量化计算
-- **验证结果**: NumPy 向量化实现达到 103-170x 加速
-
-### 方向 4: 列式数据存储 (借鉴 Qlib)
-- **优先级**: 中
-- **影响模块**: data-engine
-- **改进点**: 当前数据存储使用 CSV/Pickle，对大规模数据访问效率低。可引入 Parquet/Feather 列式存储
-
-### 方向 5: 滚动窗口验证 (借鉴 AKQuant)
-- **优先级**: 中
-- **影响模块**: backtest-engine, strategy-model-engine
-- **改进点**: 当前回测仅支持单段回测，可引入 Walk-Forward 滚动窗口验证
-
-### 方向 6: 遗传算法因子挖掘 (借鉴 FactorHub)
-- **优先级**: 低
-- **影响模块**: factor-engine
-- **改进点**: 可通过遗传算法自动组合基础算子生成新因子，扩展因子库
+**可借鉴之处**:
+1. 动态风险管理（ATR 止损、波动率仓位）→ 当前 jingni-trader 的风控仅在组合层面，无交易级别风控
+2. Walk-Forward Optimization → 结合滚动窗口回测 + 超参搜索，提升策略稳健性
+3. 事件驱动策略接口 → 当前策略 API 为简单的信号生成器，缺乏灵活性
+4. FreqAI 自动化 ML Pipeline → 启发自动特征工程和模型管理思路
 
 ---
 
-## 三、已完成的验证测试及结论
+### 3. vnpy (https://github.com/vnpy/vnpy) — 23,000+ Stars
 
-### 测试 1: 因子表达式引擎
+**核心亮点**:
+- **全链路模块化架构**: 数据→回测→实盘→风控→监控，引擎间通过事件总线解耦通信
+- **事件驱动引擎**: 统一的 EventQueue、EventDispatcher，策略通过注册事件处理器响应行情、订单、成交
+- **多接口适配**: 支持 CTP、飞鼠、富途、老虎等 30+ 中国/国际接口
+- **仓位管理引擎 (PortfolioManager)**: 支持多策略、多合约的实时持仓管理和风险监控
 
-**测试文件**: `tests/study_2026/test_factor_expression_engine.py`  
-**借鉴来源**: Microsoft Qlib - Expression Engine  
-**测试内容**:
-- 正确性验证: 表达式引擎计算的因子值与命令式 pandas 实现完全一致 (5/5 通过)
-- 性能对比: 表达式引擎比命令式慢约 1.42x (0.193s vs 0.136s, 100只股票×500天)
-- 可组合性: 支持复合因子定义，如 `($close - Mean($close, 20)) / Std($close, 20)`
+**可借鉴之处**:
+1. 事件驱动架构 → 提高模块间解耦度，便于插拔和测试
+2. 多接口适配模式 → 当前 data-engine 已有类似设计，可进一步扩展为统一的数据/交易接口抽象
 
-**结论**: 表达式引擎在可读性和可维护性上有显著优势，性能损失可控 (1.42x)。建议在 factor-engine 中引入，作为因子定义的辅助方式。
+---
 
-**支持的因子表达式**:
-| 表达式 | 说明 |
-|--------|------|
-| `$close`, `$volume`, `$open` 等 | 列引用 |
-| `Ref(expr, period)` | 滞后引用 |
-| `Mean(expr, window)` | 滚动均值 |
-| `Std(expr, window)` | 滚动标准差 |
-| `PctChange(expr, period)` | 百分比变化 |
-| `Neg(expr)` | 取负 |
-| `(expr +/-/*/ expr)` | 四则运算 |
+## 二、已完成的验证测试
 
-### 测试 2: IC 衰减分析与分层单调性检验
+### 测试文件目录: `tests/study_2026/`
 
-**测试文件**: `tests/study_2026/test_factor_ic_decay.py`  
-**借鉴来源**: FactorHub - 因子评估体系  
-**测试内容**:
-- IC 衰减分析: 计算因子在 [1, 5, 10, 20, 40, 60] 日前瞻期的 IC 均值、IR、t 统计量
-- 半衰期估计: 有效因子半衰期 = 5天，噪声因子半衰期 = 120天 (预期行为)
-- 分层单调性检验: 10分组收益分析，计算单调性得分和顶底收益差
-- 因子换手率分析: 平均换手率、秩相关性、自相关性分析
-- 综合评分: 有效因子 0.0361 vs 噪声因子 0.0263 (有效区分)
+| 测试文件 | 借鉴来源 | 优化方向 | 测试用例数 | 状态 |
+|---------|---------|---------|-----------|------|
+| `test_rolling_backtest.py` | Qlib | 滚动窗口回测 | 8 | 全部通过 |
+| `test_risk_management.py` | Freqtrade | 动态风险管理 | 14 | 全部通过 |
+| `test_factor_mining.py` | Qlib | 因子挖掘与评估 | 12 | 全部通过 |
 
-**结论**: 增强的因子评估体系能有效区分有效因子和噪声因子。建议集成到 factor-engine 的因子评估流程中。
+**总计: 34 个测试用例，全部通过。**
 
-### 测试 3: 向量化回测引擎性能对比
+---
 
-**测试文件**: `tests/study_2026/test_vectorized_backtest.py`  
-**借鉴来源**: AKQuant - Rust+Python 混合高性能回测  
-**测试内容**:
-- Pandas vs NumPy 向量化回测性能对比
-- 多规模测试: 50股×250天 到 500股×1000天
-- 边界条件: 空信号、全信号、单股票、涨跌停过滤
+### 测试 1: 滚动窗口回测
 
-**性能对比结果**:
+**优化方向**: 回测引擎增强 — 引入 Qlib 风格的滚动窗口训练/验证/测试机制
 
-| 规模 | Pandas | NumPy | 加速比 |
-|------|--------|-------|--------|
-| 50股×250天 (12,500行) | 1.07s | 0.01s | **103.5x** |
-| 100股×500天 (50,000行) | 3.63s | 0.03s | **144.6x** |
-| 500股×500天 (250,000行) | 16.60s | 0.10s | **170.8x** |
-| 500股×1000天 (500,000行) | 33.85s | 0.20s | **168.3x** |
+**测试类**:
+- `TestRollingWindowSplitter`: 4 个测试 — 无未来泄露、窗口连续性、最少数据量、边界条件
+- `TestRollingWindowBacktest`: 3 个测试 — 基础回测、滚动 vs 单次对比、空数据处理
+- `TestPerformanceComparison`: 1 个测试 — 过拟合检测
 
-**结论**: NumPy 向量化回测实现获得 103-170x 加速，且数据规模越大优势越明显。建议将回测引擎核心计算逻辑迁移到 NumPy 向量化实现。
+**测试回报**:
+```
+滚动窗口回测对比报告
+============================================================
+窗口数量: 14
+  窗口1: 2021-02-09~2021-05-19 -> 收益=... Sharpe=...
+  ...
+平均收益: ... , 收益标准差: ... (表明不同窗口收益存在差异)
+盈利窗口比例: ...% (反映策略在不同市场环境下的稳定性)
+平均最大回撤: ...
+```
+
+**结论**: 
+- 滚动窗口机制可有效暴露策略在不同市场环境下的表现差异
+- 收益标准差和盈利比例可作为策略稳健性指标
+- 建议: 将 `RollingWindowSplitter` 和 `RollingWindowBacktest` 集成到 [backtest-engine](file:///workspace/skills/backtest-engine) 中
+
+---
+
+### 测试 2: 动态风险管理
+
+**优化方向**: 风险管理增强 — 引入 Freqtrade 风格的 ATR 止损、波动率仓位、VaR/CVaR
+
+**测试类**:
+- `TestDynamicStopLoss`: 4 个测试 — ATR 计算、trailing stop 单调性、止损触发逻辑、波动率自适应
+- `TestVolatilityAdjustedSizing`: 4 个测试 — 基础仓位、高波动率低仓位、Kelly 公式、边界条件
+- `TestRiskMetrics`: 5 个测试 — VaR 历史法、VaR 参数法、CVaR、最大回撤、风险报告
+- `TestIntegratedRiskManagement`: 1 个测试 — ATR 止损降低回撤效果
+
+**ATR 止损效果对比**:
+```
+无止损最大回撤: -51.6% (模拟极端场景)
+有止损最大回撤: -7.1%
+回撤改善: +44.5%
+```
+
+**结论**:
+- ATR 动态止损显著降低最大回撤（模拟场景下从 51.6% 降至 7.1%）
+- 波动率自适应仓位在高低波动率场景下合理分配仓位
+- VaR/CVaR 提供机构级风险度量，可每日监控组合风险敞口
+- 建议: 将风控模块集成到 [portfolio-risk-engine](file:///workspace/skills/portfolio-risk-engine) 中
+
+---
+
+### 测试 3: 因子挖掘与评估
+
+**优化方向**: 因子引擎增强 — 引入 Qlib 风格的表达式引擎、Alpha158 因子库、IC 衰减分析、分组回测
+
+**测试类**:
+- `TestFactorExpressionEngine`: 6 个测试 — 简单表达式、函数调用、嵌套表达式、MA 乖离率、Ts_Rank、无效函数
+- `TestAlpha158Library`: 2 个测试 — 因子生成、无未来泄露
+- `TestICFactorDecay`: 2 个测试 — 基础 IC 衰减、IC 随时间衰减
+- `TestFactorGroupBacktest`: 2 个测试 — 分组回测、多因子单调性
+
+**测试回报**:
+```
+Alpha158 因子库生成 38 个因子
+
+IC 衰减分析:
+  momentum_5d:
+    period= 1  IC=... IR=...
+    period=10  IC=... IR=...
+  ...
+
+因子分组回测: momentum_20d
+  Group 1: ... ; Group 2: ... ; ... Group 5: ...
+  多空收益差: ...
+  单调性: 是
+```
+
+**结论**:
+- 表达式引擎支持 `Mean(close, 5)`, `Ts_Rank(...)`, `(close - Mean(close, 20)) / Std(close, 20)` 等灵活因子定义
+- Alpha158 风格因子库可一次性生成 38 个标准化因子，覆盖动量、反转、波动率、量价、技术指标
+- IC 衰减分析揭示因子预测能力随时间递减的规律
+- 分组回测提供更直观的单调性验证
+- 建议: 将因子表达式引擎和 Alpha158 集成到 [factor-engine](file:///workspace/skills/factor-engine) 中
+
+---
+
+## 三、优化方向总结
+
+| 优先级 | 模块 | 优化方向 | 借鉴来源 | 预期收益 | 实现复杂度 |
+|--------|------|---------|---------|---------|-----------|
+| 高 | backtest-engine | 滚动窗口回测 | Qlib | 识别过拟合，评估策略稳健性 | 中 |
+| 高 | portfolio-risk-engine | ATR 动态止损 + 波动率仓位 | Freqtrade | 降低回撤 30-50%，优化风险收益比 | 中 |
+| 高 | factor-engine | 因子表达式引擎 + Alpha158 | Qlib | 因子定义效率提升 10x，标准化因子库 | 高 |
+| 中 | factor-engine | IC 衰减分析 + 分组回测 | Qlib | 因子质量评估自动化 | 中 |
+| 中 | portfolio-risk-engine | VaR/CVaR 每日监控 | Qlib+Freqtrade | 机构级风险透明度 | 低 |
+| 中 | strategy-model-engine | 事件驱动策略接口 | Freqtrade+vnpy | 策略编写灵活性提升 | 高 |
+| 低 | factor-engine | 遗传编程因子挖掘 | Qlib RD-Agent | 自动发现新因子 | 高 |
 
 ---
 
 ## 四、待用户确认的优化建议
 
-### 建议 1: 引入因子表达式引擎 (推荐)
-- **范围**: 在 `factor-engine` 中新增 `expression_engine.py` 模块
-- **影响**: 新增因子定义方式，不影响现有代码
-- **风险**: 低 (纯增量功能)
-- **工作量**: 小 (验证代码已基本可用)
+以下优化方案需要用户确认后方可合并到主代码：
 
-### 建议 2: 增强因子评估体系 (推荐)
-- **范围**: 在 `factor-engine` 中新增 `factor_evaluation.py` 模块
-- **影响**: 增强现有因子评估输出，增加 IC 衰减、单调性、换手率等指标
-- **风险**: 低 (仅增强评估输出)
-- **工作量**: 中
+1. **[backtest-engine] 引入滚动窗口回测**
+   - 将 `RollingWindowSplitter` 集成到 `NativeBacktestAdapter`
+   - 在 `BacktestReport` 中新增 `cross_val_metrics` 字段
+   - 向后兼容：默认参数保持单次回测行为不变
 
-### 建议 3: 回测引擎 NumPy 向量化 (强烈推荐)
-- **范围**: 重构 `backtest-engine` 中的核心计算逻辑
-- **影响**: 大幅提升回测性能 (100x+)，可能改变现有绩效指标计算方式
-- **风险**: 中 (需保持与现有指标的兼容性)
-- **工作量**: 中
+2. **[portfolio-risk-engine] 引入动态止损和波动率仓位**
+   - 新增 `DynamicStopManager` 类，集成 ATR 推算止损
+   - 新增 `VolatilitySizer` 类，支持波动率目标仓位
+   - 新增 `RiskMonitor` 类，提供 VaR/CVaR 每日报告
+
+3. **[factor-engine] 引入因子表达式引擎**
+   - 新增 `FactorExpressionEngine` 模块，支持字符串表达式定义因子
+   - 新增 `Alpha158` 因子生成器，作为 `BaseFactor` 的子类
+   - 新增 `FactorEvaluator`，集成 IC 衰减分析和分组回测
 
 ---
 
-## 五、Git 状态
+## 五、文件清单
 
-**当前分支**: feature/quant-stream-inspired  
-**验证代码位置**: tests/study_2026/  
-**文件清单**:
-- tests/study_2026/test_factor_expression_engine.py
-- tests/study_2026/test_factor_ic_decay.py
-- tests/study_2026/test_vectorized_backtest.py
+```
+tests/study_2026/
+├── test_rolling_backtest.py    # 滚动窗口回测验证 (8 tests)
+├── test_risk_management.py     # 动态风险管理验证 (14 tests)
+├── test_factor_mining.py       # 因子挖掘与评估验证 (12 tests)
+└── LEARNING_REPORT.md          # 本报告
+```
 
-**约束**: 所有优化代码在用户确认前，未执行 git commit/push/merge 操作。
+---
+
+*报告结束。以上所有代码均为验证性测试，未修改主代码。等待用户确认后进行下一步操作。*
