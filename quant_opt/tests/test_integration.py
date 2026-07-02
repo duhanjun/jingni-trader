@@ -1,169 +1,116 @@
 """
-测试 4: 端到端集成测试
-====================
-
-模拟真实工作流:
-  1. 合成 60 天 × 20 股票 数据
-  2. 用 expr_engine 计算 4 个因子
-  3. 选 alpha_score Top 20% 作为多空信号
-  4. 用 vectorized_backtest 回测
-  5. 用 brinson_attribution 做行业归因
-
-验证端到端管线协同工作。
+集成测试: 串联 factor_expr_engine + dynamic_weighting + vectorized_backtest
 """
-import os
-import sys
-import json
-from datetime import datetime
+
+from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from expr_engine import evaluate_by_code
-from vectorized_backtest import VectorizedBacktester
-from brinson_attribution import brinson_fachler, brinson_attribution_summary
 
-
-def make_synth():
-    rng = np.random.default_rng(2026)
-    n_dates, n_stocks = 60, 20
-    dates = pd.bdate_range(end=datetime(2024, 12, 31), periods=n_dates)
-    codes = [f"{i:06d}.SH" for i in range(1, n_stocks + 1)]
+def _make_market(n_stocks: int = 20, n_days: int = 300, seed: int = 0) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    codes = [f"{i:06d}.SZ" for i in range(n_stocks)]
+    dates = pd.bdate_range("2023-01-01", periods=n_days)
     rows = []
-    industry_map = {c: ["银行", "地产", "科技", "消费", "医药"][i % 5]
-                    for i, c in enumerate(codes)}
     for code in codes:
-        ret = rng.normal(0.001, 0.02, n_dates)
-        price = 10 * np.cumprod(1 + ret)
+        close = 10 * np.exp(np.cumsum(rng.normal(0.0005, 0.02, n_days)))
         for i, d in enumerate(dates):
             rows.append({
-                "code": code, "date": d,
-                "open": price[i] * 0.999,
-                "high": price[i] * 1.005,
-                "low": price[i] * 0.995,
-                "close": price[i],
-                "volume": abs(rng.normal(1e6, 3e5)),
-                "amount": abs(rng.normal(1e7, 3e6)),
+                "code": code,
+                "date": d,
+                "open": close[i] * (1 + rng.normal(0, 0.005)),
+                "high": close[i] * (1 + abs(rng.normal(0, 0.01))),
+                "low": close[i] * (1 - abs(rng.normal(0, 0.01))),
+                "close": close[i],
+                "volume": int(rng.integers(1_000_000, 5_000_000)),
+                "amount": float(close[i] * rng.integers(1_000_000, 5_000_000)),
             })
-    df = pd.DataFrame(rows)
-    df["industry"] = df["code"].map(industry_map)
-    return df, dates, codes
+    return pd.DataFrame(rows)
 
 
-def main():
-    print("=" * 70)
-    print("  端到端集成测试: 表达式引擎 + 向量化回测 + Brinson 归因")
-    print("=" * 70)
-    df, dates, codes = make_synth()
-    print(f"\n  数据规模: {len(df)} 行, {df['code'].nunique()} 只股票, "
-          f"{df['date'].nunique()} 个交易日")
+def test_end_to_end_factor_to_backtest():
+    """端到端: 表达式引擎产出因子 -> 截面排名生成信号 -> 向量化回测"""
+    from quant_opt.factor_expr_engine import FactorExprEngine
+    from quant_opt.vectorized_backtest import VectorizedBacktester
 
-    # ---- Step 1: 因子计算 (expr_engine) ----
-    print("\n  [Step 1] 因子计算 (4 个表达式, 来自 Qlib 风格 DSL)")
-    expressions = {
-        "mom_20d":  "$close / Ref($close, 20) - 1",                 # 20日动量
-        "mean_rev": "-($close - Mean($close, 5)) / Std($close, 5)",  # 5日反转
-        "vol_20d":  "Std(Delta($close, 1), 20)",                     # 20日波动率
-        "vol_ratio":"Mean($volume, 5) / Mean($volume, 20)",          # 量比
-    }
-    factor_df = evaluate_by_code(df, expressions)
-    print(f"  ✓ 因子计算完成, 输出 {factor_df.shape}, 耗时合理")
-    print(f"    因子列: {[c for c in factor_df.columns if c not in ['code', 'date']]}")
-    print(f"    mom_20d  缺失率: {factor_df['mom_20d'].isna().mean():.1%}")
-    print(f"    mean_rev 缺失率: {factor_df['mean_rev'].isna().mean():.1%}")
-
-    # ---- Step 2: 构造多空信号 ----
-    print("\n  [Step 2] 合成因子得分 → TopK 目标权重")
-    factor_df["alpha_score"] = (
-        factor_df["mom_20d"].fillna(0) * 0.4
-        + factor_df["mean_rev"].fillna(0) * 0.4
-        - factor_df["vol_20d"].fillna(0) * 0.1
-        + factor_df["vol_ratio"].fillna(0) * 0.1
+    market = _make_market()
+    eng = FactorExprEngine()
+    factors = eng.compute_batch(market, {
+        "mom_20": "$close / Ref($close, 20) - 1",
+        "vol_20": "Std($close, 20) / Mean($close, 20)",
+        "amt_ma5": "Mean($amount, 5)",
+    })
+    # 合并, 截面排名打分
+    merged = market.merge(factors, on=["code", "date"], how="left")
+    # 简单等权 alpha = 排名
+    merged["score"] = (
+        merged.groupby("date")["mom_20"].rank(pct=True) * 0.5
+        - merged.groupby("date")["vol_20"].rank(pct=True) * 0.3
+        + merged.groupby("date")["amt_ma5"].rank(pct=True) * 0.2
     )
-
-    # 每日: 选 alpha_score 排名前 20% 做多 (等权), 后 20% 做空 (等权)
-    target_weights = pd.DataFrame(0.0, index=dates, columns=codes)
-    for dt in dates:
-        day = factor_df[factor_df["date"] == dt].dropna(subset=["alpha_score"])
-        if len(day) < 4:
-            continue
-        scores = day.set_index("code")["alpha_score"]
-        n = len(scores)
-        k = max(1, int(n * 0.2))
-        longs = scores.nlargest(k).index
-        shorts = scores.nsmallest(k).index
-        target_weights.loc[dt, longs] = 0.5 / k
-        target_weights.loc[dt, shorts] = -0.5 / k
-    print(f"  ✓ 每日 {k} 只多 / {k} 只空 (等权)")
-
-    # ---- Step 3: 向量化回测 ----
-    print("\n  [Step 3] 向量化回测 (vectorbt 风格)")
-    price_pivot = df.pivot(index="date", columns="code", values="close").ffill()
-    bt = VectorizedBacktester(
-        commission_rate=0.00025, stamp_tax_rate=0.001, slippage=0.0001
+    # 缺失剔除
+    merged = merged.dropna(subset=["score"])
+    # 简单信号: 每日 score 前 20% 买入, 其余不持有
+    merged["rank"] = merged.groupby("date")["score"].rank(pct=True, ascending=False)
+    sig = merged[merged["rank"] <= 0.2][["code", "date"]].copy()
+    sig["signal"] = 1
+    # 下一日重置: 用 0 表示不持有
+    all_dates = market["date"].drop_duplicates().sort_values()
+    full = pd.DataFrame(
+        [(c, d) for c in market["code"].unique() for d in all_dates],
+        columns=["code", "date"],
     )
-    result = bt.run(price_pivot, target_weights, init_capital=1e6,
-                    signal_mode="target_weight")
-    m = result.metrics
-    print(f"  期末净值: {result.equity.iloc[-1]:,.2f} (初始 1,000,000)")
-    print(f"  年化收益: {m['annual_return']*100:.2f}%")
-    print(f"  夏普比率: {m['sharpe_ratio']:.3f}")
-    print(f"  最大回撤: {m['max_drawdown']*100:.2f}%")
-    print(f"  日均换手: {m['avg_turnover']*100:.2f}%")
-    print(f"  累计成本占比: {m['total_cost_ratio']*100:.4f}%")
+    sig = full.merge(sig, on=["code", "date"], how="left")
+    sig["signal"] = sig["signal"].fillna(0).astype(int)
 
-    # ---- Step 4: 行业归因 ----
-    print("\n  [Step 4] Brinson-Fachler 行业归因 (最后一期截面)")
-    last_dt = dates[-1]
-    # 用最近 20 日窗口的"组合"和"基准"权重
-    last_20 = target_weights.iloc[-20:]
-    # 等权基准
-    eq_bench = pd.DataFrame(1.0 / len(codes), index=last_20.index, columns=codes)
-    # 行业映射
-    code_industry = df.drop_duplicates("code").set_index("code")["industry"]
-    # 聚合到行业层
-    industries = code_industry.unique()
-    pw_ind = pd.DataFrame(index=last_20.index, columns=industries, dtype=float)
-    bw_ind = pd.DataFrame(index=last_20.index, columns=industries, dtype=float)
-    pr_ind = pd.DataFrame(index=last_20.index, columns=industries, dtype=float)
-    br_ind = pd.DataFrame(index=last_20.index, columns=industries, dtype=float)
-    for ind in industries:
-        ind_codes = code_industry[code_industry == ind].index
-        for dt in last_20.index:
-            pw_ind.loc[dt, ind] = last_20.loc[dt, ind_codes].sum()
-            bw_ind.loc[dt, ind] = eq_bench.loc[dt, ind_codes].sum()
-            past_prices = price_pivot.loc[:dt, ind_codes].iloc[-21:]  # 20 日窗口
-            future_prices = price_pivot.loc[dt:, ind_codes].iloc[:5]  # 5 日窗口
-            if len(past_prices) >= 2 and len(future_prices) >= 2:
-                pr_ind.loc[dt, ind] = float(
-                    (future_prices.iloc[-1] / past_prices.iloc[0] - 1).mean()
-                )
-                br_ind.loc[dt, ind] = float(
-                    (future_prices.iloc[-1] / past_prices.iloc[0] - 1).mean()
-                )
-    summary = brinson_attribution_summary(pw_ind, bw_ind, pr_ind, br_ind)
-    print(f"  累计 Allocation:   {summary['allocation_cumulative']*100:.3f}%")
-    print(f"  累计 Selection:    {summary['selection_cumulative']*100:.3f}%")
-    print(f"  累计 Interaction:  {summary['interaction_cumulative']*100:.3f}%")
-    print(f"  累计 Total Excess: {summary['total_excess_cumulative']*100:.3f}%")
+    bt = VectorizedBacktester()
+    res = bt.run(market, sig)
+    m = res["metrics"]
+    print(f"  [OK] end-to-end: total_return={m['total_return']:.3f} sharpe={m['sharpe_ratio']:.3f} mdd={m['max_drawdown']:.3f}")
+    assert m["n_days"] > 0
 
-    print("\n" + "=" * 70)
-    print("  ✅ 端到端集成测试通过 — 三个模块协同工作")
-    print("=" * 70)
 
-    # ---- 保存摘要 ----
-    out = {
-        "data": {"rows": len(df), "stocks": len(codes), "dates": len(dates)},
-        "factors": list(expressions.keys()),
-        "backtest": m,
-        "attribution": summary,
-    }
-    out_path = os.path.join(os.path.dirname(__file__), "..", "results", "test_integration.json")
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(out, f, ensure_ascii=False, indent=2, default=str)
-    print(f"\n结果已保存: {out_path}")
+def test_dynamic_weighting_with_factor_engine():
+    """用表达式引擎产 IC, 动态加权产出 alpha_score, 与等权对比"""
+    from quant_opt.factor_expr_engine import FactorExprEngine
+    from quant_opt.dynamic_weighting import DynamicFactorWeighting
+
+    market = _make_market(n_stocks=15, n_days=300, seed=3)
+    eng = FactorExprEngine()
+    factors = eng.compute_batch(market, {
+        "mom_5": "$close / Ref($close, 5) - 1",
+        "mom_20": "$close / Ref($close, 20) - 1",
+        "vol_20": "Std($close, 20) / Mean($close, 20)",
+    })
+    merged = market[["code", "date", "close"]].merge(factors, on=["code", "date"], how="left")
+    # 构造 forward return
+    merged = merged.sort_values(["code", "date"])
+    merged["fwd_ret_5d"] = merged.groupby("code")["close"].transform(
+        lambda s: s.shift(-5) / s - 1
+    )
+    # 计算每日 IC
+    fac_names = ["mom_5", "mom_20", "vol_20"]
+    rows = []
+    for dt, g in merged.groupby("date"):
+        row = {"date": dt}
+        for f in fac_names:
+            sub = g[[f, "fwd_ret_5d"]].dropna()
+            if len(sub) >= 5:
+                row[f] = sub[f].rank().corr(sub["fwd_ret_5d"].rank())
+        rows.append(row)
+    ic_history = pd.DataFrame(rows).set_index("date")
+    weighting = DynamicFactorWeighting(method="icir_decay", halflife=60)
+    w = weighting.compute(ic_history)
+    print(f"  [OK] dynamic weighting: {w}")
+    assert abs(sum(w.values()) - 1.0) < 1e-6
+
+
+def run() -> dict:
+    test_end_to_end_factor_to_backtest()
+    test_dynamic_weighting_with_factor_engine()
+    return {"status": "passed", "cases": 2}
 
 
 if __name__ == "__main__":
-    main()
+    run()
