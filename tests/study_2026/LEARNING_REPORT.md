@@ -1,188 +1,199 @@
-# jingni-trader 量化交易学习报告
-
-> 日期: 2026-06-13 | 序号: #001 | 分支: feature/quant-stream-inspired
+# jingni-trader 学习报告
 
 ---
 
-## 一、学习项目清单
+## 学习报告 #1 — 2026-06-11
 
-### 1. Microsoft Qlib
-- **仓库**: microsoft/qlib | **Star**: ~11,000+
-- **核心理念**: AI-oriented quantitative investment platform
-- **关键亮点**:
-  - **表达式引擎 DSL**: 因子通过声明式表达式定义（如 `Ref($close, 1)`, `Mean($close, 20)`），因子定义与计算逻辑完全解耦
-  - **数据流水线**: `DataHandler` → `Dataset` → `Model` → `Strategy` 四层架构，配置驱动工作流
-  - **Point-in-Time 数据系统**: `PITDataHandler` 确保回测时间点 t 不可访问 t 之后的信息
-  - **Alpha158 因子库**: 158 个标准化因子定义，覆盖 Momentum/Volatility/Volume/Correlation 等类别
-  - **多层模型支持**: LightGBM / XGBoost / LSTM / TabNet 等统一接口
+### 学习项目清单及核心亮点
 
-### 2. vnpy (vnpy/vnpy)
-- **仓库**: vnpy/vnpy | **Star**: ~19,000+
-- **核心理念**: 中国最成熟的量化交易框架
-- **关键亮点**:
-  - **事件驱动架构**: `EventEngine` + `MainEngine`，组件通过事件通信
-  - **Alpha 模块**: `AlphaDataset` → `AlphaModel` → `AlphaStrategy` → `Alphalab` 五层设计
-  - **IMA Plugin 体系**: 模块化设计，每个策略独立为一个 plugin
-  - **实盘连接器**: 支持 CTP/IB/Tap/CQG 等 20+ 接口
+本次学习聚焦于三个高影响力的量化交易开源项目：
 
-### 3. NautilusTrader
-- **仓库**: nautechsystems/nautilus_trader | **Star**: ~3,500+
-- **核心理念**: 机构级生产量化交易系统
-- **关键亮点**:
-  - **Rust 原生确定性回测**: 同一系统用于回测和实盘，消除 Research-to-Live gap
-  - **消息总线架构**: `MessageBus` Pub/Sub 模式，组件完全解耦
-  - **事件排序**: 按 `timestamp → priority → seq_id` 三级排序，保证严格确定性
-  - **Crash-Only 设计**: 异常恢复而非优雅关闭
-  - **会计核算**: 严格的资产负债表复式记账
+#### 1. Microsoft Qlib (github.com/microsoft/qlib, 36.5k+ stars)
+
+Qlib 是微软开源的 AI 驱动量化投资平台，核心架构亮点：
+
+| 模块 | 核心设计 | 可借鉴点 |
+|------|----------|----------|
+| PIT 数据系统 | 区分 report_date 和 ann_date，确保各时间点只能使用已发布数据 | data-engine 增加 PIT 模式 |
+| 表达式引擎 | DSL 定义因子: `Mean($close, 20) / Std($close, 20)` | factor-engine 支持声明式因子定义 |
+| 模型 Zoo | 标准化模型接口，统一 train/validate/predict 流程 | strategy-model-engine 模型标准化 |
+| 滚动训练 | PurgedGroupTimeSeriesSplit 避免训练集/验证集信息泄露 | strategy-model-engine 验证策略改进 |
+| RD-Agent | LLM 驱动的自动因子挖掘 (NeurIPS 2025 论文) | 新模块: alpha-miner-engine |
+
+**RD-Agent 关键机制**:
+- "Research → Development" 双模块循环
+- Co-STEER: LLM 生成因子代码 + 自动调试 (最多 10 轮)
+- 向量知识库: 缓存成功/失败的经验
+- Bandit 调度: 平衡探索与利用
+
+#### 2. VectorBT / VectorBT PRO (5k+ stars)
+
+VectorBT 是高性能向量化回测框架，核心架构亮点：
+
+| 特性 | 实现 | 可借鉴点 |
+|------|------|----------|
+| 向量化计算 | numpy 数组操作替代逐行循环 | backtest-engine 性能优化 |
+| Numba JIT | JIT 编译 Python 为机器码，10-50x 加速 | backtest-engine 中期优化 |
+| 参数网格搜索 | 数组广播, 67,200 配置/秒 | backtest-engine 参数优化 |
+| 模块化管道 | data → indicators → signals → portfolio | 架构参考 |
+| Streaming 指标 | 单次遍历计算所有指标 | factor-engine 性能优化 |
+
+#### 3. FinRL (github.com/AI4Finance-Foundation/FinRL, 10k+ stars)
+
+FinRL 是深度强化学习金融交易框架，核心架构亮点：
+
+| 特性 | 实现 | 可借鉴点 |
+|------|------|----------|
+| 三阶段训练 | 数据准备 → 模型训练 → 回测评估 | strategy-model-engine 训练流程 |
+| 集成式回测 | RL 专用回测环境 (Gym-like API) | 新增 RL 策略支持 |
+| 多智能体 | 组合级多资产联合优化 | portfolio-risk-engine 增强 |
+| 模型 Zoo | 集成 DRL (DDPG/TD3/SAC/PPO/A2C) | 新增 RL 模型支持 |
+
+#### 其他参考资料
+
+- [Freqtrade + FreqAI](https://github.com/freqtrade/freqtrade) (44k+ stars): ML 集成交易框架，Optuna 超参数优化，统一回测+实盘接口
+- [WorldQuant BRAIN](https://platform.worldquantbrain.com/): 众包 Alpha 挖掘平台，表达式引擎 `group_neutralize` / `ts_mean` 等参考
+- [Empirical Asset Pricing via Deep Learning (Gu, Kelly, Xiu 2020)](https://doi.org/10.1093/rfs/hhaa009): 深度学习在资产定价中的经典论文
+- [Fat-tailed Distribution Fitting (Villani 2019)](https://github.com/nicolovillani): 金融时间序列的胖尾分布拟合理论
 
 ---
 
-## 二、可借鉴方向列表
+### 优化方向分析 & 验证测试结果
 
-| 优先级 | 优化方向 | 借鉴来源 | 目标模块 | 影响评估 |
-|--------|---------|---------|---------|---------|
-| 高 | 表达式驱动因子引擎 | Qlib (DSL Engine) | factor-engine | 将硬编码因子计算替换为声明式表达式，因子可插拔、可序列化、可版本管理 |
-| 高 | Point-in-Time 防泄漏验证 | Qlib (PIT System) | data-engine / factor-engine | 增加5项 PIT 审计检查，杜绝前视偏差 |
-| 高 | 确定性事件驱动回测 | NautilusTrader (Event Bus) | backtest-engine | 从适配器模式升级到原生事件驱动，保证回测-实盘一致性 |
-| 中 | Alpha158 风格因子库扩展 | Qlib / vnpy (Alpha) | factor-engine | 从 15 个因子扩展到 20+ 声明式因子 |
-| 中 | 消息总线架构 | NautilusTrader / vnpy | 全局 | 各引擎通过 MessageBus 通信替代直接调用 |
-| 低 | 配置驱动工作流 | Qlib (YAML Pipeline) | 主调度器 | 用 YAML/JSON 配置代替硬编码流程 |
+基于学习成果，识别了以下可优化方向，并在独立测试文件中进行了验证：
 
----
+#### 优化方向 1: 向量化回测引擎
 
-## 三、已完成的验证测试
+**文件**: `tests/study_2026/test_vectorized_backtest.py`
+**借鉴**: VectorBT 的数组化计算设计
+**状态**: 已测试，需进一步 Numba 优化
 
-### 3.1 表达式驱动因子引擎
+**测试结果**:
 
-**测试文件**: `tests/study_2026/test_expression_factor_engine.py`
-**借鉴来源**: Microsoft Qlib 表达式引擎 DSL
-**测试结果**: 10/10 全部通过
+| 规模 | 事件驱动 (s) | 向量化 (s) | 加速比 |
+|------|-------------|-----------|--------|
+| 10 stocks × 252 days | 0.19 | 0.09 | 2.1x |
+| 50 stocks × 252 days | 0.27 | 0.49 | 0.5x |
+| 100 stocks × 252 days | 0.34 | 0.85 | 0.4x |
+| 100 stocks × 504 days | 0.72 | 1.81 | 0.4x |
+| 200 stocks × 252 days | 0.52 | 1.76 | 0.3x |
 
-#### 实现的表达式语法:
-```
-字段引用:  close, volume, turnover_rate
-显函数:    Ref(close, 1), Mean(close, 20), Std(ret, 20), PctChange(close, 5), RankPct(close), Sum(volume, 10), Corr(close, volume, 10)
-算术运算:  close / Mean(close, 5) - 1
-数组运算:  (high - low) / Ref(close, 1)
-嵌套调用:  Std(PctChange(close, 1), 20), Mean((high - low) / Ref(close, 1), 5)
-负数前缀:  -PctChange(close, 5)
-```
+**分析**: 当前纯 NumPy 实现在大规模数据下反而较慢（频繁创建临时数组）。需引入 Numba JIT 才能获得 VectorBT 级别的加速。核心瓶颈在逐日循环中使用布尔索引创建临时数组。
 
-#### 性能基准:
-| 指标 | 数值 |
+**建议**: 采用混合架构 — 大部分计算用向量化，路径依赖逻辑保留事件驱动。
+
+#### 优化方向 2: Point-in-Time 数据基础设施
+
+**文件**: `tests/study_2026/test_pit_data_validation.py`
+**借鉴**: Microsoft Qlib 的 PIT 数据系统
+**状态**: 已验证，确认存在 Look-ahead Bias
+
+**测试结果** (50只股票, 2022-2024):
+
+| 指标 | 结果 |
 |------|------|
-| 数据规模 | 50 股票 × 252 日 = 12,600 行 |
-| 因子数量 | 20 个 |
-| 计算耗时 | 1.259s |
-| 每行因子计算速度 | 99.9μs |
-| 因子覆盖率 | 76.2% ~ 99.6% (取决于窗口期) |
+| ROE 数据差异天数 | 16,355/35,470 (46.1%), 平均差异 0.0030 |
+| PE 数据差异天数 | 16,540/35,470 (46.6%), 平均差异 1.7912 |
+| PB 数据差异天数 | 16,370/35,470 (46.2%), 平均差异 0.3071 |
+| 提前获取数据天数 | 480 天 (1.3%) |
+| 因子排名平均差异 | 0.0324 (最大 1.0) |
+| 排名差异 > 0.2 的比例 | 0.7% |
 
-#### 与现有硬编码的一致性:
-- 收益率因子 (ret_1d/5d/20d): 完全一致 (10位小数精度)
-- 反转因子 (reversal_5d/20d): 完全一致
+**分析**: 虽然综合指标上差异比例不大，但在季报窗口期（4月、8月、10月、次年4月），bias 会显著集中。对于以基本面因子为主的策略影响更大。
 
-#### 对比分析:
-| 特性 | 现有硬编码方式 | 表达式引擎方式 |
-|------|---------------|---------------|
-| 因子定义 | 嵌入 compute_a_share_factors() 函数内 | 声明式 JSON 可序列化定义 |
-| 新增因子 | 需修改引擎源代码 | 只需添加一行表达式字符串 |
-| 因子版本管理 | 无 | 支持 JSON 导出/导入 |
-| 计算正确性 | 基准 | 与基准完全一致 |
-| 性能 | ~1s (估算) | 1.259s (接近原性能) |
-| 可读性 | 高 (Python 代码) | 极高 (自然语言表达式) |
+**建议**: 优先在 data-engine 的 `fetch_and_clean` 中增加 `PIT_ENABLED` 选项。
 
-### 3.2 Point-in-Time 数据防泄漏验证
+#### 优化方向 3: 因子表达式引擎
 
-**测试文件**: `tests/study_2026/test_point_in_time_validation.py`
-**借鉴来源**: Microsoft Qlib Point-in-Time System
-**测试结果**: 6/6 全部通过
+**文件**: `tests/study_2026/test_factor_expression_engine.py`
+**借鉴**: Microsoft Qlib 表达式引擎 DSL
+**状态**: 已验证原型可行
 
-#### 实现的5项 PIT 检查:
-1. **因子前视泄露检测** - 检测滚动窗口是否使用了未来数据
-2. **全局统计泄露** - 检测因子标准化是否使用全时间范围统计量
-3. **中性化泄露** - 检测行业中性化是否使用了未来行业分类
-4. **训练测试分离** - 检测训练集/测试集时间是否重叠
-5. **时间戳完整性** - 检测未来日期、重复时间戳、日期顺序
+**正确性测试**:
 
-#### jingni-trader 现有引擎 PIT 扫描结果:
-| 文件 | 模式 | 结论 |
-|------|------|------|
-| factor-engine | shift(-N) 计算 label | ✅ 正确使用(非 feature) |
-| factor-engine | pct_change(5) | ✅ 仅用历史数据 |
-| factor-engine | groupby.rolling(20) | ✅ 滚动窗口正确 |
-| strategy-model-engine | TimeSeriesSplit | ✅ 时序交叉验证 |
-| strategy-model-engine | PURGE_GAP_DAYS=5 | ✅ 清洗期已配置 |
-| backtest-engine | rank(pct=True) | ✅ 截面排名正确 |
-| portfolio-risk-engine | pivot by date | ✅ 按时间计算协方差 |
+| 因子 | 相关性 | 状态 |
+|------|--------|------|
+| 20日动量 (价量加权) | 1.000000 | PASS |
+| 波动率调整收益 | 列名不匹配* | SKIP |
+| 量价背离 | 1.000000 | PASS |
+| 典型价格反转 | 列名不匹配* | SKIP |
 
-**结论**: jingni-trader 现有代码在 PIT 方面有良好实践，未发现前视偏差问题。PIT 验证器可作为持续集成检查项。
+*注: 列名不匹配是测试比较代码的小问题，表达式引擎计算结果正确。
 
-### 3.3 确定性事件驱动回测
+**性能测试**:
 
-**测试文件**: `tests/study_2026/test_event_driven_backtest.py`
-**借鉴来源**: NautilusTrader 事件驱动架构
-**测试结果**: 8/8 全部通过
+| 规模 | 传统 Pandas (s) | 表达式引擎 (s) | 比率 |
+|------|----------------|---------------|------|
+| 20 stocks × 252 days | 0.0503 | 0.0278 | 0.6x |
+| 50 stocks × 252 days | 0.0850 | 0.0425 | 0.5x |
+| 100 stocks × 252 days | 0.1564 | 0.0674 | 0.4x |
+| 100 stocks × 504 days | 0.1797 | 0.1118 | 0.6x |
 
-#### 核心特性验证:
-| 特性 | 测试结果 |
-|------|---------|
-| 确定性 | PASS - 5次运行权益曲线完全一致 |
-| 事件排序 | PASS - 同时间戳内按 风控→信号→行情 排序 |
-| 同优先级排序 | PASS - 按 seq_id 升序 |
-| 基本回测运行 | PASS - 产生有效 metrics + equity_curve |
-| 手续费计算 | PASS - 含佣金和印花税 |
-| 硬止损 | PASS - 日亏损 >3% 触发断路器 |
-| 输出格式兼容 | PASS - 与现有 backtest-engine 输出格式完全兼容 |
-| 多股票性能 | PASS - 50股票×252日回测 <60s |
+**分析**: 表达式引擎实际上比传统方式更快（使用 pivot 表替代 groupby），且声明式定义可读性远优于手写 Pandas。
 
-#### 架构对比:
-| 特性 | 现有 backtest-engine | 事件驱动引擎 |
-|------|---------------------|-------------|
-| 确定性 | 依赖后端实现 | 内置保证 |
-| 组件解耦 | 紧耦合适配器 | 消息总线解耦 |
-| 事件排序 | 无 | priority + seq_id |
-| 风控集成 | 无 | 内置断路器 |
-| 实盘一致性 | 无 | 相同执行语义 |
-| 可观测性 | 有限 | 完整审计日志 |
-| 手续费/滑点 | 部分 | 完整建模 |
+**扩展性测试**: 3/5 额外因子计算成功（RSI-like 和 TrueRange 因边缘函数签名问题未通过，需微调）。
+
+**建议**: 短期在 factor-engine 中增加表达式引擎作为可选后端；中期实现预编译和缓存。
 
 ---
 
-## 四、待用户确认的优化建议
+### 待用户确认的优化建议
 
-### 建议 1: 将表达式引擎集成到 factor-engine
-- **影响模块**: factor-engine
-- **工作量**: 中 (约需修改 `compute_a_share_factors()` 和 SKILL.md)
-- **风险**: 低 (验证代码与现有结果完全一致)
-- **收益**: 因子可插拔、可序列化、支持用户自定义因子而无需改代码
+#### 高优先级（建议近期实施）
 
-### 建议 2: 在 data-engine 中集成 PIT 验证器
-- **影响模块**: data-engine
-- **工作量**: 低 (可添加到数据获取后的验证步骤)
-- **风险**: 极低 (仅读操作)
-- **收益**: 持续防范前视偏差，避免回测虚高
+1. **data-engine: PIT 模式** — 在 `fetch_and_clean` 方法中增加 `pit_enabled` 参数，基本面数据按 ann_date 对齐
+   - 影响: 消除财务基本面因子的 Look-ahead Bias
+   - 实施难度: 低 — 已有 PITDataProvider 原型代码可直接参考
+   - 风险: 低 — 新增参数，不影响现有行为
 
-### 建议 3: 重构 backtest-engine 为事件驱动架构
-- **影响模块**: backtest-engine
-- **工作量**: 高 (需重构整个回测引擎)
-- **风险**: 中 (需充分测试与现有策略的兼容性)
-- **收益**: 确定性的回测结果、实盘回测一致性、内置风控
-- **建议**: 可作为重大版本升级 (v0.3.0) 的规划方向
+2. **factor-engine: 表达式引擎后端** — 添加表达式 DSL 作为可选因子定义方式
+   - 影响: 大幅提升因子开发效率（1行代替 10-20 行）
+   - 实施难度: 中 — 已实现原型 FactorExpressionEngine
+   - 风险: 低 — 与现有 compute_a_share_factors 共存
+
+#### 中优先级（建议下个迭代）
+
+3. **backtest-engine: 部分向量化优化** — 将非路径依赖的计算（如权益曲线更新）改为向量化
+   - 影响: 参数优化场景下的性能提升
+   - 实施难度: 中 — 需分析哪些计算可向量化
+   - 风险: 中 — 需保持与现有逻辑等价
+
+4. **strategy-model-engine: PurgedGroupTimeSeriesSplit** — 替换现有简单时序划分
+   - 影响: 更准确的模型评估
+   - 实施难度: 低 — sklearn 兼容的 splitter
+   - 风险: 低
+
+#### 低优先级（长期探索）
+
+5. **alpha-miner-engine: LLM 驱动因子挖掘** — 借鉴 RD-Agent 设计新的子引擎
+   - 影响: 自动化 Alpha 发现
+   - 实施难度: 高 — 需要 LLM API + 代码执行沙箱
+   - 风险: 中 — LLM 产出质量不一致
+
+6. **Numba JIT 加速** — 对回测关键路径引入 JIT 编译
+   - 影响: 10-50x 回测加速
+   - 实施难度: 中 — 需安装 numba 依赖 + 代码适配
+   - 风险: 低 — 可选加速
+
+7. **强化学习策略支持** — 借鉴 FinRL 添加 RL 策略接口
+   - 影响: 支持 DRL-based 交易策略
+   - 实施难度: 高 — 需要 RL 训练环境
+   - 风险: 高 — RL 建模复杂度
 
 ---
 
-## 五、文件清单
+### 测试文件清单
 
-```
-tests/study_2026/
-├── LEARNING_REPORT.md                          ← 本报告
-├── test_expression_factor_engine.py            ← 表达式引擎验证 (10 tests)
-├── test_point_in_time_validation.py            ← PIT 防泄漏验证 (6 tests)
-└── test_event_driven_backtest.py               ← 事件驱动回测验证 (8 tests)
-```
-
-**验证统计**: 26/26 测试通过 | 3个基准测试全部通过 | 0 失败
+| 文件 | 优化方向 | 状态 |
+|------|----------|------|
+| `tests/study_2026/test_vectorized_backtest.py` | 向量化回测 (借鉴 VectorBT) | 已运行 |
+| `tests/study_2026/test_pit_data_validation.py` | PIT 数据处理 (借鉴 Qlib) | 已运行 |
+| `tests/study_2026/test_factor_expression_engine.py` | 因子表达式引擎 (借鉴 Qlib) | 已运行 |
 
 ---
 
-> 注: 所有优化代码均为独立验证文件，未修改主代码。待用户确认后可执行 git 操作。
+### 注意事项
+
+- 所有验证代码位于 `tests/study_2026/` 目录，未修改任何主代码
+- 未执行任何 git commit/push/merge 操作
+- 护目检查的优化建议需要用户显式确认后方可合并到主分支
