@@ -1,507 +1,515 @@
-#!/usr/bin/env python3
 """
-================================================================================
-优化方向: 数据处理性能优化 - Polars 替代 Pandas 核心操作
-借鉴来源: https://github.com/yutiansut/QUANTAXIS
-          QUANTAXIS v2.1 的 Rust 核心 + QADataBridge (Apache Arrow 零拷贝)
-          + QAPRO-RS 的 Polars 集成，实现 10-100x 性能提升
-================================================================================
+验证方向: Polars 高性能数据处理 (Data Pipeline Optimization)
+借鉴来源: akquant (Rust-based core + Polars engine) + Factor Engine paper (Polars-based computation)
+日期: 2026-06-14
 
-验证目标:
- 1. Pandas vs Polars 在常见量化数据操作上的性能对比
- 2. 大截面因子计算（多股票 × 多日期）性能测试
- 3. 内存使用对比分析
- 4. 评估渐进式迁移可行性
+优化思路:
+    当前 data-engine 和 factor-engine 使用 pandas 进行数据处理，pandas 的
+    groupby + rolling 操作在大规模数据下存在性能瓶颈。借鉴 akquant 的
+    Rust+Polars 混合架构和 Factor Engine 论文中的 Polars 实践，评估使用
+    Polars 替代 pandas 的可行性和性能收益。
+
+    验证内容:
+    1. Pandas vs Polars eager vs Polars lazy 的性能对比
+    2. 因子计算场景的加速比
+    3. 数据清洗场景的加速比
+    4. 内存占用对比
 """
+
+import sys
+import os
+import time
+import unittest
+import tempfile
 
 import numpy as np
 import pandas as pd
-from datetime import datetime
-import time
-import os
-import sys
-import warnings
 
-warnings.filterwarnings('ignore')
-
-# 检测 Polars 是否可用
 try:
     import polars as pl
     HAS_POLARS = True
-    print(f"Polars 版本: {pl.__version__}")
 except ImportError:
     HAS_POLARS = False
-    print("Polars 未安装，将跳过 Polars 相关测试")
-    print("安装: pip install polars")
+    print("警告: Polars 未安装，将跳过 Polars 对比测试")
 
-print(f"Pandas 版本: {pd.__version__}")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 
-# ============================================================================
-# 数据生成
-# ============================================================================
+# ============================================================
+# 1. 测试数据生成
+# ============================================================
 
-def generate_large_dataset(
-    n_stocks: int = 500,
-    n_days: int = 1000,
-    seed: int = 42
-) -> pd.DataFrame:
-    """生成大规模A股模拟数据集"""
-    np.random.seed(seed)
-    dates = pd.date_range('2018-01-01', periods=n_days, freq='B')
-    codes = [f"{600000 + i:06d}.SH" for i in range(n_stocks)]
+def generate_large_dataset(n_stocks=100, n_days=500):
+    """
+    生成大规模测试数据集
+    模拟 A 股全市场约 500 只股票、3 年数据量
+    """
+    np.random.seed(42)
+    dates = pd.date_range('2021-01-01', periods=n_days, freq='B')
+    codes = [f'{i:06d}.SZ' for i in range(1, n_stocks + 1)]
 
-    # 向量化生成（比逐个循环快很多）
-    all_data = []
-
-    for i, code in enumerate(codes):
+    rows = []
+    for code in codes:
         start_price = np.random.uniform(5, 200)
-        returns = np.random.normal(0.0003, 0.015, n_days)
-        # 添加轻微自相关
-        for j in range(1, n_days):
-            returns[j] += 0.1 * returns[j - 1]
+        price = start_price
+        # 使用向量化生成以提高速度
+        returns = np.random.normal(0.0003, 0.018, n_days)
+        returns[0] = 0
         prices = start_price * np.cumprod(1 + returns)
 
-        # 使用 DataFrame 构造
-        chunk = pd.DataFrame({
-            'date': dates,
-            'code': code,
-            'close': prices.astype(np.float32),
-            'open': (prices * (1 + np.random.normal(0, 0.003, n_days))).astype(np.float32),
-            'high': (prices * (1 + np.abs(np.random.normal(0, 0.01, n_days)))).astype(np.float32),
-            'low': (prices * (1 - np.abs(np.random.normal(0, 0.01, n_days)))).astype(np.float32),
-            'volume': np.random.lognormal(14, 0.5, n_days).astype(np.int64),
-            'amount': np.random.lognormal(18, 0.5, n_days).astype(np.float64),
-            'turnover_rate': np.random.uniform(0.005, 0.05, n_days).astype(np.float32),
-        })
-        all_data.append(chunk)
+        opens = prices * (1 + np.random.normal(0, 0.003, n_days))
+        highs = np.maximum(opens, prices) * (1 + np.abs(np.random.normal(0, 0.01, n_days)))
+        lows = np.minimum(opens, prices) * (1 - np.abs(np.random.normal(0, 0.01, n_days)))
+        volumes = np.random.lognormal(15, 0.5, n_days)
 
-    df = pd.concat(all_data, ignore_index=True)
-    df = df.sort_values(['date', 'code']).reset_index(drop=True)
-    return df
+        for j in range(n_days):
+            rows.append({
+                'code': code,
+                'date': dates[j],
+                'open': round(opens[j], 2),
+                'high': round(highs[j], 2),
+                'low': round(lows[j], 2),
+                'close': round(prices[j], 2),
+                'volume': int(volumes[j]),
+            })
 
-
-# ============================================================================
-# 性能基准测试
-# ============================================================================
-
-def benchmark_grouped_rolling(df: pd.DataFrame, n_runs: int = 3):
-    """测试分组滚动计算性能 (因子引擎核心操作)"""
-    print("\n" + "-" * 50)
-    print("基准1: 分组滚动计算 (groupby + rolling)")
-    print("-" * 50)
-
-    # Pandas 版本
-    pandas_times = []
-    for run in range(n_runs):
-        t0 = time.time()
-        result = pd.DataFrame()
-        result['ret_1d'] = df.groupby('code')['close'].pct_change()
-        result['ret_5d'] = df.groupby('code')['close'].pct_change(5)
-        result['ret_20d'] = df.groupby('code')['close'].pct_change(20)
-        result['ma_20'] = df.groupby('code')['close'].transform(
-            lambda x: x.rolling(20, min_periods=5).mean()
-        )
-        result['ma_60'] = df.groupby('code')['close'].transform(
-            lambda x: x.rolling(60, min_periods=20).mean()
-        )
-        result['vol_20'] = df.groupby('code')['close'].transform(
-            lambda x: x.pct_change().rolling(20, min_periods=10).std()
-        )
-        result['vol_60'] = df.groupby('code')['close'].transform(
-            lambda x: x.pct_change().rolling(60, min_periods=30).std()
-        )
-        result['turnover_20'] = df.groupby('code')['turnover_rate'].transform(
-            lambda x: x.rolling(20, min_periods=5).mean()
-        )
-        elapsed = time.time() - t0
-        pandas_times.append(elapsed)
-        print(f"  Pandas run {run+1}: {elapsed:.4f}s")
-
-    # Polars 版本
-    polars_times = []
-    if HAS_POLARS:
-        df_pl = pl.from_pandas(df[['date', 'code', 'close', 'turnover_rate']])
-        for run in range(n_runs):
-            t0 = time.time()
-            result_pl = df_pl.sort(['code', 'date']).with_columns([
-                pl.col('close').pct_change().over('code').alias('ret_1d'),
-                pl.col('close').pct_change(5).over('code').alias('ret_5d'),
-                pl.col('close').pct_change(20).over('code').alias('ret_20d'),
-                pl.col('close').rolling_mean(20, min_periods=5).over('code').alias('ma_20'),
-                pl.col('close').rolling_mean(60, min_periods=20).over('code').alias('ma_60'),
-                pl.col('close').pct_change().rolling_std(20, min_periods=10).over('code').alias('vol_20'),
-                pl.col('close').pct_change().rolling_std(60, min_periods=30).over('code').alias('vol_60'),
-                pl.col('turnover_rate').rolling_mean(20, min_periods=5).over('code').alias('turnover_20'),
-            ])
-            elapsed = time.time() - t0
-            polars_times.append(elapsed)
-            print(f"  Polars run {run+1}: {elapsed:.4f}s")
-
-    pandas_avg = np.mean(pandas_times) if pandas_times else 0
-    polars_avg = np.mean(polars_times) if polars_times else 0
-
-    print(f"\n  Pandas 平均: {pandas_avg:.4f}s")
-    if HAS_POLARS:
-        speedup = pandas_avg / polars_avg if polars_avg > 0 else float('inf')
-        print(f"  Polars 平均: {polars_avg:.4f}s")
-        print(f"  加速比: {speedup:.2f}x")
-
-    return pandas_avg, polars_avg
+    return pd.DataFrame(rows)
 
 
-def benchmark_cross_sectional_rank(df: pd.DataFrame, n_runs: int = 3):
-    """测试截面排名计算性能"""
-    print("\n" + "-" * 50)
-    print("基准2: 截面排名与排序 (非常见操作)")
-    print("-" * 50)
+# ============================================================
+# 2. Pandas 实现 (对标现有代码)
+# ============================================================
 
-    # 先计算一个因子
-    df_temp = df.copy()
-    df_temp['factor_1'] = df.groupby('code')['close'].pct_change(20)
+def pandas_compute_factors(df_pd: pd.DataFrame, verbose=False) -> pd.DataFrame:
+    """使用 pandas 计算因子（模拟现有 factor-engine 的方式）"""
+    df = df_pd.sort_values(['code', 'date']).copy()
 
-    # Pandas 版本
-    pandas_times = []
-    for run in range(n_runs):
-        t0 = time.time()
-        # 每日截面排名
-        ranked = df_temp.groupby('date')['factor_1'].rank(pct=True)
-        # TopK 选择
-        top_k = df_temp.copy()
-        top_k['rank'] = ranked
-        top_k = top_k.sort_values(['date', 'rank'], ascending=[True, False])
-        # 只保留每日 top 20%
-        top_stocks = top_k[top_k['rank'] > 0.8]
-        elapsed = time.time() - t0
-        pandas_times.append(elapsed)
-        print(f"  Pandas run {run+1}: {elapsed:.4f}s")
+    result = df[['code', 'date']].copy()
 
-    # Polars 版本
-    polars_times = []
-    if HAS_POLARS:
-        df_pl = pl.from_pandas(df_temp[['date', 'code', 'factor_1']])
-        for run in range(n_runs):
-            t0 = time.time()
-            result = df_pl.with_columns([
-                (pl.col('factor_1').rank('ordinal', descending=True) / pl.col('factor_1').count())
-                .over('date')
-                .alias('rank')
-            ])
-            top_stocks_pl = result.filter(pl.col('rank') < 0.2)
-            elapsed = time.time() - t0
-            polars_times.append(elapsed)
-            print(f"  Polars run {run+1}: {elapsed:.4f}s")
+    if verbose:
+        t0 = time.perf_counter()
 
-    pandas_avg = np.mean(pandas_times) if pandas_times else 0
-    polars_avg = np.mean(polars_times) if polars_times else 0
+    # 收益率因子
+    result['ret_1d'] = df.groupby('code')['close'].transform(lambda x: x.pct_change())
+    result['ret_5d'] = df.groupby('code')['close'].transform(lambda x: x.pct_change(5))
+    result['ret_20d'] = df.groupby('code')['close'].transform(lambda x: x.pct_change(20))
+    result['ret_60d'] = df.groupby('code')['close'].transform(lambda x: x.pct_change(60))
 
-    print(f"\n  Pandas 平均: {pandas_avg:.4f}s")
-    if HAS_POLARS:
-        speedup = pandas_avg / polars_avg if polars_avg > 0 else float('inf')
-        print(f"  Polars 平均: {polars_avg:.4f}s")
-        print(f"  加速比: {speedup:.2f}x")
+    # 反转因子
+    result['reversal_5d'] = -result['ret_5d']
+    result['reversal_20d'] = -result['ret_20d']
 
-    return pandas_avg, polars_avg
-
-
-def benchmark_pivot_and_cov(df: pd.DataFrame, n_runs: int = 3):
-    """测试数据透视和协方差计算 (组合优化引擎核心)"""
-    print("\n" + "-" * 50)
-    print("基准3: 数据透视 + 协方差矩阵计算")
-    print("-" * 50)
-
-    # 取前200只股票，确保不溢出
-    top_codes = df['code'].unique()[:200]
-    df_sub = df[df['code'].isin(top_codes)].copy()
-
-    # Pandas 版本
-    pandas_times = []
-    for run in range(n_runs):
-        t0 = time.time()
-        # 透视表
-        pivot = df_sub.pivot(index='date', columns='code', values='close')
-        returns = pivot.pct_change().dropna()
-        # 协方差矩阵
-        cov_matrix = returns.cov()
-        elapsed = time.time() - t0
-        pandas_times.append(elapsed)
-        print(f"  Pandas run {run+1}: {elapsed:.4f}s")
-
-    # Polars 版本
-    polars_times = []
-    if HAS_POLARS:
-        df_pl = pl.from_pandas(df_sub[['date', 'code', 'close']])
-        for run in range(n_runs):
-            t0 = time.time()
-            pivot_pl = df_pl.pivot(
-                values='close',
-                index='date',
-                on='code'
-            )
-            # 计算收益率
-            ret_cols = [c for c in pivot_pl.columns if c != 'date']
-            pivot_pl = pivot_pl.with_columns([
-                pl.col(c).pct_change().alias(f"{c}_ret")
-                for c in ret_cols
-            ])
-            # 计算协方差（Polars 0.19+ 直接支持）
-            ret_pl = pivot_pl.select([
-                pl.col(f"{c}_ret").alias(c)
-                for c in ret_cols
-            ]).drop_nulls()
-            # Polars covariance
-            cov_dict = {}
-            for c in ret_cols:
-                cov_dict[c] = []
-                for c2 in ret_cols:
-                    cov_val = ret_pl.select(
-                        pl.cov(c, c2)
-                    ).item()
-                    cov_dict[c].append(cov_val)
-            elapsed = time.time() - t0
-            polars_times.append(elapsed)
-            print(f"  Polars run {run+1}: {elapsed:.4f}s")
-
-    pandas_avg = np.mean(pandas_times) if pandas_times else 0
-    polars_avg = np.mean(polars_times) if polars_times else 0
-
-    print(f"\n  Pandas 平均: {pandas_avg:.4f}s")
-    if HAS_POLARS:
-        speedup = pandas_avg / polars_avg if polars_avg > 0 else float('inf')
-        print(f"  Polars 平均: {polars_avg:.4f}s")
-        print(f"  加速比: {speedup:.2f}x")
-
-    return pandas_avg, polars_avg
-
-
-def benchmark_memory_usage(df: pd.DataFrame):
-    """测试内存使用对比"""
-    print("\n" + "-" * 50)
-    print("基准4: 内存使用对比")
-    print("-" * 50)
-
-    # Pandas 内存
-    pandas_memory_mb = df.memory_usage(deep=True).sum() / (1024 * 1024)
-    print(f"  Pandas DataFrame: {pandas_memory_mb:.2f} MB")
-
-    # Parquet 文件大小
-    parquet_path = "/tmp/test_quant_data.parquet"
-    df.to_parquet(parquet_path, compression='zstd')
-    parquet_size_mb = os.path.getsize(parquet_path) / (1024 * 1024)
-    print(f"  Parquet 文件 (zstd): {parquet_size_mb:.2f} MB")
-
-    # Polars 内存
-    polars_memory_mb = 0
-    if HAS_POLARS:
-        df_pl = pl.from_pandas(df)
-        # Polars 不提供直接的 memory_usage，估算
-        est_rows = len(df)
-        est_cols = len(df.columns)
-        est_bytes = est_rows * est_cols * 8  # 每元素8字节粗略估计
-        polars_memory_mb = est_bytes / (1024 * 1024)
-        print(f"  Polars DataFrame (估计): {polars_memory_mb:.2f} MB")
-
-        # Polars Parquet
-        pl_path = "/tmp/test_quant_data_pl.parquet"
-        df_pl.write_parquet(pl_path)
-        pl_size_mb = os.path.getsize(pl_path) / (1024 * 1024)
-        print(f"  Polars Parquet 文件: {pl_size_mb:.2f} MB")
-
-        # 懒加载评估
-        lazy_pl = pl.scan_parquet(pl_path)
-        print(f"  Polars LazyFrame (scan): 0 MB (延迟加载)")
-
-    return pandas_memory_mb, polars_memory_mb
-
-
-def benchmark_io_speed(df: pd.DataFrame, n_runs: int = 3):
-    """测试 IO 读写性能"""
-    print("\n" + "-" * 50)
-    print("基准5: Parquet IO 读写性能")
-    print("-" * 50)
-
-    # Pandas 写
-    pandas_write_times = []
-    for run in range(n_runs):
-        t0 = time.time()
-        df.to_parquet('/tmp/test_pandas_io.parquet')
-        elapsed = time.time() - t0
-        pandas_write_times.append(elapsed)
-    print(f"  Pandas 写平均: {np.mean(pandas_write_times):.4f}s")
-
-    # Pandas 读
-    pandas_read_times = []
-    for run in range(n_runs):
-        t0 = time.time()
-        _ = pd.read_parquet('/tmp/test_pandas_io.parquet')
-        elapsed = time.time() - t0
-        pandas_read_times.append(elapsed)
-    print(f"  Pandas 读平均: {np.mean(pandas_read_times):.4f}s")
-
-    polars_write_times = []
-    polars_read_times = []
-    if HAS_POLARS:
-        df_pl = pl.from_pandas(df)
-        # Polars 写
-        for run in range(n_runs):
-            t0 = time.time()
-            df_pl.write_parquet('/tmp/test_polars_io.parquet')
-            elapsed = time.time() - t0
-            polars_write_times.append(elapsed)
-
-        # Polars 读
-        for run in range(n_runs):
-            t0 = time.time()
-            _ = pl.read_parquet('/tmp/test_polars_io.parquet')
-            elapsed = time.time() - t0
-            polars_read_times.append(elapsed)
-
-        print(f"  Polars 写平均: {np.mean(polars_write_times):.4f}s")
-        print(f"  Polars 读平均: {np.mean(polars_read_times):.4f}s")
-
-    return np.mean(pandas_read_times + pandas_write_times), np.mean(polars_read_times + polars_write_times)
-
-
-# ============================================================================
-# 正确性验证
-# ============================================================================
-
-def validate_correctness(df: pd.DataFrame):
-    """验证 Pandas 和 Polars 计算结果的一致性"""
-    print("\n" + "=" * 70)
-    print("正确性验证: Pandas vs Polars 因子计算结果")
-    print("=" * 70)
-
-    if not HAS_POLARS:
-        print("  [SKIP] Polars 未安装")
-        return
-
-    df_pl = pl.from_pandas(df[['date', 'code', 'close', 'turnover_rate']])
-
-    # Pandas 计算
-    df_result = df[['date', 'code']].copy()
-    df_result['ret_5d'] = df.groupby('code')['close'].pct_change(5)
-    df_result['ma_20'] = df.groupby('code')['close'].transform(
-        lambda x: x.rolling(20, min_periods=5).mean()
-    )
-    df_result['vol_20'] = df.groupby('code')['close'].transform(
+    # 波动率
+    result['volatility_20d'] = df.groupby('code')['close'].transform(
         lambda x: x.pct_change().rolling(20, min_periods=10).std()
     )
 
-    # Polars 计算
-    pl_result = df_pl.sort(['code', 'date']).with_columns([
-        pl.col('close').pct_change(5).over('code').alias('ret_5d'),
-        pl.col('close').rolling_mean(20, min_periods=5).over('code').alias('ma_20'),
-        pl.col('close').pct_change().rolling_std(20, min_periods=10).over('code').alias('vol_20'),
-    ]).select(['date', 'code', 'ret_5d', 'ma_20', 'vol_20']).to_pandas()
+    # 成交量
+    result['volume_20d'] = df.groupby('code')['volume'].transform(
+        lambda x: x.rolling(20, min_periods=5).mean()
+    )
+    result['volume_ratio'] = df['volume'] / result['volume_20d'].replace(0, np.nan)
 
-    # 对比
-    check_cols = ['ret_5d', 'ma_20', 'vol_20']
-    all_match = True
+    # 均线和价格位置
+    result['ma5'] = df.groupby('code')['close'].transform(
+        lambda x: x.rolling(5, min_periods=3).mean()
+    )
+    result['ma20'] = df.groupby('code')['close'].transform(
+        lambda x: x.rolling(20, min_periods=10).mean()
+    )
+    result['ma60'] = df.groupby('code')['close'].transform(
+        lambda x: x.rolling(60, min_periods=30).mean()
+    )
 
-    for col in check_cols:
-        merged = df_result[['date', 'code']].copy()
-        merged['pd_val'] = df_result[col].values
-        pl_lookup = pl_result.set_index(['date', 'code'])[col]
-        merged['pl_val'] = merged.set_index(['date', 'code']).index.map(
-            lambda x: pl_lookup.get(x, np.nan)
+    # 布林带位置
+    result['bb_position'] = (result['close'] - result['ma20']) / (result['volatility_20d'] * result['close'])
+
+    # 最高最低价相关
+    result['high_20d'] = df.groupby('code')['high'].transform(
+        lambda x: x.rolling(20, min_periods=10).max()
+    )
+    result['low_20d'] = df.groupby('code')['low'].transform(
+        lambda x: x.rolling(20, min_periods=10).min()
+    )
+    result['hl_ratio'] = (result['close'] - result['low_20d']) / (
+        result['high_20d'] - result['low_20d']
+    ).replace(0, np.nan)
+
+    # ATR
+    tr = np.maximum(
+        df['high'] - df['low'],
+        np.maximum(
+            abs(df['high'] - df.groupby('code')['close'].shift(1)),
+            abs(df['low'] - df.groupby('code')['close'].shift(1))
         )
-        merged['pl_val'] = merged.apply(
-            lambda row: pl_lookup.get((row['date'], row['code']), np.nan), axis=1
-        )
+    )
+    result['atr_14'] = df[['code']].copy()
+    result['atr_14']['_tr'] = tr
+    result['atr_14'] = result.groupby('code')['_tr'].transform(
+        lambda x: x.rolling(14, min_periods=7).mean()
+    )
 
-        both_valid = merged['pd_val'].notna() & merged['pl_val'].notna()
-        if both_valid.sum() > 0:
-            diff = (merged.loc[both_valid, 'pd_val'] - merged.loc[both_valid, 'pl_val']).abs()
-            max_diff = diff.max()
-            mean_diff = diff.mean()
-            status = "PASS" if max_diff < 1e-4 else "WARN"
-            if max_diff >= 1e-4:
-                all_match = False
-            nan_pd = df_result[col].isna().sum()
-            nan_pl = pl_result[col].isna().sum()
-            print(f"  [{status}] {col}: max_diff={max_diff:.8f}, mean_diff={mean_diff:.8f}")
-            print(f"         Pandas NaN: {nan_pd}, Polars NaN: {nan_pl}")
-        else:
-            print(f"  [WARN] {col}: 无共同有效数据")
+    if verbose:
+        elapsed = time.perf_counter() - t0
+        print(f"  Pandas 因子计算: {elapsed:.3f}s")
 
-    print(f"  正确性验证: {'PASS' if all_match else 'WARN - 存在可接受的浮点误差'}")
-    return all_match
+    return result
 
 
-# ============================================================================
-# 主函数
-# ============================================================================
+# ============================================================
+# 3. Polars 实现
+# ============================================================
 
-def main():
-    print("=" * 70)
-    print("验证报告: 数据处理性能优化 (Polari 借鉴 QUANTAXIS)")
-    print("=" * 70)
-    print(f"时间: {datetime.now().isoformat()}")
-    print(f"借鉴来源: yutiansut/QUANTAXIS v2.1 - Rust核心 + QADataBridge")
-    print(f"优化方向: 用 Polars/Arrow 替代 Pandas 提升数据处理性能")
+def polars_compute_factors(df_pd: pd.DataFrame, use_lazy: bool = False, verbose=False) -> pd.DataFrame:
+    """使用 Polars 计算因子"""
+    if verbose:
+        t0 = time.perf_counter()
 
-    # 生成测试数据
-    print("\n生成测试数据...")
-    df = generate_large_dataset(n_stocks=500, n_days=500)
-    print(f"数据规模: {df['code'].nunique()} 只股票 × {df['date'].nunique()} 天 = {len(df):,} 行")
+    # 转换
+    df_pl = pl.from_pandas(df_pd)
 
-    # 基准测试
+    if use_lazy:
+        df_pl = df_pl.lazy()
+
+    # 构建表达式
+    exprs = [
+        pl.col('code'),
+        pl.col('date'),
+        pl.col('close'),
+        pl.col('volume'),
+        pl.col('high'),
+        pl.col('low'),
+    ]
+
+    # 收益率因子
+    exprs.append(pl.col('close').pct_change().over('code').alias('ret_1d'))
+    exprs.append(pl.col('close').pct_change(5).over('code').alias('ret_5d'))
+    exprs.append(pl.col('close').pct_change(20).over('code').alias('ret_20d'))
+    exprs.append(pl.col('close').pct_change(60).over('code').alias('ret_60d'))
+
+    # 反转因子
+    exprs.append((-pl.col('close').pct_change(5).over('code')).alias('reversal_5d'))
+    exprs.append((-pl.col('close').pct_change(20).over('code')).alias('reversal_20d'))
+
+    # 波动率
+    exprs.append(
+        pl.col('close').pct_change().rolling_std(20, min_periods=10).over('code').alias('volatility_20d')
+    )
+
+    # 成交量
+    exprs.append(
+        pl.col('volume').rolling_mean(20, min_periods=5).over('code').alias('volume_20d')
+    )
+    exprs.append(
+        (pl.col('volume') / pl.col('volume').rolling_mean(20, min_periods=5).over('code')).alias('volume_ratio')
+    )
+
+    # 均线
+    exprs.append(
+        pl.col('close').rolling_mean(5, min_periods=3).over('code').alias('ma5')
+    )
+    exprs.append(
+        pl.col('close').rolling_mean(20, min_periods=10).over('code').alias('ma20')
+    )
+    exprs.append(
+        pl.col('close').rolling_mean(60, min_periods=30).over('code').alias('ma60')
+    )
+
+    # 最高最低价
+    exprs.append(
+        pl.col('high').rolling_max(20, min_periods=10).over('code').alias('high_20d')
+    )
+    exprs.append(
+        pl.col('low').rolling_min(20, min_periods=10).over('code').alias('low_20d')
+    )
+
+    if use_lazy:
+        result_lazy = df_pl.with_columns(exprs[6:]).select(exprs[:6] + exprs[6:])
+        result = result_lazy.collect()
+    else:
+        result = df_pl.with_columns(exprs[6:]).select(exprs[:6] + exprs[6:])
+
+    if verbose:
+        elapsed = time.perf_counter() - t0
+        label = "Lazy" if use_lazy else "Eager"
+        print(f"  Polars ({label}) 因子计算: {elapsed:.3f}s")
+
+    return result.to_pandas()
+
+
+# ============================================================
+# 4. Polars 数据清洗
+# ============================================================
+
+def pandas_clean_data(df_pd: pd.DataFrame, verbose=False) -> pd.DataFrame:
+    """Pandas 数据清洗"""
+    if verbose:
+        t0 = time.perf_counter()
+
+    df = df_pd.copy()
+    # 去重
+    df = df.drop_duplicates(subset=['code', 'date'])
+    # 排序
+    df = df.sort_values(['code', 'date'])
+    # 剔除停牌
+    df = df[df['volume'] > 0]
+    # 前向填充缺失
+    df = df.set_index(['code', 'date'])
+    df = df.groupby('code').apply(lambda x: x.ffill()).reset_index(level=0, drop=True)
+    df = df.reset_index()
+    # 过滤极端值
+    df['close'] = df['close'].clip(lower=0.01)
+    # 添加变化率列
+    df['change_pct'] = df.groupby('code')['close'].transform(lambda x: x.pct_change() * 100)
+    # 标记涨跌停
+    df['is_limit_up'] = df['change_pct'] >= 9.9
+    df['is_limit_down'] = df['change_pct'] <= -9.9
+
+    if verbose:
+        elapsed = time.perf_counter() - t0
+        print(f"  Pandas 数据清洗: {elapsed:.3f}s")
+
+    return df
+
+
+def polars_clean_data(df_pd: pd.DataFrame, use_lazy: bool = False, verbose=False) -> pd.DataFrame:
+    """Polars 数据清洗"""
+    if verbose:
+        t0 = time.perf_counter()
+
+    df_pl = pl.from_pandas(df_pd)
+
+    if use_lazy:
+        df_pl = df_pl.lazy()
+
+    exprs = [
+        pl.col('code'),
+        pl.col('date'),
+        pl.col('open'),
+        pl.col('high'),
+        pl.col('low'),
+        pl.col('close').clip(0.01, None),
+        pl.col('volume'),
+    ]
+
+    # 去重 + 排序
+    if use_lazy:
+        result = df_pl.unique(subset=['code', 'date']).sort(['code', 'date'])
+    else:
+        result = df_pl.unique(subset=['code', 'date']).sort(['code', 'date'])
+
+    # 过滤停牌
+    result = result.filter(pl.col('volume') > 0)
+
+    # 前向填充
+    result = result.with_columns(
+        pl.col('close').forward_fill().over('code'),
+        pl.col('open').forward_fill().over('code'),
+        pl.col('high').forward_fill().over('code'),
+        pl.col('low').forward_fill().over('code'),
+        pl.col('volume').forward_fill().over('code'),
+    )
+
+    # 涨跌幅
+    result = result.with_columns(
+        (pl.col('close').pct_change().over('code') * 100).alias('change_pct')
+    )
+
+    # 涨跌停标记
+    result = result.with_columns([
+        (pl.col('change_pct') >= 9.9).alias('is_limit_up'),
+        (pl.col('change_pct') <= -9.9).alias('is_limit_down'),
+    ])
+
+    if use_lazy:
+        result = result.collect()
+
+    if verbose:
+        elapsed = time.perf_counter() - t0
+        label = "Lazy" if use_lazy else "Eager"
+        print(f"  Polars ({label}) 数据清洗: {elapsed:.3f}s")
+
+    return result.to_pandas()
+
+
+# ============================================================
+# 5. I/O 性能对比
+# ============================================================
+
+def benchmark_io(df_pd: pd.DataFrame, verbose=False) -> dict:
+    """对比 Parquet 读写性能"""
     results = {}
 
-    bt1 = benchmark_grouped_rolling(df)
-    results['grouped_rolling'] = {'pandas': bt1[0], 'polars': bt1[1]}
+    with tempfile.NamedTemporaryFile(suffix='.parquet') as tmp:
+        # Pandas 写入
+        t0 = time.perf_counter()
+        df_pd.to_parquet(tmp.name, index=False)
+        results['pandas_write'] = time.perf_counter() - t0
 
-    bt2 = benchmark_cross_sectional_rank(df)
-    results['cross_sectional'] = {'pandas': bt2[0], 'polars': bt2[1]}
-
-    bt3 = benchmark_pivot_and_cov(df)
-    results['pivot_cov'] = {'pandas': bt3[0], 'polars': bt3[1]}
-
-    bt4 = benchmark_memory_usage(df)
-    results['memory'] = {'pandas_mb': bt4[0], 'polars_mb': bt4[1]}
-
-    bt5 = benchmark_io_speed(df)
-    results['io'] = {'pandas': bt5[0], 'polars': bt5[1]}
-
-    # 正确性验证
-    correctness = validate_correctness(df)
-    results['correctness'] = correctness
-
-    # ---- 总结 ----
-    print("\n" + "=" * 70)
-    print("总结与建议")
-    print("=" * 70)
+        # Pandas 读取
+        t0 = time.perf_counter()
+        _ = pd.read_parquet(tmp.name)
+        results['pandas_read'] = time.perf_counter() - t0
 
     if HAS_POLARS:
-        speedups = {}
-        for key in ['grouped_rolling', 'cross_sectional', 'pivot_cov']:
-            pd_time = results[key]['pandas']
-            pl_time = results[key]['polars']
-            if pd_time > 0 and pl_time > 0:
-                speedups[key] = pd_time / pl_time
+        with tempfile.NamedTemporaryFile(suffix='.parquet') as tmp:
+            df_pl = pl.from_pandas(df_pd)
 
-        print("\n  性能对比汇总:")
-        for key, su in speedups.items():
-            print(f"    {key}: Pandas={results[key]['pandas']:.3f}s, Polars={results[key]['polars']:.3f}s, 加速={su:.2f}x")
+            # Polars 写入
+            t0 = time.perf_counter()
+            df_pl.write_parquet(tmp.name)
+            results['polars_write'] = time.perf_counter() - t0
 
-        avg_speedup = np.mean(list(speedups.values())) if speedups else 0
-        print(f"\n  平均加速比: {avg_speedup:.2f}x")
-
-        print(f"\n  内存使用: Pandas={results['memory']['pandas_mb']:.1f}MB, "
-              f"Polars(估计)={results['memory']['polars_mb']:.1f}MB")
-
-        print(f"\n  正确性: {'PASS' if correctness else 'WARN'}")
-
-    print("\n  建议:")
-    print(f"    1. 短期: 在 factor-engine 和 data-engine 中引入 Polars 作为可选后端")
-    print(f"    2. 中期: 用 Polars 重写数据 ET了模块（IO密集操作收益最大）")
-    print(f"    3. 长期: 借鉴 QUANTAXIS 的零拷贝数据桥接，避免 pandas<->polars 转换")
-    print(f"    4. 兼容性: 保留 pandas 作为 fallback，通过环境变量切换")
-    print(f"    5. 配置化: 在 config.py 中添加 DATA_BACKEND='polars' 选项")
+            # Polars 读取
+            t0 = time.perf_counter()
+            _ = pl.read_parquet(tmp.name)
+            results['polars_read'] = time.perf_counter() - t0
 
     return results
 
 
-if __name__ == "__main__":
-    main()
+# ============================================================
+# 6. 测试用例
+# ============================================================
+
+@unittest.skipIf(not HAS_POLARS, "Polars 未安装")
+class TestPolarsPerformance(unittest.TestCase):
+    """Polars 性能验证测试"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.data_small = generate_large_dataset(n_stocks=50, n_days=252)
+        cls.data_large = generate_large_dataset(n_stocks=200, n_days=500)
+        print(f"\n  小数据集: {len(cls.data_small)} 行 ({cls.data_small['code'].nunique()} 只股票)")
+        print(f"  大数据集: {len(cls.data_large)} 行 ({cls.data_large['code'].nunique()} 只股票)")
+
+    def test_factor_correctness(self):
+        """测试: Polars 因子计算结果应与 Pandas 一致"""
+        pd_result = pandas_compute_factors(self.data_small)
+        pl_result = polars_compute_factors(self.data_small, use_lazy=False)
+        pl_lazy_result = polars_compute_factors(self.data_small, use_lazy=True)
+
+        # 比较关键列
+        compare_cols = ['ret_1d', 'ret_5d', 'volatility_20d', 'volume_ratio', 'ma20']
+        for col in compare_cols:
+            pd_vals = pd_result[col].fillna(0).values
+            pl_vals = pl_result[col].fillna(0).values
+            pl_lazy_vals = pl_lazy_result[col].fillna(0).values
+
+            # 数值精度容忍度
+            diff_eager = np.max(np.abs(pd_vals - pl_vals))
+            diff_lazy = np.max(np.abs(pd_vals - pl_lazy_vals))
+
+            self.assertLess(diff_eager, 0.1, f"Polars Eager {col} 差异过大: {diff_eager}")
+            self.assertLess(diff_lazy, 0.1, f"Polars Lazy {col} 差异过大: {diff_lazy}")
+
+    def test_factor_performance_small(self):
+        """测试: 小数据集因子计算性能对比"""
+        n_runs = 5
+
+        t0 = time.perf_counter()
+        for _ in range(n_runs):
+            pandas_compute_factors(self.data_small)
+        pd_time = (time.perf_counter() - t0) / n_runs
+
+        t0 = time.perf_counter()
+        for _ in range(n_runs):
+            polars_compute_factors(self.data_small, use_lazy=False)
+        pl_time = (time.perf_counter() - t0) / n_runs
+
+        t0 = time.perf_counter()
+        for _ in range(n_runs):
+            polars_compute_factors(self.data_small, use_lazy=True)
+        pl_lazy_time = (time.perf_counter() - t0) / n_runs
+
+        print(f"\n  因子计算性能 ({len(self.data_small)} 行, {n_runs} 次平均):")
+        print(f"    Pandas:       {pd_time*1000:.1f} ms")
+        print(f"    Polars Eager: {pl_time*1000:.1f} ms  ({pd_time/pl_time:.1f}x 加速)")
+        print(f"    Polars Lazy:  {pl_lazy_time*1000:.1f} ms  ({pd_time/pl_lazy_time:.1f}x 加速)")
+
+        # Polars 应该不慢于 Pandas
+        self.assertLessEqual(pl_lazy_time, pd_time * 1.2,
+                            f"Polars 性能不达预期: {pd_time/pl_lazy_time:.1f}x")
+
+    def test_factor_performance_large(self):
+        """测试: 大数据集因子计算性能对比"""
+        n_runs = 3
+
+        t0 = time.perf_counter()
+        for _ in range(n_runs):
+            pandas_compute_factors(self.data_large)
+        pd_time = (time.perf_counter() - t0) / n_runs
+
+        t0 = time.perf_counter()
+        for _ in range(n_runs):
+            polars_compute_factors(self.data_large, use_lazy=True)
+        pl_lazy_time = (time.perf_counter() - t0) / n_runs
+
+        print(f"\n  因子计算性能 ({len(self.data_large)} 行, {n_runs} 次平均):")
+        print(f"    Pandas:      {pd_time:.3f}s")
+        print(f"    Polars Lazy: {pl_lazy_time:.3f}s  ({pd_time/pl_lazy_time:.1f}x 加速)")
+
+    def test_data_cleaning_performance(self):
+        """测试: 数据清洗性能对比"""
+        n_runs = 5
+
+        t0 = time.perf_counter()
+        for _ in range(n_runs):
+            pandas_clean_data(self.data_small)
+        pd_time = (time.perf_counter() - t0) / n_runs
+
+        t0 = time.perf_counter()
+        for _ in range(n_runs):
+            polars_clean_data(self.data_small, use_lazy=True)
+        pl_time = (time.perf_counter() - t0) / n_runs
+
+        print(f"\n  数据清洗性能 ({len(self.data_small)} 行, {n_runs} 次平均):")
+        print(f"    Pandas:      {pd_time*1000:.1f} ms")
+        print(f"    Polars Lazy: {pl_time*1000:.1f} ms  ({pd_time/pl_time:.1f}x 加速)")
+
+    def test_io_performance(self):
+        """测试: I/O 性能对比"""
+        results = benchmark_io(self.data_large, verbose=True)
+        print(f"\n  I/O 性能 ({len(self.data_large)} 行):")
+        print(f"    Pandas Write: {results.get('pandas_write', 0)*1000:.1f} ms")
+        print(f"    Pandas Read:  {results.get('pandas_read', 0)*1000:.1f} ms")
+        if 'polars_write' in results:
+            print(f"    Polars Write: {results['polars_write']*1000:.1f} ms")
+            print(f"    Polars Read:  {results['polars_read']*1000:.1f} ms")
+
+    def test_memory_usage(self):
+        """测试: 内存占用对比"""
+        import sys as _sys
+
+        pd_mem = self.data_large.memory_usage(deep=True).sum()
+        pl_df = pl.from_pandas(self.data_large)
+        pl_mem = pl_df.estimated_size()
+
+        print(f"\n  内存占用 ({len(self.data_large)} 行):")
+        print(f"    Pandas DataFrame: {pd_mem / 1024**2:.1f} MB")
+        print(f"    Polars DataFrame: {pl_mem / 1024**2:.1f} MB")
+        print(f"    节省: {(1 - pl_mem/pd_mem)*100:.1f}%")
+
+
+# ============================================================
+# 主入口
+# ============================================================
+
+if __name__ == '__main__':
+    print("=" * 60)
+    print("Polars 高性能数据处理验证测试")
+    print("借鉴来源: akquant + Factor Engine (Polars-based)")
+    print("=" * 60)
+
+    if not HAS_POLARS:
+        print("\n注意: Polars 未安装，对比测试将跳过。")
+        print("如需安装 Polars: pip install polars")
+        # 只运行 Pandas 基准测试
+        data = generate_large_dataset(n_stocks=50, n_days=252)
+        print(f"\n生成测试数据: {len(data)} 行")
+        print(f"\nPandas 基准测试:")
+        t0 = time.perf_counter()
+        pandas_compute_factors(data, verbose=True)
+        print(f"  总耗时: {time.perf_counter() - t0:.3f}s")
+    else:
+        unittest.main(verbosity=2)
