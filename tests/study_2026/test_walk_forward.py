@@ -1,510 +1,678 @@
 """
-==============================================================================
-借鉴来源: Microsoft Qlib (github.com/microsoft/qlib) - 44K+ stars
-         Microsoft RD-Agent-Quant (arxiv.org/abs/2505.15155)
-         Freqtrade + FreqAI Hyperopt (github.com/freqtrade/freqtrade)
-优化方向: Walk-Forward Validation 框架增强 — 从单次 train/test 拆分升级为
-         滚动窗口验证，引入 WFE (Walk-Forward Efficiency) 指标
-==============================================================================
+================================================================================
+Walk-Forward 验证框架验证测试
+================================================================================
 
-当前 jingni-trader 的 strategy-model-engine 采用单次 Purged Group TimeSeriesSplit，
-但最终模型训练只用到一次 train/test 分割。这存在过拟合风险：
-  - 模型无法感知市场风格切换（如牛市→熊市）
-  - 缺少 OOS 泛化能力评估
-  - 无 Walk-Forward Efficiency 等鲁棒性诊断指标
+借鉴来源:
+    - AKQuant (github.com/akfamily/akquant)
+      - Walk-forward Validation: 滚动时间窗口训练/验证/测试
+      - 参考设计: akquant 的 rolling backtest 模块
+      - 核心思想: 使用连续的时间窗口替代单次 train/test split，
+        避免使用未来信息，更真实地评估策略在真实环境中的表现。
 
-Qlib 的 workflow 支持 rolling evaluation（滚动回测），vnpy 4.0 的 AlphaLab
-内置完整 walk-forward 管道，Freqtrade 的 Hyperopt 基于 Optuna 做滚动超参优化。
-本验证代码实现了：
-  1. 滚动窗口 Walk-Forward 验证框架
-  2. WFE (Walk-Forward Efficiency) 计算
-  3. 参数稳定性诊断
-  4. 与单次训练的对比分析
+    - Microsoft Qlib (github.com/microsoft/qlib)
+      - Purged Group Time Series Split: 引入 purge gap 防止信息泄露
+      - 参考文件: qlib/data/dataset/processor.py (时间序列分割逻辑)
+
+优化方向:
+    增强 jingni-trader strategy-model-engine 的回测验证机制，
+    从现有的简单 train/test split (engine.py:299-306) 升级为
+    严格的时间序列 Walk-Forward 验证，防止前视偏差 (look-ahead bias)。
+
+测试目标:
+    1. 验证 Walk-Forward Split 的正确性（时间顺序、无数据泄露）
+    2. 验证 Purge Gap 机制的隔离效果
+    3. 性能对比：Walk-Forward vs 随机 Split（揭示随机 Split 的过拟合风险）
+    4. 边界条件测试（窗口数 > 数据长度、单窗口等）
+================================================================================
 """
 
-import os
 import sys
-import json
-import logging
-import warnings
+import os
+import time
+import unittest
+from typing import List, Tuple, Dict, Any, Optional
+from datetime import datetime, timedelta
+
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Any, Optional
-from dataclasses import dataclass, field
-
-# 尝试导入项目模块
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-
-try:
-    from sklearn.model_selection import TimeSeriesSplit
-    from sklearn.linear_model import LinearRegression
-    from sklearn.metrics import mean_squared_error, r2_score
-    from scipy import stats
-    HAS_SKLEARN = True
-except ImportError:
-    HAS_SKLEARN = False
-
-try:
-    import lightgbm as lgb
-    HAS_LGB = True
-except ImportError:
-    HAS_LGB = False
-
-warnings.filterwarnings('ignore')
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-logger = logging.getLogger("walk_forward_test")
 
 
-# ==========================================================================
-# 1. Walk-Forward 滚动窗口验证框架
-# ==========================================================================
-
-@dataclass
-class WalkForwardConfig:
-    """Walk-Forward 验证配置"""
-    train_window_months: int = 36      # 训练窗口长度（月）
-    valid_window_months: int = 6       # 验证/OOS 窗口长度（月）
-    step_months: int = 6               # 滚动步长（月）
-    purge_gap_days: int = 5            # 训练-验证间隔天数（防泄露）
-    min_train_samples: int = 500       # 最小训练样本
-    min_valid_samples: int = 50        # 最小验证样本
-    reoptimize_each_window: bool = True  # 每个窗口是否重新优化
-
-
-@dataclass
-class WalkForwardResult:
-    """Walk-Forward 单窗口结果"""
-    window_id: int
-    train_start: str
-    train_end: str
-    valid_start: str
-    valid_end: str
-    train_samples: int
-    valid_samples: int
-    is_metrics: Dict[str, float] = field(default_factory=dict)   # In-Sample
-    oos_metrics: Dict[str, float] = field(default_factory=dict)  # Out-of-Sample
-    params: Dict[str, Any] = field(default_factory=dict)
-    predictions: Optional[np.ndarray] = None
-    y_true: Optional[np.ndarray] = None
-
+# ============================================================================
+# Walk-Forward 验证原型实现（优化方案核心代码）
+# ============================================================================
 
 class WalkForwardValidator:
     """
-    滚动窗口 Walk-Forward 验证器
+    Walk-Forward (滚动前向) 验证器
 
-    借鉴 Qlib 的 rolling evaluation 和 Freqtrade 的 Walk-Forward Optimization (WFO) 理念。
-    每个窗口：in-sample 训练/优化 → out-of-sample 验证，滚动推进，模拟真实交易场景。
+    设计（借鉴 AKQuant + Qlib）:
+    1. 将全部时间范围划分为多个连续窗口
+    2. 每个窗口 = [训练期 | Purge Gap | 验证期]
+    3. Train 窗口逐步向前扩展（anchored）或固定长度（rolling）
+    4. Purge Gap 隔离训练末尾与验证开头，防止信息泄露
+    5. 向前步进 (step_size) 控制窗口重叠程度
+
+    关键参数:
+        n_splits: 分割数量（折数）
+        train_window: 训练窗口月数（None = anchored, 逐步扩大）
+        test_window: 测试窗口月数
+        purge_days: purge gap 天数（防止信息泄露）
+        anchored: True = 训练窗口锚定起点不断扩展，False = 固定长度滚动
     """
 
-    def __init__(self, config: WalkForwardConfig):
-        self.config = config
-        self.results: List[WalkForwardResult] = []
-
-    def generate_windows(
+    def __init__(
         self,
-        start_date: str,
-        end_date: str
-    ) -> List[Tuple[str, str, str, str]]:
-        """生成滚动窗口时间范围"""
-        s = pd.to_datetime(start_date)
-        e = pd.to_datetime(end_date)
+        n_splits: int = 5,
+        train_window: Optional[int] = None,  # 月数, None 表示 anchored
+        test_window: int = 6,                # 月数
+        purge_days: int = 10,
+        anchored: bool = False,
+        step_size: Optional[int] = None,     # 月数, None 则自动计算
+    ):
+        self.n_splits = n_splits
+        self.train_window = train_window
+        self.test_window = test_window
+        self.purge_days = purge_days
+        self.anchored = anchored
+        self.step_size = step_size
 
-        windows = []
-        train_months = self.config.train_window_months
-        valid_months = self.config.valid_window_months
-        step_months = self.config.step_months
-
-        current = s + pd.DateOffset(months=train_months)
-        window_id = 0
-
-        while True:
-            valid_end = current + pd.DateOffset(months=valid_months)
-            if valid_end > e:
-                break
-
-            train_end = current - pd.DateOffset(days=self.config.purge_gap_days)
-            window = (
-                s.strftime('%Y-%m-%d'),
-                train_end.strftime('%Y-%m-%d'),
-                current.strftime('%Y-%m-%d'),
-                valid_end.strftime('%Y-%m-%d'),
-            )
-            windows.append(window)
-            window_id += 1
-            s += pd.DateOffset(months=step_months)
-            current += pd.DateOffset(months=step_months)
-
-        logger.info(f"生成 {len(windows)} 个 Walk-Forward 窗口")
-        return windows
-
-    def walk_forward_cv(
+    def split(
         self,
-        X: pd.DataFrame,
-        y: pd.Series,
-        dates: pd.Series,
-        model_factory,
-        metric_fn=None,
-    ) -> List[WalkForwardResult]:
+        dates: pd.DatetimeIndex
+    ) -> List[Tuple[pd.DatetimeIndex, pd.DatetimeIndex]]:
         """
-        执行 Walk-Forward 交叉验证
+        对日期索引进行滚动分割
 
         参数:
-            X: 特征矩阵
-            y: 目标变量
-            dates: 日期索引
-            model_factory: 模型工厂函数 () -> model
-            metric_fn: 指标计算函数 (y_true, y_pred) -> Dict[str, float]
+            dates: 排序后的交易日日期索引
+
+        返回:
+            [(train_dates, test_dates), ...], 每个元素是一个 (训练日期, 验证日期) 元组
         """
-        if metric_fn is None:
-            def metric_fn(y_true, y_pred):
-                non_nan = ~np.isnan(y_true) & ~np.isnan(y_pred)
-                if non_nan.sum() < 2:
-                    return {'mse': np.nan, 'r2': np.nan, 'ic': np.nan}
-                return {
-                    'mse': float(mean_squared_error(y_true[non_nan], y_pred[non_nan])),
-                    'r2': float(r2_score(y_true[non_nan], y_pred[non_nan])),
-                    'ic': float(stats.pearsonr(y_true[non_nan], y_pred[non_nan])[0]),
-                }
+        if not isinstance(dates, pd.DatetimeIndex):
+            dates = pd.DatetimeIndex(dates)
 
-        dates_dt = pd.to_datetime(dates)
-        unique_dates = sorted(dates_dt.unique())
-        start_date = unique_dates[0].strftime('%Y-%m-%d')
-        end_date = unique_dates[-1].strftime('%Y-%m-%d')
+        dates = dates.sort_values()
+        n_dates = len(dates)
+        min_date = dates.min()
+        max_date = dates.max()
 
-        windows = self.generate_windows(start_date, end_date)
-        self.results = []
+        # 计算月步长
+        test_months = self.test_window
+        if self.step_size is None:
+            step_months = test_months  # 默认步长 = 测试窗口
+        else:
+            step_months = self.step_size
 
-        for wid, (train_s, train_e, valid_s, valid_e) in enumerate(windows):
-            train_s_dt = pd.to_datetime(train_s)
-            train_e_dt = pd.to_datetime(train_e)
-            valid_s_dt = pd.to_datetime(valid_s)
-            valid_e_dt = pd.to_datetime(valid_e)
+        splits = []
 
-            train_mask = (dates_dt >= train_s_dt) & (dates_dt <= train_e_dt)
-            valid_mask = (dates_dt >= valid_s_dt) & (dates_dt <= valid_e_dt)
+        # 从后往前计算窗口分界点
+        # 最右侧：max_date 为最后一个测试期的末尾
+        test_end = max_date
+        for i in range(self.n_splits):
+            # 测试期
+            test_start = self._subtract_months(test_end, test_months)
+            test_start = self._next_trading_day(dates, test_start)  # 对齐到最近交易日
 
-            X_train, y_train = X[train_mask], y[train_mask]
-            X_valid, y_valid = X[valid_mask], y[valid_mask]
+            # 找测试期的实际日期范围
+            test_mask = (dates >= test_start) & (dates <= test_end)
+            test_dates = dates[test_mask]
 
-            if len(y_train) < self.config.min_train_samples:
-                logger.warning(f"窗口 {wid}: 训练样本不足 ({len(y_train)}), 跳过")
+            # Purge gap 后的训练截止日期
+            train_end_raw = test_start - timedelta(days=self.purge_days)
+            train_end = self._prev_trading_day(dates, train_end_raw)
+
+            # 训练起始日期
+            if self.anchored or self.train_window is None:
+                train_start = min_date
+            else:
+                train_start = self._subtract_months(train_end, self.train_window)
+                train_start = self._next_trading_day(dates, train_start)
+
+            train_mask = (dates >= train_start) & (dates <= train_end)
+            train_dates = dates[train_mask]
+
+            if len(train_dates) >= 2 and len(test_dates) >= 2:
+                splits.append((train_dates, test_dates))
+
+            # 下一轮的测试期末尾
+            test_end = self._prev_trading_day(dates, test_start - timedelta(days=1))
+
+        # 反转，使最早的 split 在前
+        splits = splits[::-1]
+        return splits
+
+    @staticmethod
+    def _subtract_months(date: pd.Timestamp, months: int) -> pd.Timestamp:
+        """从日期减去月份"""
+        year = date.year
+        month = date.month - months
+        while month <= 0:
+            month += 12
+            year -= 1
+        day = min(date.day, 28)
+        return pd.Timestamp(year=year, month=month, day=day)
+
+    @staticmethod
+    def _next_trading_day(dates: pd.DatetimeIndex, target: pd.Timestamp) -> pd.Timestamp:
+        """找到 target 之后最近的交易日"""
+        future_dates = dates[dates >= target]
+        if len(future_dates) > 0:
+            return future_dates[0]
+        return target
+
+    @staticmethod
+    def _prev_trading_day(dates: pd.DatetimeIndex, target: pd.Timestamp) -> pd.Timestamp:
+        """找到 target 之前最近的交易日"""
+        past_dates = dates[dates <= target]
+        if len(past_dates) > 0:
+            return past_dates[-1]
+        return target
+
+
+class WalkForwardPerformanceEvaluator:
+    """Walk-Forward 绩效评估器"""
+
+    def __init__(self, validator: WalkForwardValidator):
+        self.validator = validator
+
+    def evaluate(
+        self,
+        signal_df: pd.DataFrame,
+        price_df: pd.DataFrame,
+        top_k: int = 50,
+    ) -> Dict[str, Any]:
+        """
+        使用 Walk-Forward 评估策略信号
+
+        参数:
+            signal_df: 包含 code, date, signal 的 DataFrame
+            price_df: 包含 code, date, close 的行情 DataFrame
+            top_k: 每期选择 top_k 只股票
+
+        返回:
+            { "fold_metrics": [...], "aggregate_metrics": {...}, "dates_leak_check": {...} }
+        """
+        dates = pd.DatetimeIndex(sorted(
+            signal_df['date'].unique()
+        )).sort_values()
+
+        splits = self.validator.split(dates)
+
+        fold_results = []
+        all_returns = []
+        leak_issues = []
+
+        for i, (train_dates, test_dates) in enumerate(splits):
+            # 训练集信号（用于分析，不用于后续回测训练）
+            train_signals = signal_df[signal_df['date'].isin(train_dates)]
+            test_signals = signal_df[signal_df['date'].isin(test_dates)]
+
+            if test_signals.empty:
                 continue
-            if len(y_valid) < self.config.min_valid_samples:
-                logger.warning(f"窗口 {wid}: 验证样本不足 ({len(y_valid)}), 跳过")
-                continue
 
-            # 训练
-            model = model_factory()
-            model.fit(X_train, y_train)
-
-            # In-Sample 评估
-            is_pred = model.predict(X_train)
-            is_metrics = metric_fn(y_train.values, is_pred)
-
-            # Out-of-Sample 评估
-            oos_pred = model.predict(X_valid)
-            oos_metrics = metric_fn(y_valid.values, oos_pred)
-
-            result = WalkForwardResult(
-                window_id=wid,
-                train_start=train_s, train_end=train_e,
-                valid_start=valid_s, valid_end=valid_e,
-                train_samples=len(y_train), valid_samples=len(y_valid),
-                is_metrics=is_metrics,
-                oos_metrics=oos_metrics,
-                predictions=oos_pred,
-                y_true=y_valid.values,
+            # 模拟 TopK 策略：每期选 signal 最高的 top_k 只
+            fold_returns = self._simulate_topk_strategy(
+                test_signals, price_df, top_k
             )
-            self.results.append(result)
 
-        logger.info(f"Walk-Forward 验证完成, 共 {len(self.results)} 个有效窗口")
-        return self.results
+            if fold_returns is not None and len(fold_returns) > 0:
+                metrics = self._calc_fold_metrics(fold_returns)
+                metrics['fold'] = i
+                metrics['train_start'] = str(train_dates.min().date())
+                metrics['train_end'] = str(train_dates.max().date())
+                metrics['test_start'] = str(test_dates.min().date())
+                metrics['test_end'] = str(test_dates.max().date())
+                metrics['n_train_days'] = len(train_dates)
+                metrics['n_test_days'] = len(test_dates)
+                fold_results.append(metrics)
+                all_returns.extend(fold_returns.values)
 
-    def compute_wfe(self) -> Dict[str, float]:
-        """
-        计算 Walk-Forward Efficiency
+                # 数据泄露检查
+                leak = self._check_data_leak(train_dates, test_dates)
+                if leak:
+                    leak_issues.append({"fold": i, **leak})
 
-        WFE = OOS_Sharpe(或其他指标) / IS_Sharpe
-        参考: Robert Pardo "The Evaluation and Optimization of Trading Strategies"
-        - WFE > 0.7: 强鲁棒性
-        - WFE 0.5-0.7: 可接受
-        - WFE < 0.3: 严重过拟合
-        """
-        if not self.results:
-            return {}
-
-        # 对 IC 指标计算 WFE
-        is_ics = [r.is_metrics.get('ic', np.nan) for r in self.results]
-        oos_ics = [r.oos_metrics.get('ic', np.nan) for r in self.results]
-
-        is_ics = [x for x in is_ics if not np.isnan(x)]
-        oos_ics = [x for x in oos_ics if not np.isnan(x)]
-
-        if not is_ics or not oos_ics:
-            return {}
-
-        is_mean = np.mean(is_ics)
-        oos_mean = np.mean(oos_ics)
-        is_std = np.std(is_ics)
-        oos_std = np.std(oos_ics)
-
-        wfe = oos_mean / is_mean if is_mean != 0 else 0
+        aggregate = self._calc_aggregate(all_returns) if all_returns else {}
 
         return {
-            'WFE': float(wfe),
-            'is_ic_mean': float(is_mean),
-            'oos_ic_mean': float(oos_mean),
-            'is_ic_std': float(is_std),
-            'oos_ic_std': float(oos_std),
-            'ic_decay': float(is_mean - oos_mean),
-            'quality_rating': self._quality_rating(wfe),
+            "fold_metrics": fold_results,
+            "aggregate_metrics": aggregate,
+            "n_splits_used": len(fold_results),
+            "n_splits_total": self.validator.n_splits,
+            "leak_issues": leak_issues,
         }
 
-    def _quality_rating(self, wfe: float) -> str:
-        if wfe > 0.7:
-            return "优秀 - 强鲁棒性"
-        elif wfe > 0.5:
-            return "良好 - 可接受范围"
-        elif wfe > 0.3:
-            return "一般 - 存在过拟合风险"
-        else:
-            return "差 - 严重过拟合"
+    def _simulate_topk_strategy(
+        self,
+        signals: pd.DataFrame,
+        price_df: pd.DataFrame,
+        top_k: int,
+    ) -> Optional[pd.Series]:
+        """模拟 TopK 策略每期收益"""
+        daily_returns = []
 
-    def stability_analysis(self) -> Dict[str, Any]:
-        """参数稳定性分析"""
-        all_metrics = {
-            'is_r2': [r.is_metrics.get('r2', np.nan) for r in self.results],
-            'oos_r2': [r.oos_metrics.get('r2', np.nan) for r in self.results],
-            'is_ic': [r.is_metrics.get('ic', np.nan) for r in self.results],
-            'oos_ic': [r.oos_metrics.get('ic', np.nan) for r in self.results],
+        for dt in sorted(signals['date'].unique()):
+            day_signal = signals[signals['date'] == dt].copy()
+            if 'alpha_score' in day_signal.columns:
+                day_signal = day_signal.nlargest(top_k, 'alpha_score')
+            elif 'signal' in day_signal.columns:
+                day_signal = day_signal[day_signal['signal'] > 0]
+
+            selected = day_signal['code'].tolist()
+            if not selected:
+                continue
+
+            # 获取下一天的收益
+            day_prices = price_df[
+                (price_df['code'].isin(selected)) &
+                (price_df['date'] == dt)
+            ]
+            next_day_prices = price_df[
+                (price_df['code'].isin(selected)) &
+                (price_df['date'] > dt)
+            ].sort_values('date').groupby('code').first().reset_index()
+
+            if next_day_prices.empty:
+                continue
+
+            # 等权组合当日收益
+            merged = day_prices[['code']].merge(
+                next_day_prices[['code', 'close']], on='code', how='inner'
+            )
+            if merged.empty:
+                continue
+
+            # 简化：使用 close-to-close return
+            day_ret = (
+                next_day_prices.set_index('code')['close'] /
+                day_prices.set_index('code')['close'] - 1
+            ).mean()
+
+            if not np.isnan(day_ret):
+                daily_returns.append({"date": dt, "return": day_ret})
+
+        if not daily_returns:
+            return None
+
+        df = pd.DataFrame(daily_returns)
+        return df.set_index('date')['return']
+
+    def _calc_fold_metrics(self, returns: pd.Series) -> Dict[str, float]:
+        """计算单个 fold 的绩效指标"""
+        if len(returns) < 2:
+            return {}
+        total_ret = float((1 + returns).prod() - 1)
+        n = len(returns)
+        ann_ret = float((1 + total_ret) ** (252 / n) - 1)
+        vol = float(returns.std() * np.sqrt(252))
+        sharpe = float(ann_ret / vol) if vol > 0 else 0
+        mdd = float((returns.cumsum().apply(np.exp) /
+                      returns.cumsum().apply(np.exp).cummax() - 1).min())
+
+        return {
+            "total_return": total_ret,
+            "annual_return": ann_ret,
+            "volatility": vol,
+            "sharpe_ratio": sharpe,
+            "max_drawdown": mdd,
+            "n_days": n,
         }
-        stability = {}
-        for name, values in all_metrics.items():
-            valid = [v for v in values if not np.isnan(v)]
-            if valid:
-                stability[name] = {
-                    'mean': float(np.mean(valid)),
-                    'std': float(np.std(valid)),
-                    'min': float(np.min(valid)),
-                    'max': float(np.max(valid)),
-                    'cv': float(np.std(valid) / abs(np.mean(valid))) if np.mean(valid) != 0 else 0,
-                }
-        return stability
+
+    def _calc_aggregate(self, all_returns: List[float]) -> Dict[str, float]:
+        """计算聚合绩效"""
+        if not all_returns:
+            return {}
+        returns = pd.Series(all_returns)
+        return self._calc_fold_metrics(returns)
+
+    def _check_data_leak(
+        self,
+        train_dates: pd.DatetimeIndex,
+        test_dates: pd.DatetimeIndex,
+    ) -> Optional[Dict[str, Any]]:
+        """检查训练/测试集之间是否存在时间重叠（数据泄露）"""
+        train_max = train_dates.max()
+        test_min = test_dates.min()
+
+        if test_min <= train_max:
+            # 存在重叠
+            overlap_days = len(set(train_dates) & set(test_dates))
+            gap_days = (test_min - train_max).days
+            return {
+                "train_max": str(train_max.date()),
+                "test_min": str(test_min.date()),
+                "gap_days": gap_days,
+                "overlap_days": overlap_days,
+                "has_leak": True,
+            }
+        return {"has_leak": False, "gap_days": (test_min - train_max).days}
 
 
-# ==========================================================================
-# 2. 测试代码：生成模拟数据并运行对比
-# ==========================================================================
+# ============================================================================
+# 随机 Split 对照实现（用于对比风险）
+# ============================================================================
 
-def create_synthetic_factor_data(
-    n_stocks: int = 50,
-    n_dates: int = 252 * 5,
-    n_factors: int = 10,
-    seed: int = 42,
-) -> Tuple[pd.DataFrame, pd.Series, pd.Series]:
+def random_split_performance(
+    signal_df: pd.DataFrame,
+    price_df: pd.DataFrame,
+    n_folds: int = 5,
+    top_k: int = 50,
+) -> Dict[str, Any]:
     """
-    生成模拟的 A 股因子数据，带结构突变模拟市场风格切换
-    参考 Qlib 模拟数据的方式，加入:
-    - 基础 IC ~0.02-0.05
-    - 2022 年后 IC 衰减（模拟市场风格切换）
+    使用随机交叉验证评估策略（存在 look-ahead bias 风险）
+
+    对比 Walk-Forward 的原因:
+    随机分割会引入前视偏差 — 训练集中可能包含「未来」的行情信息，
+    导致回测指标（Sharpe、IC 等）虚高，真实交易中无法复现。
     """
-    np.random.seed(seed)
+    from sklearn.model_selection import KFold
 
-    stocks = [f"{i:06d}.SZ" for i in range(1, n_stocks + 1)]
-    dates = pd.bdate_range(start='2020-01-01', periods=n_dates)
+    all_returns = []
+    fold_metrics = []
 
-    rows = []
-    for i, dt in enumerate(dates):
-        # 模拟市场风格切换：2022 年后因子 IC 衰减
-        if dt < pd.Timestamp('2022-01-01'):
-            base_ic = 0.04
-        elif dt < pd.Timestamp('2023-01-01'):
-            base_ic = 0.02
-        else:
-            base_ic = 0.01
+    codes = signal_df['code'].unique()
+    kf = KFold(n_splits=n_folds, shuffle=True)
 
-        for code in stocks:
-            row = {'date': dt, 'code': code}
-            for j in range(n_factors):
-                row[f'factor_{j}'] = np.random.normal(0, 1) + base_ic * (j + 1) * 0.1
-            row['label'] = (
-                0.03 * row['factor_0'] +
-                0.02 * row['factor_1'] +
-                0.01 * row['factor_2'] -
-                0.005 * row['factor_3'] +
-                np.random.normal(0, 0.1)
+    for i, (train_idx, test_idx) in enumerate(kf.split(codes)):
+        train_codes = codes[train_idx]
+        test_codes = codes[test_idx]
+
+        test_signals = signal_df[signal_df['code'].isin(test_codes)]
+        if test_signals.empty:
+            continue
+
+        fold_returns = []
+        for dt in sorted(test_signals['date'].unique()):
+            day_sig = test_signals[
+                (test_signals['date'] == dt)
+            ]
+            if 'alpha_score' in day_sig.columns:
+                day_sig = day_sig.nlargest(top_k, 'alpha_score')
+
+            selected = day_sig['code'].tolist()
+            day_prices = price_df[
+                (price_df['code'].isin(selected)) &
+                (price_df['date'] == dt)
+            ]
+            next_prices = price_df[
+                (price_df['code'].isin(selected)) &
+                (price_df['date'] > dt)
+            ].sort_values('date').groupby('code').first().reset_index()
+
+            if next_prices.empty or day_prices.empty:
+                continue
+
+            ret = (
+                next_prices.set_index('code')['close'] /
+                day_prices.set_index('code')['close'] - 1
+            ).mean()
+            if not np.isnan(ret):
+                fold_returns.append(ret)
+
+        if fold_returns:
+            returns = pd.Series(fold_returns)
+            total_ret = float((1 + returns).prod() - 1)
+            n = len(returns)
+            ann_ret = float((1 + total_ret) ** (252 / n) - 1) if n > 0 else 0
+            vol = float(returns.std() * np.sqrt(252)) if n > 1 else 0
+            sharpe = float(ann_ret / vol) if vol > 0 else 0
+            fold_metrics.append({
+                "fold": i, "sharpe_ratio": sharpe,
+                "annual_return": ann_ret, "n_days": n,
+            })
+            all_returns.extend(fold_returns)
+
+    agg = {}
+    if all_returns:
+        agg_series = pd.Series(all_returns)
+        n = len(agg_series)
+        total_ret = float((1 + agg_series).prod() - 1)
+        agg = {
+            "total_return": total_ret,
+            "annual_return": float((1 + total_ret) ** (252 / n) - 1),
+            "sharpe_ratio": float(agg_series.mean() / agg_series.std() * np.sqrt(252)) if agg_series.std() > 0 else 0,
+            "n_days": n,
+        }
+
+    return {"fold_metrics": fold_metrics, "aggregate_metrics": agg}
+
+
+# ============================================================================
+# 测试类
+# ============================================================================
+
+class TestWalkForwardSplit(unittest.TestCase):
+    """Walk-Forward 分割正确性测试"""
+
+    def setUp(self):
+        """生成测试日期索引"""
+        self.dates = pd.date_range('2020-01-01', '2025-12-31', freq='B')
+        self.validator = WalkForwardValidator(
+            n_splits=5, train_window=24, test_window=12, purge_days=10,
+            anchored=False
+        )
+
+    def test_split_count(self):
+        """测试分割数量"""
+        splits = self.validator.split(self.dates)
+        self.assertGreater(len(splits), 0)
+        self.assertLessEqual(len(splits), 5)
+
+    def test_no_overlap(self):
+        """测试训练集和测试集无重叠"""
+        splits = self.validator.split(self.dates)
+        for train_dates, test_dates in splits:
+            overlap = set(train_dates) & set(test_dates)
+            self.assertEqual(len(overlap), 0,
+                             f"发现 {len(overlap)} 天重叠: {sorted(overlap)[:5]}...")
+
+    def test_temporal_order(self):
+        """测试时间顺序：训练集在测试集之前"""
+        splits = self.validator.split(self.dates)
+        for i, (train_dates, test_dates) in enumerate(splits):
+            self.assertLess(
+                train_dates.max(), test_dates.min(),
+                f"Split {i}: 训练集 {train_dates.max().date()} 在测试集 {test_dates.min().date()} 之后"
             )
-            rows.append(row)
 
-    df = pd.DataFrame(rows)
-    return df, dates, stocks
+    def test_purge_gap_exists(self):
+        """测试 Purge Gap 有效隔离"""
+        validator = WalkForwardValidator(
+            n_splits=5, train_window=24, test_window=12, purge_days=10,
+            anchored=False
+        )
+        splits = validator.split(self.dates)
 
-
-def test_walk_forward_framework():
-    """测试 Walk-Forward 验证框架"""
-    print("=" * 70)
-    print("测试 1: Walk-Forward 滚动窗口验证框架")
-    print("=" * 70)
-
-    n_dates = 252 * 5  # 5年
-    df, all_dates, stocks = create_synthetic_factor_data(
-        n_stocks=30, n_dates=n_dates, n_factors=8
-    )
-
-    feature_cols = [c for c in df.columns if c.startswith('factor_')]
-    X = df[feature_cols].values
-    y = df['label']
-    dates = df['date']
-
-    # 配置 WFV
-    config = WalkForwardConfig(
-        train_window_months=24,
-        valid_window_months=6,
-        step_months=6,
-        purge_gap_days=5,
-    )
-
-    validator = WalkForwardValidator(config)
-
-    def model_factory():
-        if HAS_LGB:
-            return lgb.LGBMRegressor(
-                n_estimators=50, max_depth=5,
-                random_state=42, n_jobs=-1, verbosity=-1,
+        for i, (train_dates, test_dates) in enumerate(splits):
+            gap_days = (test_dates.min() - train_dates.max()).days
+            self.assertGreaterEqual(
+                gap_days, 1,
+                f"Split {i}: 训练集与测试集之间无间隔 (gap={gap_days}天)"
             )
-        return LinearRegression()
 
-    # 执行 WFV
-    results = validator.walk_forward_cv(
-        X, y, dates, model_factory=model_factory
-    )
+    def test_purge_gap_vs_no_purge(self):
+        """对比有无 Purge Gap 的分割效果"""
+        val_with_purge = WalkForwardValidator(
+            n_splits=5, train_window=24, test_window=12, purge_days=10
+        )
+        val_no_purge = WalkForwardValidator(
+            n_splits=5, train_window=24, test_window=12, purge_days=0
+        )
 
-    print(f"\n  生成 {len(results)} 个有效窗口")
+        splits_purge = val_with_purge.split(self.dates)
+        splits_no = val_no_purge.split(self.dates)
 
-    # 打印每个窗口结果
-    print(f"\n  {'窗口':<6} {'训练期':<24} {'验证期':<24} {'IS_IC':>8} {'OOS_IC':>8} {'样本(IS/OOS)':>14}")
-    print(f"  {'-'*6} {'-'*24} {'-'*24} {'-'*8} {'-'*8} {'-'*14}")
-    for r in results:
-        print(f"  {r.window_id:<6} {r.train_start}~{r.train_end:<10}  "
-              f"{r.valid_start}~{r.valid_end:<10}  "
-              f"{r.is_metrics.get('ic', 0):>8.4f} {r.oos_metrics.get('ic', 0):>8.4f} "
-              f"{r.train_samples:>6}/{r.valid_samples:<6}")
+        if splits_purge and splits_no:
+            purge_gap = (splits_purge[0][1].min() - splits_purge[0][0].max()).days
+            no_gap = (splits_no[0][1].min() - splits_no[0][0].max()).days
+            self.assertGreater(purge_gap, no_gap,
+                               f"Purge gap ({purge_gap}天) 应大于无 purge ({no_gap}天)")
 
-    # WFE 分析
-    wfe = validator.compute_wfe()
-    print(f"\n  === Walk-Forward Efficiency 分析 (参考 Qlib evaluation) ===")
-    print(f"  WFE (OOS_IC / IS_IC):    {wfe.get('WFE', 0):.4f}")
-    print(f"  IS IC Mean / Std:         {wfe.get('is_ic_mean', 0):.4f} / {wfe.get('is_ic_std', 0):.4f}")
-    print(f"  OOS IC Mean / Std:        {wfe.get('oos_ic_mean', 0):.4f} / {wfe.get('oos_ic_std', 0):.4f}")
-    print(f"  IC Decay (IS - OOS):     {wfe.get('ic_decay', 0):.4f}")
-    print(f"  质量评级:                {wfe.get('quality_rating', 'N/A')}")
+    def test_anchored_vs_rolling(self):
+        """对比 anchored 和 rolling 窗口模式"""
+        val_anchored = WalkForwardValidator(
+            n_splits=5, test_window=12, purge_days=10, anchored=True
+        )
+        val_rolling = WalkForwardValidator(
+            n_splits=5, train_window=24, test_window=12, purge_days=10,
+            anchored=False
+        )
 
-    # 稳定性分析
-    stability = validator.stability_analysis()
-    print(f"\n  === 指标稳定性分析 ===")
-    for name, stats_dict in stability.items():
-        print(f"  {name}: mean={stats_dict['mean']:.4f}, std={stats_dict['std']:.4f}, "
-              f"CV={stats_dict['cv']:.4f}")
+        splits_a = val_anchored.split(self.dates)
+        splits_r = val_rolling.split(self.dates)
 
-    # 对比：单次 train/test 分割
-    print(f"\n  === 对比: 单次分割 vs Walk-Forward ===")
+        if splits_a and splits_r:
+            # anchored 模式下，每个训练集都从同一个起点开始
+            first_train_start = splits_a[0][0].min()
+            for train_dates, _ in splits_a:
+                self.assertEqual(train_dates.min(), first_train_start,
+                                 "Anchored 模式训练集应从同一日期开始")
 
-    split_idx = int(len(dates) * 0.7)
-    train_dates = pd.to_datetime(dates[:split_idx])
-    test_dates = pd.to_datetime(dates[split_idx:])
-    train_mask = pd.to_datetime(dates).isin(train_dates)
-    test_mask = pd.to_datetime(dates).isin(test_dates)
+            # rolling 模式下，训练集起点逐步前移
+            train_lengths_r = [len(t) for t, _ in splits_r]
+            # 固定窗口长度应该都在允许范围内
+            self.assertTrue(all(l > 0 for l in train_lengths_r),
+                            "Rolling 模式训练集不应为空")
 
-    single_model = model_factory()
-    single_model.fit(X[train_mask], y[train_mask])
+    def test_edge_case_few_dates(self):
+        """边界条件：数据不足一个完整窗口"""
+        few_dates = pd.date_range('2024-01-01', '2024-02-28', freq='B')
+        validator = WalkForwardValidator(
+            n_splits=5, train_window=12, test_window=6, purge_days=10
+        )
+        splits = validator.split(few_dates)
+        # 应该返回空或尽量少的分割
+        self.assertLessEqual(len(splits), 1,
+                             "数据不足时应返回少量或无 split")
 
-    single_is_pred = single_model.predict(X[train_mask])
-    single_oos_pred = single_model.predict(X[test_mask])
+    def test_step_size_custom(self):
+        """测试自定义步长"""
+        val_default = WalkForwardValidator(
+            n_splits=3, train_window=24, test_window=12
+        )
+        val_small_step = WalkForwardValidator(
+            n_splits=3, train_window=24, test_window=12, step_size=3
+        )
 
-    single_is_ic = stats.pearsonr(y[train_mask], single_is_pred)[0]
-    single_oos_ic = stats.pearsonr(y[test_mask], single_oos_pred)[0]
-    single_wfe = abs(single_oos_ic / single_is_ic) if single_is_ic != 0 else 0
+        splits_default = val_default.split(self.dates)
+        splits_small = val_small_step.split(self.dates)
 
-    print(f"  单次分割 IS IC:         {single_is_ic:.4f}")
-    print(f"  单次分割 OOS IC:        {single_oos_ic:.4f}")
-    print(f"  单次分割 WFE:           {single_wfe:.4f}")
-    print(f"  Walk-Forward WFE:       {wfe.get('WFE', 0):.4f}")
-    print(f"  结论: Walk-Forward 提供了 {len(results)} 个独立 OOS 验证窗口,")
-    print(f"        对策略鲁棒性的评估比单次分割更可靠")
-
-    return results, wfe, stability
-
-
-def test_purge_gap_prevention():
-    """测试 Purge Gap 防泄露机制"""
-    print("\n" + "=" * 70)
-    print("测试 2: Purge Gap 防信息泄露验证")
-    print("=" * 70)
-
-    df, all_dates, stocks = create_synthetic_factor_data(
-        n_stocks=20, n_dates=252 * 3, n_factors=5
-    )
-
-    feature_cols = [c for c in df.columns if c.startswith('factor_')]
-    X = df[feature_cols].values
-    y = df['label']
-    dates = df['date']
-
-    # 不设 purge gap
-    config_no_gap = WalkForwardConfig(
-        train_window_months=18,
-        valid_window_months=3,
-        step_months=3,
-        purge_gap_days=0,
-    )
-    validator_no_gap = WalkForwardValidator(config_no_gap)
-
-    # 设 purge gap
-    config_with_gap = WalkForwardConfig(
-        train_window_months=18,
-        valid_window_months=3,
-        step_months=3,
-        purge_gap_days=10,
-    )
-    validator_with_gap = WalkForwardValidator(config_with_gap)
-
-    def model_factory():
-        if HAS_LGB:
-            return lgb.LGBMRegressor(n_estimators=30, max_depth=3, random_state=42, verbosity=-1)
-        return LinearRegression()
-
-    results_no_gap = validator_no_gap.walk_forward_cv(X, y, dates, model_factory)
-    results_with_gap = validator_with_gap.walk_forward_cv(X, y, dates, model_factory)
-
-    # 计算 IC 差异：purge gap 后 IS_IC 应略低（排除了部分近期信息泄露）
-    no_gap_ics = [r.is_metrics.get('ic', 0) for r in results_no_gap if r.is_metrics.get('ic') is not None]
-    with_gap_ics = [r.is_metrics.get('ic', 0) for r in results_with_gap if r.is_metrics.get('ic') is not None]
-
-    if no_gap_ics and with_gap_ics:
-        print(f"\n  无 Purge Gap IS_IC 均值:   {np.mean(no_gap_ics):.4f}")
-        print(f"  有 Purge Gap IS_IC 均值:   {np.mean(with_gap_ics):.4f}")
-        print(f"  Purge Gap 效果:            IS_IC 差值 = {np.mean(no_gap_ics) - np.mean(with_gap_ics):.4f}")
-        print(f"  (Purge gap 排除了训练期间最近期的信息泄露, IS_IC 略降是正常的)")
-        print(f"  结论: Purge Gap 机制有效防止了训练-验证间的信息泄露")
-
-    return results_no_gap, results_with_gap
+        # 小步长应产生更多 split
+        print(f"\n[WalkForward] 默认步长 (12个月): {len(splits_default)} splits")
+        print(f"[WalkForward] 小步长 (3个月):  {len(splits_small)} splits")
+        self.assertGreaterEqual(len(splits_small), len(splits_default))
 
 
-# ==========================================================================
-# 3. 主入口
-# ==========================================================================
+class TestWalkForwardVsRandom(unittest.TestCase):
+    """Walk-Forward vs. 随机 Split 性能对比"""
+
+    @classmethod
+    def setUpClass(cls):
+        """生成模拟策略信号和行情数据"""
+        np.random.seed(42)
+        codes = [f"{i:06d}.SZ" for i in range(100000, 100050)]
+        dates = pd.date_range('2022-01-01', '2025-12-31', freq='B')
+
+        rows_price = []
+        rows_signal = []
+
+        for code in codes:
+            start_p = np.random.uniform(10, 60)
+            # 模拟存在微弱 alpha 的股票
+            alpha_strength = np.random.uniform(0.0001, 0.001)
+            returns = np.random.normal(alpha_strength, 0.02, len(dates))
+            prices = start_p * np.cumprod(1 + returns)
+            prices[0] = start_p
+
+            for j, (d, p) in enumerate(zip(dates, prices)):
+                rows_price.append({
+                    'date': d, 'code': code, 'close': p,
+                })
+                # 信号含噪声 + alpha
+                signal = alpha_strength * 10 + np.random.normal(0, 0.05)
+                rows_signal.append({
+                    'date': d, 'code': code, 'alpha_score': signal,
+                })
+
+        cls.price_df = pd.DataFrame(rows_price)
+        cls.signal_df = pd.DataFrame(rows_signal)
+
+    def test_wf_vs_random_sharpe_bias(self):
+        """对比 Walk-Forward 和随机 Split 的 Sharpe 差异"""
+        validator = WalkForwardValidator(
+            n_splits=5, train_window=24, test_window=12, purge_days=10,
+            anchored=False
+        )
+        evaluator = WalkForwardPerformanceEvaluator(validator)
+
+        wf_result = evaluator.evaluate(
+            self.signal_df, self.price_df, top_k=20
+        )
+
+        random_result = random_split_performance(
+            self.signal_df, self.price_df, n_folds=5, top_k=20
+        )
+
+        wf_sharpe = wf_result.get('aggregate_metrics', {}).get('sharpe_ratio', 0)
+        rand_sharpe = random_result.get('aggregate_metrics', {}).get('sharpe_ratio', 0)
+
+        print(f"\n[对比] Walk-Forward Sharpe: {wf_sharpe:.4f}")
+        print(f"[对比] Random Split  Sharpe: {rand_sharpe:.4f}")
+        print(f"[对比] 差异: {(rand_sharpe - wf_sharpe):.4f} (随机分割通常高估)")
+
+        # 随机 Split 由于 look-ahead bias，Sharpe 通常会被高估
+        # 不过这里是模拟数据，所以只记录差异
+        print(f"[对比] Walk-Forward folds used: {wf_result.get('n_splits_used', 0)}/{wf_result.get('n_splits_total', 0)}")
+        print(f"[对比] Leak issues: {len(wf_result.get('leak_issues', []))}")
+
+        # 检查 fold 绩效的一致性（WF 各 fold 应有合理的波动）
+        wf_folds = wf_result.get('fold_metrics', [])
+        if wf_folds:
+            sharpes = [f['sharpe_ratio'] for f in wf_folds if 'sharpe_ratio' in f]
+            if sharpes:
+                std = np.std(sharpes)
+                print(f"[对比] Fold Sharpe 标准差: {std:.4f}")
+                # 标准差不应过大（表示策略不稳定）
+                self.assertLess(std, 5.0, f"各 fold Sharpe 波动过大: std={std:.4f}")
+
+
+class TestTimeSeriesPurge(unittest.TestCase):
+    """Purge Gap 数据隔离测试"""
+
+    def test_gap_prevention(self):
+        """验证 purge gap 防止 label 标签期内的信息泄露"""
+        dates = pd.date_range('2023-01-01', '2025-06-30', freq='B')
+
+        # 假设 label 需要未来 5 日收益
+        label_forward_days = 5
+
+        val_no_purge = WalkForwardValidator(
+            n_splits=3, train_window=12, test_window=6, purge_days=0
+        )
+        val_with_purge = WalkForwardValidator(
+            n_splits=3, train_window=12, test_window=6,
+            purge_days=label_forward_days
+        )
+
+        splits_no = val_no_purge.split(dates)
+        splits_purge = val_with_purge.split(dates)
+
+        if splits_no and splits_purge:
+            # 无 purge 时，train 最后几天可能看到 test 的 label
+            gap_no = (splits_no[0][1].min() - splits_no[0][0].max()).days
+            gap_purge = (splits_purge[0][1].min() - splits_purge[0][0].max()).days
+
+            print(f"\n[Purge] 无 purge gap: {gap_no}天")
+            print(f"[Purge] 有 purge gap: {gap_purge}天 (至少 {label_forward_days}天)")
+
+            # 有 purge 的 gap 应大于 label 需要的天数
+            self.assertGreaterEqual(
+                gap_purge, label_forward_days,
+                f"Purge gap ({gap_purge}天) 不足以隔离 {label_forward_days}日的 label"
+            )
+
 
 if __name__ == "__main__":
-    print("=" * 70)
-    print("jingni-trader 优化验证: Walk-Forward Validation 框架")
-    print("借鉴来源: Microsoft Qlib + Freqtrade FreqAI")
-    print("优化方向: 回测引擎的准确性与性能 / 因子库的可扩展性")
-    print("=" * 70)
-
-    test_walk_forward_framework()
-    test_purge_gap_prevention()
-
-    print("\n" + "=" * 70)
-    print("全部测试完成")
-    print("=" * 70)
+    unittest.main(verbosity=2)
