@@ -1,0 +1,57 @@
+{
+  "test": "factor_expression_engine",
+  "source_projects": [
+    "microsoft/qlib",
+    "akfamily/akquant"
+  ],
+  "benchmarks": [
+    {
+      "backend": "pandas",
+      "n_stocks": 100,
+      "n_days": 500,
+      "n_factors": 18,
+      "time_seconds": 0.201,
+      "factors_per_second": 89.57
+    },
+    {
+      "backend": "polars",
+      "n_stocks": 100,
+      "n_days": 500,
+      "n_factors": 15,
+      "time_seconds": 0.0172,
+      "factors_per_second": 869.87
+    },
+    {
+      "backend": "pandas",
+      "n_stocks": 300,
+      "n_days": 500,
+      "n_factors": 18,
+      "time_seconds": 0.5678,
+      "factors_per_second": 31.7
+    },
+    {
+      "backend": "polars",
+      "n_stocks": 300,
+      "n_days": 500,
+      "n_factors": 15,
+      "time_seconds": 0.0405,
+      "factors_per_second": 370.42
+    },
+    {
+      "backend": "pandas",
+      "n_stocks": 500,
+      "n_days": 500,
+      "n_factors": 18,
+      "time_seconds": 0.9118,
+      "factors_per_second": 19.74
+    },
+    {
+      "backend": "polars",
+      "n_stocks": 500,
+      "n_days": 500,
+      "n_factors": 15,
+      "time_seconds": 0.0658,
+      "factors_per_second": 227.94
+    }
+  ]
+}
