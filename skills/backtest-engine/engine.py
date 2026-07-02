@@ -247,3 +247,41 @@ if __name__ == "__main__":
 
     result = run(ctx)
     print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+
+
+# ---------------------------------------------------------------------------
+# 优化模块入口（已整合到 scripts/optimizations/）
+# 使用方式: from engine import optimizations
+# ---------------------------------------------------------------------------
+from scripts.optimizations.vectorized_adapter import (
+    VectorizedAdapter as _VectorizedAdapter,
+)
+from scripts.optimizations.extended_metrics import (
+    ExtendedMetrics as _ExtendedMetrics,
+)
+from scripts.optimizations.vectorized_ic import (
+    VectorizedIC as _VectorizedIC,
+)
+from scripts.optimizations.native_adapter_v2 import (
+    NativeAdapterV2 as _NativeAdapterV2,
+)
+from scripts.optimizations.walk_forward_validator import (
+    WalkForwardValidator as _WalkForwardValidator,
+)
+
+
+class optimizations:
+    """回测引擎优化模块集合"""
+    VectorizedAdapter = _VectorizedAdapter
+    NativeAdapterV2 = _NativeAdapterV2
+    ExtendedMetrics = _ExtendedMetrics
+    VectorizedIC = _VectorizedIC
+    WalkForwardValidator = _WalkForwardValidator
+
+    @staticmethod
+    def get_vectorized_backtest_engines():
+        """返回所有可用的向量化回测引擎类"""
+        return {
+            "vectorized_adapter": _VectorizedAdapter,
+            "native_adapter_v2": _NativeAdapterV2,
+        }

@@ -695,3 +695,27 @@ if __name__ == "__main__":
         )
     result = run(ctx)
     print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+# ---------------------------------------------------------------------------
+# 优化模块入口（已整合到 scripts/optimizations/）
+# 使用方式: from engine import optimizations
+# ---------------------------------------------------------------------------
+from scripts.optimizations.pit_adapter import (
+    PITDataAdapter as _PITDataAdapter,
+    PITField as _PITField,
+)
+
+
+class optimizations:
+    """数据引擎优化模块集合"""
+    PITDataAdapter = _PITDataAdapter
+    PITField = _PITField
+
+    @staticmethod
+    def get_pit_modules():
+        """返回所有可用的 PIT 模块"""
+        return {
+            "pit_data_adapter": _PITDataAdapter,
+            "pit_field": _PITField,
+        }

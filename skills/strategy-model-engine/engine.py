@@ -525,3 +525,34 @@ if __name__ == "__main__":
 
     result = run(ctx)
     print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+
+
+# ---------------------------------------------------------------------------
+# 优化模块入口（已整合到 scripts/optimizations/）
+# 使用方式: from engine import optimizations
+# ---------------------------------------------------------------------------
+from scripts.optimizations.intent_parser import (
+    IntentParser as _IntentParser,
+)
+from scripts.optimizations.alpha_expression_engine import (
+    ExpressionEngine as _ExpressionEngine,
+)
+from scripts.optimizations.dynamic_weights import (
+    DynamicFactorWeighting as _DynamicFactorWeighting,
+)
+
+
+class optimizations:
+    """策略模型引擎优化模块集合"""
+    IntentParser = _IntentParser
+    ExpressionEngine = _ExpressionEngine
+    DynamicFactorWeighting = _DynamicFactorWeighting
+
+    @staticmethod
+    def get_strategy_modules():
+        """返回所有可用的策略优化模块"""
+        return {
+            "intent_parser": _IntentParser,
+            "expression_engine": _ExpressionEngine,
+            "dynamic_factor_weighting": _DynamicFactorWeighting,
+        }

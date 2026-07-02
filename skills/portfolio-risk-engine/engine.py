@@ -455,3 +455,45 @@ if __name__ == "__main__":
 
     result = run(ctx)
     print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+
+
+# ---------------------------------------------------------------------------
+# 优化模块入口（已整合到 scripts/optimizations/）
+# 使用方式: from engine import optimizations
+# ---------------------------------------------------------------------------
+from scripts.optimizations.circuit_breaker_v2 import (
+    CircuitBreakerV2 as _CircuitBreakerV2,
+)
+from scripts.optimizations.portfolio_optimizer_v2 import (
+    PortfolioOptimizerV2 as _PortfolioOptimizerV2,
+)
+from scripts.optimizations.risk_engine import (
+    RiskEngine as _RiskEngine,
+)
+from scripts.optimizations.walk_forward import (
+    WalkForwardValidator as _WalkForwardValidator,
+)
+
+
+class optimizations:
+    """风控引擎优化模块集合"""
+    CircuitBreakerV2 = _CircuitBreakerV2
+    PortfolioOptimizerV2 = _PortfolioOptimizerV2
+    RiskEngine = _RiskEngine
+    WalkForwardValidator = _WalkForwardValidator
+
+    @staticmethod
+    def get_risk_modules():
+        """返回所有可用的风控优化模块"""
+        return {
+            "circuit_breaker_v2": _CircuitBreakerV2,
+            "portfolio_optimizer_v2": _PortfolioOptimizerV2,
+            "risk_engine": _RiskEngine,
+        }
+
+    @staticmethod
+    def get_walk_forward_modules():
+        """返回所有可用的Walk-Forward验证模块"""
+        return {
+            "walk_forward_validator": _WalkForwardValidator,
+        }

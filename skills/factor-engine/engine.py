@@ -479,3 +479,95 @@ if __name__ == "__main__":
 
     result = run(ctx)
     print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+
+
+# ---------------------------------------------------------------------------
+# 优化模块入口（已整合到 scripts/optimizations/）
+# 使用方式: from engine import optimizations
+# ---------------------------------------------------------------------------
+from scripts.optimizations.factor_dsl import (
+    FactorEngine as _FactorEngine,
+)
+from scripts.optimizations.lookahead_detector import (
+    detect_in_code as _detect_lookahead_in_code,
+    detect_in_dataframe as _detect_lookahead_in_dataframe,
+)
+from scripts.optimizations.alpha158_lib import (
+    AlphaEngine as _AlphaEngine,
+    AlphaRegistry as _AlphaRegistry,
+)
+from scripts.optimizations.factor_validator import (
+    validate_factor as _validate_factor,
+    FactorVerdict as _FactorVerdict,
+)
+from scripts.optimizations.ic_vectorized import (
+    ic_analysis_batch as _ic_analysis_batch,
+    ic_summary as _ic_summary,
+)
+from scripts.optimizations.ic_decay import (
+    ICDecayAnalyzer as _ICDecayAnalyzer,
+)
+from scripts.optimizations.factor_registry_v2 import (
+    FactorRegistry as _FactorRegistryV2,
+    Neutralizer as _NeutralizerV2,
+)
+from scripts.optimizations.vectorized_neutralize import (
+    neutralize_factor as _neutralize_factor,
+    neutralize_factors_batch as _neutralize_factors_batch,
+)
+from scripts.optimizations.ic_analysis_v2 import (
+    calc_ic_series as _calc_ic_series,
+    calc_ic_stats as _calc_ic_stats,
+)
+
+from scripts.optimizations.expression_dsl.evaluator import (
+    Evaluator as _FactorDSLEvaluator,
+)
+from scripts.optimizations.expression_dsl.parser import (
+    AstNode as _AstNode,
+    FieldNode as _FieldNode,
+)
+
+
+class optimizations:
+    """因子引擎优化模块集合"""
+    FactorDSLEvaluator = _FactorDSLEvaluator
+    AstNode = _AstNode
+    FieldNode = _FieldNode
+    FactorEngine = _FactorEngine
+    detect_lookahead_in_code = _detect_lookahead_in_code
+    detect_lookahead_in_dataframe = _detect_lookahead_in_dataframe
+    AlphaEngine = _AlphaEngine
+    AlphaRegistry = _AlphaRegistry
+    validate_factor = _validate_factor
+    FactorVerdict = _FactorVerdict
+    ic_analysis_batch = _ic_analysis_batch
+    ic_summary = _ic_summary
+    ICDecayAnalyzer = _ICDecayAnalyzer
+    FactorRegistryV2 = _FactorRegistryV2
+    NeutralizerV2 = _NeutralizerV2
+    neutralize_factor = _neutralize_factor
+    neutralize_factors_batch = _neutralize_factors_batch
+    calc_ic_series = _calc_ic_series
+    calc_ic_stats = _calc_ic_stats
+
+    @staticmethod
+    def get_factor_dsl_engines():
+        """返回所有可用的因子DSL引擎"""
+        return {
+            "factor_engine": _FactorEngine,
+            "expression_dsl_evaluator": _FactorDSLEvaluator,
+            "ast_node": _AstNode,
+            "field_node": _FieldNode,
+            "alpha_engine": _AlphaEngine,
+        }
+
+    @staticmethod
+    def get_ic_analyzers():
+        """返回所有可用的IC分析器"""
+        return {
+            "ic_analysis_batch": _ic_analysis_batch,
+            "ic_decay_analyzer": _ICDecayAnalyzer,
+            "calc_ic_series": _calc_ic_series,
+            "calc_ic_stats": _calc_ic_stats,
+        }

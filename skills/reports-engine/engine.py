@@ -504,3 +504,77 @@ if __name__ == "__main__":
 
     result = run(ctx)
     print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+
+
+# ---------------------------------------------------------------------------
+# 优化模块入口（已整合到 scripts/optimizations/）
+# 使用方式: from engine import optimizations
+# ---------------------------------------------------------------------------
+from scripts.optimizations.brinson_attribution import (
+    brinson_fachler as _brinson_fachler,
+    brinson_by_industry as _brinson_by_industry,
+    brinson_attribution_summary as _brinson_attribution_summary,
+)
+from scripts.optimizations.extended_metrics import (
+    omega_ratio as _omega_ratio,
+    ulcer_index as _ulcer_index,
+    ulcer_performance_index as _ulcer_performance_index,
+    deflated_sharpe_ratio as _deflated_sharpe_ratio,
+)
+from scripts.optimizations.performance_metrics import (
+    alpha_beta as _alpha_beta,
+    information_ratio as _information_ratio,
+    up_down_capture as _up_down_capture,
+    sortino_ratio as _sortino_ratio,
+    calmar_ratio as _calmar_ratio,
+)
+from scripts.optimizations.vectorized_metrics import (
+    sharpe as _sharpe_vectorized,
+    sortino as _sortino_vectorized,
+    max_drawdown as _max_drawdown_vectorized,
+    win_rate as _win_rate_vectorized,
+)
+
+
+class optimizations:
+    """报告引擎优化模块集合"""
+    brinson_fachler = _brinson_fachler
+    brinson_by_industry = _brinson_by_industry
+    brinson_attribution_summary = _brinson_attribution_summary
+    omega_ratio = _omega_ratio
+    ulcer_index = _ulcer_index
+    ulcer_performance_index = _ulcer_performance_index
+    deflated_sharpe_ratio = _deflated_sharpe_ratio
+    alpha_beta = _alpha_beta
+    information_ratio = _information_ratio
+    up_down_capture = _up_down_capture
+    sortino_ratio = _sortino_ratio
+    calmar_ratio = _calmar_ratio
+    sharpe_vectorized = _sharpe_vectorized
+    sortino_vectorized = _sortino_vectorized
+    max_drawdown_vectorized = _max_drawdown_vectorized
+    win_rate_vectorized = _win_rate_vectorized
+
+    @staticmethod
+    def get_attribution_modules():
+        """返回所有可用的归因分析模块"""
+        return {
+            "brinson_fachler": _brinson_fachler,
+            "brinson_by_industry": _brinson_by_industry,
+            "brinson_attribution_summary": _brinson_attribution_summary,
+        }
+
+    @staticmethod
+    def get_extended_metrics_modules():
+        """返回所有可用的扩展指标模块"""
+        return {
+            "omega_ratio": _omega_ratio,
+            "ulcer_index": _ulcer_index,
+            "ulcer_performance_index": _ulcer_performance_index,
+            "deflated_sharpe_ratio": _deflated_sharpe_ratio,
+            "alpha_beta": _alpha_beta,
+            "information_ratio": _information_ratio,
+            "up_down_capture": _up_down_capture,
+            "sortino_ratio": _sortino_ratio,
+            "calmar_ratio": _calmar_ratio,
+        }

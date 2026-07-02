@@ -1,0 +1,66 @@
+{
+  "summary": {
+    "total": 12,
+    "passed": 12,
+    "failed": 0,
+    "all_passed": true
+  },
+  "results": {
+    "ic_accuracy": [
+      {
+        "name": "f1 正 IC",
+        "passed": true
+      },
+      {
+        "name": "f4 负 IC",
+        "passed": true
+      },
+      {
+        "name": "f5 IC 接近 0",
+        "passed": true
+      },
+      {
+        "name": "f1 方向=1",
+        "passed": true
+      },
+      {
+        "name": "f4 方向=-1",
+        "passed": true
+      },
+      {
+        "name": "f1 ICIR > f5 ICIR",
+        "passed": true
+      }
+    ],
+    "correlation_matrix": [
+      {
+        "name": "f1 与 f6 强相关（>0.5）",
+        "passed": true
+      }
+    ],
+    "redundant_filter": [
+      {
+        "name": "f1 保留",
+        "passed": true
+      },
+      {
+        "name": "f6 被剔除（冗余）",
+        "passed": true
+      }
+    ],
+    "edge_cases": [
+      {
+        "name": "空数据不崩溃",
+        "passed": true
+      },
+      {
+        "name": "全 NaN 因子跳过",
+        "passed": true
+      },
+      {
+        "name": "forward=5 可运行",
+        "passed": true
+      }
+    ]
+  }
+}
