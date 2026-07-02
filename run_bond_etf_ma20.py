@@ -27,9 +27,11 @@ import pandas as pd
 import numpy as np
 
 # 关键：先正确设置 sys.path
-# /workspace 必须可访问（含主 scripts/ 包）
+# 项目根目录（含主 scripts/ 包）必须可访问
 # 同时子技能内部的 `from scripts.xxx` 期望 `scripts` 指向其自身 scripts/ 目录
-sys.path.insert(0, '/workspace')
+ROOT = os.path.dirname(os.path.abspath(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
 
 # ============================================================
@@ -133,7 +135,8 @@ def load_skill_classes():
             del sys.modules[k]
 
     # 主项目脚本
-    sys.path.insert(0, '/workspace')
+    if ROOT not in sys.path:
+        sys.path.insert(0, ROOT)
     from scripts.config import (
         DATA_DIR, FACTOR_DIR, BACKTEST_DIR, REPORT_DIR,
         WORK_DIR, ARCHIVE_DIR,
@@ -142,7 +145,7 @@ def load_skill_classes():
     from scripts.archive import RunArchiver
     # 加载主项目的 scripts.context
     spec = importlib.util.spec_from_file_location(
-        'scripts_context', '/workspace/scripts/context.py'
+        'scripts_context', os.path.join(ROOT, 'scripts', 'context.py')
     )
     ctx_mod = importlib.util.module_from_spec(spec)
     sys.modules['scripts_context'] = ctx_mod
@@ -154,8 +157,8 @@ def load_skill_classes():
     # 同时把每个子技能的 scripts.* 模块状态保存起来，方便后续运行时切换。
     skill_modules: Dict[str, Dict[str, Any]] = {}
     for skill, class_name in skill_map.items():
-        skill_engine_path = f"/workspace/skills/{skill}/engine.py"
-        skill_scripts_path = f"/workspace/skills/{skill}/scripts"
+        skill_engine_path = os.path.join(ROOT, "skills", skill, "engine.py")
+        skill_scripts_path = os.path.join(ROOT, "skills", skill, "scripts")
         # 清掉主 scripts
         _unregister_skill_modules()
         # 注册子技能 scripts
@@ -178,8 +181,8 @@ def load_skill_classes():
 
     # 恢复主项目 scripts 包
     spec = importlib.util.spec_from_file_location(
-        'scripts', '/workspace/scripts/__init__.py',
-        submodule_search_locations=['/workspace/scripts'],
+        'scripts', os.path.join(ROOT, 'scripts', '__init__.py'),
+        submodule_search_locations=[os.path.join(ROOT, 'scripts')],
     )
     main_scripts = importlib.util.module_from_spec(spec)
     sys.modules['scripts'] = main_scripts
@@ -274,7 +277,7 @@ def fetch_etf_daily_data(symbol: str, start_date: str, end_date: str) -> pd.Data
     511090.SH 是 ETF 基金，tushare 中需要使用 pro.fund_daily（且限频 5次/天），
     沙箱内 akshare 的 eastmoney 接口因代理阻断失败，但 sina 接口可用且不限频。
     因此采用以下数据源优先级：
-    1. 本地缓存 /tmp/511090_*.parquet 或 /workspace/workspace/data/bond_etf_ma20_data.parquet
+    1. 本地缓存 /tmp/511090_*.parquet 或 {项目根}/workspace/data/bond_etf_ma20_data.parquet
     2. akshare fund_etf_hist_sina（无频次限制，真实数据，验证可用）
     3. tushare fund_daily（5次/天，沙箱环境已耗尽）
     4. 沙箱回退：基于 511090.SH 真实特征合成数据（仅在所有外部源不可用时使用）
@@ -284,7 +287,7 @@ def fetch_etf_daily_data(symbol: str, start_date: str, end_date: str) -> pd.Data
         '/tmp/511090_sina.parquet',
         '/tmp/511090_akshare.parquet',
         '/tmp/511090_daily.parquet',
-        '/workspace/workspace/data/bond_etf_ma20_data.parquet',
+        os.path.join(ROOT, 'workspace', 'data', 'bond_etf_ma20_data.parquet'),
     ]
     for cache_path in cache_candidates:
         if os.path.exists(cache_path):

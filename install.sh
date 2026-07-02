@@ -69,8 +69,12 @@ install_dependencies() {
 install_project() {
     echo ""
     echo "正在安装项目..."
-    pip3 install -e . -q
-    echo "✓ 项目安装完成"
+    if [ -f setup.py ] || [ -f pyproject.toml ]; then
+        pip3 install -e . -q
+        echo "✓ 项目安装完成"
+    else
+        echo "⚠ 未找到 setup.py/pyproject.toml，跳过 editable 安装（依赖已在上方安装）"
+    fi
 }
 
 # 复制主Skill到OpenClaw目录

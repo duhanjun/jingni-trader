@@ -113,9 +113,8 @@ class DataEngine:
                 f"系统支持: {', '.join(SUPPORTED_BACKENDS)}"
             )
 
-        # 更新 websearch 默认注入函数
-        if "websearch" in self.data_sources and web_search_fn:
-            self._update_websearch_kwargs(web_search_fn)
+        # websearch 注入函数保存在实例上，加载适配器时按实例注入（不修改全局注册表）
+        self.web_search_fn = web_search_fn
 
         self.provider = provider or self._init_provider_with_fallback()
         # 用于在 fetch_and_clean 中告知调用方本次是否走了模拟数据
@@ -126,17 +125,15 @@ class DataEngine:
             notify_supported_backends()
             _NOTIFIED = True
 
-    def _update_websearch_kwargs(self, web_search_fn: Callable):
-        """更新 websearch 适配器默认注入函数"""
-        _ADAPTER_REGISTRY["websearch"] = (
-            _ADAPTER_REGISTRY["websearch"][0],
-            _ADAPTER_REGISTRY["websearch"][1],
-            {"web_search_fn": web_search_fn},
-        )
-
     # ------------------------------------------------------------------
     # 多源降级（核心 v3）
     # ------------------------------------------------------------------
+
+    def _websearch_extra_kwargs(self, backend: str) -> Dict[str, Any]:
+        """按实例为 websearch 适配器注入搜索函数，避免修改全局注册表。"""
+        if backend == "websearch" and getattr(self, "web_search_fn", None):
+            return {"web_search_fn": self.web_search_fn}
+        return {}
 
     def _init_provider_with_fallback(self) -> BaseDataProvider:
         """
@@ -147,7 +144,7 @@ class DataEngine:
         for backend in self.data_sources:
             try:
                 logger.info(f"尝试加载数据源适配器: {backend}")
-                provider = _load_adapter(backend)
+                provider = _load_adapter(backend, **self._websearch_extra_kwargs(backend))
                 logger.info(f"数据源 {backend} 加载成功")
                 self.backend = backend
                 return provider
@@ -225,7 +222,7 @@ class DataEngine:
             if idx > 0 or self.backend != backend:
                 logger.info(f"切换到数据源: {backend}（链路: {' → '.join(tried_backends)}）")
                 try:
-                    self.provider = _load_adapter(backend)
+                    self.provider = _load_adapter(backend, **self._websearch_extra_kwargs(backend))
                     self.backend = backend
                 except Exception as e:
                     last_errors[backend] = f"初始化失败: {e}"
@@ -536,7 +533,7 @@ class DataEngine:
             df = self._mark_st(df)
 
         if exclude_st and not self.is_synthetic:
-            st_mask = df['is_st'] == True
+            st_mask = df['is_st'].fillna(False).astype(bool)
             df = df[~st_mask]
 
         df = df.dropna(subset=['close'])
@@ -561,7 +558,7 @@ class DataEngine:
         try:
             stock_list = self.provider.get_stock_list()
             if not stock_list.empty and 'is_st' in stock_list.columns:
-                st_codes = stock_list[stock_list['is_st'] == True]['code'].tolist()
+                st_codes = stock_list[stock_list['is_st'].fillna(False).astype(bool)]['code'].tolist()
                 df['is_st'] = df['code'].isin(st_codes)
             else:
                 df['is_st'] = False

@@ -17,7 +17,9 @@ import importlib
 import types
 
 # 设置 sys.path 让 from scripts.xxx 能解析
-sys.path.insert(0, '/workspace')
+ROOT = os.path.dirname(os.path.abspath(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
 
 def _register_scripts_package(skill_scripts_path: str):
@@ -76,7 +78,7 @@ def _register_scripts_package(skill_scripts_path: str):
 
 
 # 加载 data-engine 子技能
-DE_SCRIPTS = '/workspace/skills/data-engine/scripts'
+DE_SCRIPTS = os.path.join(ROOT, 'skills', 'data-engine', 'scripts')
 _register_scripts_package(DE_SCRIPTS)
 
 import pandas as pd
@@ -92,13 +94,14 @@ from scripts.errors import (
 # 引擎需要 import 时是顶层 `import` (from engine module)
 # engine.py 自己 import scripts.* 是基于包内路径
 # 重新切回主 scripts 包
-sys.path.insert(0, '/workspace')  # 主 scripts 包要在 sys.path
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)  # 主 scripts 包要在 sys.path
 # 重新把主 scripts 包注册到 sys.modules，覆盖子技能的
-main_scripts_init = '/workspace/scripts/__init__.py'
+main_scripts_init = os.path.join(ROOT, 'scripts', '__init__.py')
 if os.path.exists(main_scripts_init):
     spec = importlib.util.spec_from_file_location(
         'scripts', main_scripts_init,
-        submodule_search_locations=['/workspace/scripts'],
+        submodule_search_locations=[os.path.join(ROOT, 'scripts')],
     )
     main_pkg = importlib.util.module_from_spec(spec)
     sys.modules['scripts'] = main_pkg
@@ -107,7 +110,7 @@ if os.path.exists(main_scripts_init):
     _register_scripts_package(DE_SCRIPTS)
 
 # 加载 engine.py
-engine_path = '/workspace/skills/data-engine/engine.py'
+engine_path = os.path.join(ROOT, 'skills', 'data-engine', 'engine.py')
 spec = importlib.util.spec_from_file_location('data_engine_main', engine_path)
 engine_mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(engine_mod)
@@ -116,7 +119,7 @@ spec.loader.exec_module(engine_mod)
 if os.path.exists(main_scripts_init):
     spec = importlib.util.spec_from_file_location(
         'scripts', main_scripts_init,
-        submodule_search_locations=['/workspace/scripts'],
+        submodule_search_locations=[os.path.join(ROOT, 'scripts')],
     )
     main_pkg = importlib.util.module_from_spec(spec)
     sys.modules['scripts'] = main_pkg

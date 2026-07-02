@@ -8,6 +8,7 @@ import sys
 import json
 import logging
 import importlib
+import importlib.util as _ilu
 from typing import Dict, Optional, Any
 from datetime import datetime
 
@@ -30,6 +31,42 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("jingnitrader")
+
+
+# 每个子技能自带的 scripts/ 包路径（相对项目根目录）。
+# 主流程在加载子技能前，需把对应子技能的 scripts 包注册为 sys.modules['scripts']，
+# 否则子技能内部 `from scripts.config import ...` 会解析到主 scripts 包而 ImportError。
+_SUBSKILL_SCRIPTS = {
+    "DATA": "skills/data-engine/scripts",
+    "FACTOR": "skills/factor-engine/scripts",
+    "MODEL": "skills/strategy-model-engine/scripts",
+    "BACKTEST": "skills/backtest-engine/scripts",
+    "PORTFOLIO": "skills/portfolio-risk-engine/scripts",
+    "EXECUTION": "skills/execution-monitor-engine/scripts",
+    "REPORT": "skills/reports-engine/scripts",
+}
+
+
+def _register_subskill_scripts(stage: str):
+    """把子技能自带的 scripts 包注册为 sys.modules['scripts']。
+
+    每个子技能都有自己的 scripts/ 包（含各自独立的 config.py），它们与主
+    scripts 包共用 sys.modules['scripts'] 槽位，同一时刻只能有一个生效。
+    加载子技能前必须先切换到该子技能的 scripts 包，否则会 ImportError。
+    """
+    rel = _SUBSKILL_SCRIPTS.get(stage)
+    if not rel:
+        return
+    init_py = os.path.join(os.path.dirname(__file__), rel, "__init__.py")
+    if not os.path.exists(init_py):
+        return
+    spec = _ilu.spec_from_file_location(
+        "scripts", init_py,
+        submodule_search_locations=[os.path.dirname(init_py)],
+    )
+    pkg = _ilu.module_from_spec(spec)
+    sys.modules["scripts"] = pkg
+    spec.loader.exec_module(pkg)
 
 
 STAGES = ["IDLE", "DATA", "FACTOR", "MODEL", "BACKTEST",
@@ -170,6 +207,7 @@ class MasterEngine:
             for key in list(sys.modules.keys()):
                 if key == 'scripts' or key.startswith('scripts.'):
                     del sys.modules[key]
+            _register_subskill_scripts(stage)
             skill_module = importlib.import_module(module_name)
         except ImportError as e:
             error_msg = f"加载子 Skill {module_name} 失败: {e}"
