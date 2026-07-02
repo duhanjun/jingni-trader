@@ -1,27 +1,37 @@
 """
-测试入口: 全部运行 ``python -m quant_opt.tests.run_all`` 即可
+run_all.py - 一次性运行所有单元测试
+
+不依赖 pytest, 直接用 unittest.
 """
+import sys
+import os
+import unittest
+import time
 
-from .test_factor_expr_engine import run as run_factor
-from .test_dynamic_weighting import run as run_dynamic
-from .test_vectorized_backtest import run as run_vec
-from .test_pit_adapter import run as run_pit
-from .test_integration import run as run_integration
+# 添加 workspace 根目录到 sys.path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 
-def run_all():
-    results = {}
-    for name, fn in [
-        ("factor_expr_engine", run_factor),
-        ("dynamic_weighting", run_dynamic),
-        ("vectorized_backtest", run_vec),
-        ("pit_adapter", run_pit),
-        ("integration", run_integration),
-    ]:
-        print(f"\n=== {name} ===")
-        results[name] = fn()
-    return results
+def main():
+    loader = unittest.TestLoader()
+    suite = loader.discover(
+        start_dir=os.path.dirname(os.path.abspath(__file__)),
+        pattern="test_*.py",
+        top_level_dir=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    )
+    runner = unittest.TextTestRunner(verbosity=2)
+    t0 = time.time()
+    result = runner.run(suite)
+    elapsed = time.time() - t0
+    print(f"\n{'='*60}")
+    print(f"耗时: {elapsed:.2f}s")
+    print(f"Tests run: {result.testsRun}")
+    print(f"Failures: {len(result.failures)}")
+    print(f"Errors: {len(result.errors)}")
+    print(f"Skipped: {len(result.skipped)}")
+    print(f"{'='*60}")
+    return 0 if result.wasSuccessful() else 1
 
 
 if __name__ == "__main__":
-    run_all()
+    sys.exit(main())
