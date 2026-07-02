@@ -1,0 +1,124 @@
+{
+  "total": 12,
+  "passed": 12,
+  "failed": 0,
+  "pass_rate": 1.0,
+  "results": [
+    {
+      "name": "表达式解析器基础语法",
+      "passed": true,
+      "detail": "通过 4 个用例",
+      "metrics": {}
+    },
+    {
+      "name": "因子表达式引擎与硬编码一致性",
+      "passed": true,
+      "detail": "12 个因子全部计算，ret_5d/reversal_20d/volatility_20d 数值差异 < 1e-6",
+      "metrics": {}
+    },
+    {
+      "name": "因子可扩展性（动态注册）",
+      "passed": true,
+      "detail": "自定义因子非空值数: 500",
+      "metrics": {}
+    },
+    {
+      "name": "向量化 IC 与循环版一致性",
+      "passed": true,
+      "detail": "3 因子 × 3 远期，ic_mean 最大差异 0.000000",
+      "metrics": {
+        "max_diff": 0.0
+      }
+    },
+    {
+      "name": "向量化 IC 性能对比",
+      "passed": true,
+      "detail": "向量化 1.6735s vs 循环 7.6016s，加速 4.54x",
+      "metrics": {
+        "vectorized_time_sec": 1.6735,
+        "loop_time_sec": 7.6016,
+        "speedup": 4.54,
+        "max_ic_mean_diff": 0.0,
+        "results_match": true,
+        "vectorized_n_factors": 18,
+        "loop_n_factors": 18
+      }
+    },
+    {
+      "name": "向量化回测产出合理性",
+      "passed": true,
+      "detail": "总收益 0.1758，夏普 2.4216，回撤 -0.0459",
+      "metrics": {
+        "total_return": 0.17582300839449672,
+        "annual_return": 0.3151267161714473,
+        "volatility": 0.11774530985567114,
+        "sharpe_ratio": 2.421554765289144,
+        "max_drawdown": -0.04589277273560022,
+        "win_rate": 0.46308724832214765,
+        "calmar_ratio": 6.866586989349529,
+        "sortino_ratio": 3.7191694241563247
+      }
+    },
+    {
+      "name": "向量化回测性能对比",
+      "passed": true,
+      "detail": "向量化 0.3468s vs 事件驱动 0.5963s，加速 1.72x",
+      "metrics": {
+        "vectorized_time_sec": 0.3468,
+        "loop_time_sec": 0.5963,
+        "speedup": 1.72,
+        "vectorized_metrics": {
+          "total_return": 0.12156125577458488,
+          "annual_return": 0.12311253732133265,
+          "volatility": 0.10092256432755504,
+          "sharpe_ratio": 0.9226136686254413,
+          "max_drawdown": -0.09792177673909086,
+          "win_rate": 0.4939759036144578,
+          "calmar_ratio": 1.257253916555882,
+          "sortino_ratio": 1.406188381917649
+        },
+        "loop_metrics": {
+          "total_return": 0.2785205488268323,
+          "annual_return": 0.3104639583522055,
+          "volatility": 0.13655602887099927,
+          "sharpe_ratio": 2.053837978967242,
+          "max_drawdown": -0.10108918414992218,
+          "win_rate": 0.5589519650655022,
+          "calmar_ratio": 3.0711886831707553,
+          "sortino_ratio": 3.5282839205690384
+        },
+        "n_dates": 250
+      }
+    },
+    {
+      "name": "边界-空数据",
+      "passed": true,
+      "detail": "空数据不报错，返回空结果",
+      "metrics": {}
+    },
+    {
+      "name": "边界-单只股票",
+      "passed": true,
+      "detail": "单只股票不报错",
+      "metrics": {}
+    },
+    {
+      "name": "边界-极短周期",
+      "passed": true,
+      "detail": "5 日数据不报错，因子含 NaN",
+      "metrics": {}
+    },
+    {
+      "name": "边界-全涨停日",
+      "passed": true,
+      "detail": "全涨停日不报错，涨跌停限制生效",
+      "metrics": {}
+    },
+    {
+      "name": "边界-非法表达式",
+      "passed": true,
+      "detail": "4 个非法表达式均被正确拒绝",
+      "metrics": {}
+    }
+  ]
+}

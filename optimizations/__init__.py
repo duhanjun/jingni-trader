@@ -1,15 +1,11 @@
 """
-jingni-trader 量化优化模块
+jingni-trader 优化验证代码包
 
-本模块集合了基于开源量化项目学习成果的优化实现，包括：
-- vectorized_ic: 向量化IC分析（借鉴 Qlib 的高效因子评估）
-- vectorized_neutralize: 向量化因子中性化（替代逐日 Python 循环）
-- vectorized_backtest: 向量化回测引擎（借鉴 VectorBT 的向量化设计）
-- enhanced_metrics: 扩展绩效指标（借鉴 Investing Algorithm Framework 的 30+ 指标体系）
-- walk_forward: Walk-Forward 滚动验证（借鉴 VectorBT PRO 的防过拟合方法）
+本目录包含基于开源量化项目学习成果的优化验证代码，
+所有代码独立于 main 分支原有逻辑，不修改任何原有文件。
 
-所有优化代码独立于 main 分支原有代码，通过对比测试验证其正确性与性能提升。
+优化方向（借鉴来源）：
+1. 向量化回测引擎        —— 借鉴 VectorBT 的矩阵化回测思想
+2. 因子注册表框架        —— 借鉴 Qlib 的表达式引擎与 Alpha158 因子库设计
+3. 向量化 IC 分析/中性化 —— 借鉴 Qlib 的高性能基础设施（groupby 向量化）
 """
-
-__version__ = "0.1.0"
-__author__ = "jingni-trader optimization team"

@@ -1,0 +1,54 @@
+{
+  "backtest": {
+    "orig_time": 0.16178131103515625,
+    "vec_time": 0.027417421340942383,
+    "speedup": 5.900675669800082,
+    "orig_final_equity": 1084598.88664441,
+    "vec_final_equity": 1095428.8248260678,
+    "orig_metrics": {
+      "total_return": 0.08586930979458085,
+      "annual_return": 0.5146730420494019,
+      "volatility": 0.22298760886948973,
+      "sharpe_ratio": 1.8767885742126404,
+      "max_drawdown": -0.08587172724824406,
+      "calmar_ratio": 5.9935098377787215,
+      "sortino_ratio": 2.799546007245187,
+      "win_rate": 0.1927710843373494,
+      "total_trades": 83,
+      "calculation_time": "2026-06-23 07:27:25"
+    },
+    "vec_metrics": {
+      "total_return": 0.09542882482606774,
+      "annual_return": 0.09622786694263175,
+      "volatility": 0.08644825028931685,
+      "sharpe_ratio": 0.763263224763716,
+      "max_drawdown": -0.07533877891878193,
+      "calmar_ratio": 1.2772687362821349,
+      "sortino_ratio": 1.264377420277767,
+      "win_rate": 0.3436123348017621,
+      "total_trades": 227,
+      "calculation_time": "2026-06-23 07:27:25"
+    }
+  },
+  "ic": {
+    "orig_time": 5.880037069320679,
+    "vec_time": 1.4925715923309326,
+    "speedup": 3.939534357704001,
+    "max_error": 0,
+    "n_factors": 13
+  },
+  "neutralize": {
+    "orig_time": 6.737985372543335,
+    "vec_time": 2.4218921661376953,
+    "speedup": 2.7821161762493807,
+    "n_factors": 4
+  },
+  "t_plus_1": {
+    "t_plus_1_enforced": true,
+    "n_trades": 2
+  },
+  "price_limit": {
+    "price_limit_enforced": true,
+    "n_trades": 1
+  }
+}
