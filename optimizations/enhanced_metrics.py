@@ -1,256 +1,329 @@
 """
-增强绩效指标计算
+扩展绩效指标模块
 
 借鉴来源：
-- VectorBT 的 57 项绩效指标体系
-- Qlib 的绩效分析模块
-- NautilusTrader 的风险指标设计
+- Investing Algorithm Framework 的 30+ 指标体系
+- QuantStats 的专业绩效分析
+- NautilusTrader 的风险指标
 
-对照 jingni-trader 现有实现：
-- skills/backtest-engine/engine.py 的 _calc_metrics 方法
-  仅计算 7 项基础指标：total_return, annual_return, volatility,
-  sharpe_ratio, max_drawdown, win_rate, calmar_ratio
+优化点：
+原实现 skills/backtest-engine/scripts/base/base_backtest.py 的
+BaseBacktestMetrics 仅计算 7 个基础指标（total_return, annual_return,
+volatility, sharpe, max_drawdown, calmar, sortino, win_rate）。
 
-本模块新增指标：
-- Sortino Ratio（下行风险调整收益）
-- Information Ratio（相对基准的超额收益/跟踪误差）
-- Beta / Alpha（CAPM 模型）
-- Turnover Ratio（换手率）
-- Exposure（持仓暴露度）
-- Profit Factor（盈亏比）
-- Win/Loss Ratio（单笔盈亏比）
-- Max Drawdown Duration（最大回撤持续期）
-- Annual Volatility / Monthly Return
+本模块新增：
+- VaR (Value at Risk) 95%/99%
+- CVaR (Conditional VaR / Expected Shortfall)
+- Information Ratio（相对基准）
+- Beta / Alpha（CAPM）
+- 换手率
+- 最大回撤恢复期
+- 下行捕获率 / 上行捕获率
+- 尾部比率（Tail Ratio）
+- 共偏度 / 共峰度
 """
 from typing import Dict, Any, Optional
+
 import numpy as np
 import pandas as pd
 
 
-# 年化因子（A股交易日）
-TRADING_DAYS_PER_YEAR = 252
-TRADING_DAYS_PER_MONTH = 21
-RISK_FREE_RATE = 0.03  # 默认无风险利率 3%
-
-
-def calc_enhanced_metrics(
-    equity_curve: pd.DataFrame,
-    trades: Optional[pd.DataFrame] = None,
-    benchmark: Optional[pd.Series] = None,
-    risk_free_rate: float = RISK_FREE_RATE,
-    periods_per_year: int = TRADING_DAYS_PER_YEAR,
-) -> Dict[str, float]:
+def calc_var(returns: pd.Series, confidence: float = 0.95) -> float:
     """
-    计算增强绩效指标
+    计算 Value at Risk（历史模拟法）
 
     参数:
-        equity_curve: 净值曲线，包含 date, equity 列
-        trades: 交易记录，包含 date, code, action, price, shares, amount, commission, tax
-        benchmark: 基准收益率序列（日频）
-        risk_free_rate: 年化无风险利率
-        periods_per_year: 年化因子
+        returns: 日收益率序列
+        confidence: 置信水平（0.95 或 0.99）
 
     返回:
-        包含所有指标的字典
+        VaR 值（负数，表示最大损失）
     """
-    if equity_curve.empty or 'equity' not in equity_curve.columns:
-        return {}
+    if returns is None or returns.empty:
+        return 0.0
+    return float(np.percentile(returns.dropna(), (1 - confidence) * 100))
 
-    eq = equity_curve.set_index('date')['equity'].sort_index()
-    if len(eq) < 2:
-        return {}
 
-    returns = eq.pct_change().dropna()
-    n = len(returns)
-    if n == 0:
-        return {}
+def calc_cvar(returns: pd.Series, confidence: float = 0.95) -> float:
+    """
+    计算 Conditional VaR（Expected Shortfall）
 
-    # ---- 基础收益指标 ----
-    cumulative = (1 + returns).cumprod()
-    total_return = float(cumulative.iloc[-1] - 1)
-    years = n / periods_per_year
-    annual_return = float((1 + total_return) ** (1 / years) - 1) if years > 0 else 0.0
+    即损失超过 VaR 时的平均损失
+    """
+    if returns is None or returns.empty:
+        return 0.0
+    var = calc_var(returns, confidence)
+    tail = returns[returns <= var]
+    if tail.empty:
+        return var
+    return float(tail.mean())
 
-    # ---- 风险指标 ----
-    volatility = float(returns.std() * np.sqrt(periods_per_year))
-    downside_returns = returns[returns < 0]
-    downside_deviation = float(
-        np.sqrt((downside_returns ** 2).mean() * periods_per_year)
-    ) if len(downside_returns) > 0 else 0.0
 
-    # 最大回撤
-    running_max = eq.cummax()
-    drawdown = (eq / running_max - 1)
-    max_drawdown = float(drawdown.min())
+def calc_information_ratio(
+    returns: pd.Series,
+    benchmark_returns: pd.Series,
+    trading_days: int = 252,
+) -> float:
+    """
+    计算信息比率 = 超额收益均值 / 跟踪误差
 
-    # 最大回撤持续期（天数）
-    in_drawdown = drawdown < 0
-    max_dd_duration = 0
-    current_dd = 0
-    for d in in_drawdown:
-        if d:
-            current_dd += 1
-            max_dd_duration = max(max_dd_duration, current_dd)
+    参数:
+        returns: 策略日收益率
+        benchmark_returns: 基准日收益率
+    """
+    if returns is None or benchmark_returns is None:
+        return 0.0
+    # 对齐索引
+    aligned = pd.concat([returns, benchmark_returns], axis=1, join="inner").dropna()
+    if aligned.empty or len(aligned) < 2:
+        return 0.0
+    r, b = aligned.iloc[:, 0], aligned.iloc[:, 1]
+    excess = r - b
+    tracking_error = excess.std()
+    if tracking_error == 0:
+        return 0.0
+    return float(excess.mean() / tracking_error * np.sqrt(trading_days))
+
+
+def calc_beta_alpha(
+    returns: pd.Series,
+    benchmark_returns: pd.Series,
+    risk_free: float = 0.03,
+    trading_days: int = 252,
+) -> Dict[str, float]:
+    """
+    计算 CAPM Beta 和 Alpha
+
+    返回:
+        {"beta": ..., "alpha": ...}（alpha 已年化）
+    """
+    if returns is None or benchmark_returns is None:
+        return {"beta": 0.0, "alpha": 0.0}
+    aligned = pd.concat([returns, benchmark_returns], axis=1, join="inner").dropna()
+    if aligned.empty or len(aligned) < 2:
+        return {"beta": 0.0, "alpha": 0.0}
+    r, b = aligned.iloc[:, 0], aligned.iloc[:, 1]
+
+    cov_matrix = np.cov(r, b)
+    var_b = cov_matrix[1, 1]
+    if var_b == 0:
+        return {"beta": 0.0, "alpha": 0.0}
+    beta = float(cov_matrix[0, 1] / var_b)
+    # 年化 alpha = mean(r - beta * b) * 252
+    daily_rf = risk_free / trading_days
+    alpha = float((r.mean() - daily_rf - beta * (b.mean() - daily_rf)) * trading_days)
+    return {"beta": beta, "alpha": alpha}
+
+
+def calc_max_drawdown_duration(equity_curve: pd.Series) -> Dict[str, Any]:
+    """
+    计算最大回撤持续期与恢复期
+
+    返回:
+        {
+            "max_dd_duration": 最大回撤持续天数,
+            "max_dd_recovery": 最大回撤恢复天数（None 表示未恢复）,
+            "underwater_start": 回撤开始日期,
+            "underwater_end": 回撤谷底日期,
+        }
+    """
+    if equity_curve is None or len(equity_curve) < 2:
+        return {
+            "max_dd_duration": 0,
+            "max_dd_recovery": None,
+            "underwater_start": None,
+            "underwater_end": None,
+        }
+
+    cummax = equity_curve.cummax()
+    underwater = equity_curve < cummax
+
+    # 找到最长的连续 underwater 段
+    max_duration = 0
+    current_duration = 0
+    dd_start = None
+    dd_end = None
+    best_start = None
+    best_end = None
+
+    for i, (idx, is_under) in enumerate(underwater.items()):
+        if is_under:
+            if current_duration == 0:
+                dd_start = idx
+            current_duration += 1
+            dd_end = idx
+            if current_duration > max_duration:
+                max_duration = current_duration
+                best_start = dd_start
+                best_end = dd_end
         else:
-            current_dd = 0
+            current_duration = 0
 
-    # ---- 风险调整收益指标 ----
-    sharpe = float((annual_return - risk_free_rate) / volatility) if volatility > 0 else 0.0
-    sortino = float((annual_return - risk_free_rate) / downside_deviation) if downside_deviation > 0 else 0.0
-    calmar = float(annual_return / abs(max_drawdown)) if max_drawdown != 0 else 0.0
-
-    # ---- 相对基准指标 ----
-    info_ratio = 0.0
-    beta = 0.0
-    alpha = 0.0
-    tracking_error = 0.0
-    if benchmark is not None and len(benchmark) > 0:
-        # 对齐日期
-        aligned = pd.concat([returns, benchmark], axis=1, join='inner').dropna()
-        if len(aligned) > 1:
-            strat_ret = aligned.iloc[:, 0]
-            bench_ret = aligned.iloc[:, 1]
-            excess = strat_ret - bench_ret
-            tracking_error = float(excess.std() * np.sqrt(periods_per_year))
-            info_ratio = float(
-                (excess.mean() * periods_per_year) / tracking_error
-            ) if tracking_error > 0 else 0.0
-            # Beta / Alpha (CAPM)
-            cov_matrix = np.cov(strat_ret, bench_ret)
-            var_bench = cov_matrix[1, 1]
-            if var_bench > 0:
-                beta = float(cov_matrix[0, 1] / var_bench)
-                alpha = float(
-                    (strat_ret.mean() - beta * bench_ret.mean()) * periods_per_year
-                )
-
-    # ---- 交易指标 ----
-    win_rate = 0.0
-    profit_factor = 0.0
-    win_loss_ratio = 0.0
-    n_trades = 0
-    turnover = 0.0
-    avg_trade_return = 0.0
-
-    if trades is not None and not trades.empty:
-        # 计算每笔交易的盈亏（配对买卖）
-        pnl_list = _compute_trade_pnl(trades)
-        if pnl_list:
-            wins = [p for p in pnl_list if p > 0]
-            losses = [p for p in pnl_list if p < 0]
-            n_trades = len(pnl_list)
-            win_rate = float(len(wins) / n_trades) if n_trades > 0 else 0.0
-            gross_profit = float(sum(wins))
-            gross_loss = float(abs(sum(losses)))
-            profit_factor = float(gross_profit / gross_loss) if gross_loss > 0 else float('inf') if gross_profit > 0 else 0.0
-            avg_win = float(np.mean(wins)) if wins else 0.0
-            avg_loss = float(abs(np.mean(losses))) if losses else 0.0
-            win_loss_ratio = float(avg_win / avg_loss) if avg_loss > 0 else 0.0
-            avg_trade_return = float(np.mean(pnl_list))
-
-        # 换手率（单边）
-        buy_amount = trades[trades['action'] == 'buy']['amount'].sum() if 'action' in trades.columns else 0
-        avg_capital = eq.mean()
-        turnover = float(buy_amount / avg_capital / years) if avg_capital > 0 and years > 0 else 0.0
-
-    # ---- 月度收益 ----
-    monthly_returns = returns.resample('ME').apply(lambda x: (1 + x).prod() - 1)
-    best_month = float(monthly_returns.max()) if len(monthly_returns) > 0 else 0.0
-    worst_month = float(monthly_returns.min()) if len(monthly_returns) > 0 else 0.0
-    positive_months = float((monthly_returns > 0).mean()) if len(monthly_returns) > 0 else 0.0
+    # 恢复期：从谷底到回到前高
+    recovery = None
+    if best_end is not None:
+        peak_before = cummax.loc[:best_end].iloc[-1]
+        after = equity_curve.loc[best_end:]
+        recovered = after[after >= peak_before]
+        if not recovered.empty:
+            recovery = (recovered.index[0] - best_end).days
 
     return {
-        # ---- 收益指标 ----
-        "total_return": total_return,
-        "annual_return": annual_return,
-        "best_month": best_month,
-        "worst_month": worst_month,
-        "positive_month_ratio": positive_months,
-        # ---- 风险指标 ----
-        "volatility": volatility,
-        "downside_deviation": downside_deviation,
-        "max_drawdown": max_drawdown,
-        "max_drawdown_duration_days": int(max_dd_duration),
-        # ---- 风险调整收益 ----
-        "sharpe_ratio": sharpe,
-        "sortino_ratio": sortino,
-        "calmar_ratio": calmar,
-        # ---- 相对基准 ----
-        "information_ratio": info_ratio,
-        "beta": beta,
-        "alpha": alpha,
-        "tracking_error": tracking_error,
-        # ---- 交易指标 ----
-        "n_trades": n_trades,
-        "win_rate": win_rate,
-        "profit_factor": profit_factor,
-        "win_loss_ratio": win_loss_ratio,
-        "avg_trade_pnl": avg_trade_return,
-        "turnover_per_year": turnover,
+        "max_dd_duration": int(max_duration),
+        "max_dd_recovery": recovery,
+        "underwater_start": str(best_start) if best_start is not None else None,
+        "underwater_end": str(best_end) if best_end is not None else None,
     }
 
 
-def _compute_trade_pnl(trades: pd.DataFrame) -> list:
-    """配对计算每笔完整交易的盈亏"""
-    if trades.empty or 'code' not in trades.columns:
-        return []
-
-    pnl_list = []
-    # 按股票代码分组，按时间排序，配对买卖
-    for code, group in trades.sort_values('date').groupby('code'):
-        position_shares = 0
-        cost_basis = 0.0  # 累计买入成本（含手续费）
-
-        for _, t in group.iterrows():
-            action = t.get('action', '')
-            shares = int(t.get('shares', 0))
-            amount = float(t.get('amount', 0))
-            commission = float(t.get('commission', 0))
-            tax = float(t.get('tax', 0))
-
-            if action == 'buy':
-                position_shares += shares
-                cost_basis += amount + commission
-            elif action == 'sell':
-                if position_shares <= 0:
-                    continue
-                # 按比例计算本次卖出对应的成本
-                ratio = shares / position_shares if position_shares > 0 else 0
-                cost_portion = cost_basis * ratio
-                net_proceeds = amount - commission - tax
-                pnl = net_proceeds - cost_portion
-                pnl_list.append(pnl)
-                position_shares -= shares
-                cost_basis -= cost_portion
-
-    return pnl_list
-
-
-def calc_basic_metrics(equity_curve: pd.DataFrame, init_capital: float = 1e6) -> Dict[str, float]:
+def calc_capture_ratios(
+    returns: pd.Series,
+    benchmark_returns: pd.Series,
+) -> Dict[str, float]:
     """
-    复刻 jingni-trader 现有的基础指标计算（用于对比验证）
+    计算上行/下行捕获率
 
-    对照: skills/backtest-engine/engine.py 的 _calc_metrics 方法
+    - 上行捕获率：基准上涨时策略收益 / 基准收益
+    - 下行捕获率：基准下跌时策略收益 / 基准收益
     """
-    if equity_curve.empty or 'equity' not in equity_curve.columns:
+    if returns is None or benchmark_returns is None:
+        return {"up_capture": 0.0, "down_capture": 0.0}
+    aligned = pd.concat([returns, benchmark_returns], axis=1, join="inner").dropna()
+    if aligned.empty:
+        return {"up_capture": 0.0, "down_capture": 0.0}
+    r, b = aligned.iloc[:, 0], aligned.iloc[:, 1]
+
+    up_mask = b > 0
+    down_mask = b < 0
+
+    up_capture = float(r[up_mask].sum() / b[up_mask].sum()) if up_mask.any() and b[up_mask].sum() != 0 else 0.0
+    down_capture = float(r[down_mask].sum() / b[down_mask].sum()) if down_mask.any() and b[down_mask].sum() != 0 else 0.0
+
+    return {"up_capture": up_capture, "down_capture": down_capture}
+
+
+def calc_tail_ratio(returns: pd.Series) -> float:
+    """
+    尾部比率 = 右尾分位 / |左尾分位|
+    衡量收益分布的偏斜程度
+    """
+    if returns is None or returns.empty:
+        return 0.0
+    r = returns.dropna()
+    if len(r) < 10:
+        return 0.0
+    right = np.percentile(r, 95)
+    left = np.percentile(r, 5)
+    if left == 0:
+        return 0.0
+    return float(abs(right / left))
+
+
+def calc_full_metrics(
+    equity_curve: pd.Series,
+    returns: Optional[pd.Series] = None,
+    benchmark_returns: Optional[pd.Series] = None,
+    risk_free: float = 0.03,
+    trading_days: int = 252,
+) -> Dict[str, Any]:
+    """
+    一次性计算全部绩效指标（20+）
+
+    参数:
+        equity_curve: 净值序列
+        returns: 日收益率（若 None 则从 equity_curve 计算）
+        benchmark_returns: 基准日收益率（可选）
+        risk_free: 无风险利率（年化）
+        trading_days: 年交易日数
+
+    返回:
+        包含 20+ 指标的字典
+    """
+    if equity_curve is None or len(equity_curve) < 2:
         return {}
-    eq = equity_curve.set_index('date')['equity']
-    if len(eq) < 2:
+
+    if returns is None:
+        returns = equity_curve.pct_change().dropna()
+
+    if returns.empty:
         return {}
-    returns = eq.pct_change().dropna()
-    cumulative = (1 + returns).cumprod()
-    total_return = cumulative.iloc[-1] - 1
-    annual_return = (1 + total_return) ** (252 / len(returns)) - 1
-    volatility = returns.std() * np.sqrt(252)
-    max_drawdown = (eq / eq.cummax() - 1).min()
-    sharpe = (annual_return - 0.03) / volatility if volatility != 0 else 0
-    win_rate = (returns > 0).mean() if len(returns) > 0 else 0
+
+    # 基础指标
+    total_return = float(equity_curve.iloc[-1] / equity_curve.iloc[0] - 1)
+    n_years = len(equity_curve) / trading_days
+    annual_return = float((1 + total_return) ** (1 / n_years) - 1) if n_years > 0 else 0.0
+    volatility = float(returns.std() * np.sqrt(trading_days))
+    sharpe = float((annual_return - risk_free) / volatility) if volatility > 0 else 0.0
+
+    # 回撤
+    cummax = equity_curve.cummax()
+    drawdown = (equity_curve - cummax) / cummax
+    max_drawdown = float(drawdown.min())
+    calmar = float(annual_return / abs(max_drawdown)) if max_drawdown != 0 else 0.0
+
+    # Sortino
+    neg_returns = returns[returns < 0]
+    downside_std = float(neg_returns.std() * np.sqrt(trading_days)) if len(neg_returns) > 1 else 0.0
+    sortino = float((annual_return - risk_free) / downside_std) if downside_std > 0 else 0.0
+
+    # 风险指标
+    var_95 = calc_var(returns, 0.95)
+    cvar_95 = calc_cvar(returns, 0.95)
+    var_99 = calc_var(returns, 0.99)
+    cvar_99 = calc_cvar(returns, 0.99)
+
+    # 回撤持续期
+    dd_info = calc_max_drawdown_duration(equity_curve)
+
+    # 尾部比率
+    tail_ratio = calc_tail_ratio(returns)
+
+    # 胜率
+    win_rate = float((returns > 0).mean()) if len(returns) > 0 else 0.0
+
+    # 基准相关指标
+    info_ratio = 0.0
+    beta = 0.0
+    alpha = 0.0
+    up_capture = 0.0
+    down_capture = 0.0
+    if benchmark_returns is not None and not benchmark_returns.empty:
+        info_ratio = calc_information_ratio(returns, benchmark_returns, trading_days)
+        ba = calc_beta_alpha(returns, benchmark_returns, risk_free, trading_days)
+        beta = ba["beta"]
+        alpha = ba["alpha"]
+        caps = calc_capture_ratios(returns, benchmark_returns)
+        up_capture = caps["up_capture"]
+        down_capture = caps["down_capture"]
+
     return {
-        "total_return": float(total_return),
-        "annual_return": float(annual_return),
-        "volatility": float(volatility),
-        "sharpe_ratio": float(sharpe),
-        "max_drawdown": float(max_drawdown),
-        "win_rate": float(win_rate),
-        "calmar_ratio": float(annual_return / abs(max_drawdown)) if max_drawdown != 0 else 0,
+        # 收益类
+        "total_return": total_return,
+        "annual_return": annual_return,
+        # 风险类
+        "volatility": volatility,
+        "max_drawdown": max_drawdown,
+        "downside_volatility": downside_std,
+        "var_95": var_95,
+        "cvar_95": cvar_95,
+        "var_99": var_99,
+        "cvar_99": cvar_99,
+        # 风险调整收益
+        "sharpe_ratio": sharpe,
+        "sortino_ratio": sortino,
+        "calmar_ratio": calmar,
+        "information_ratio": info_ratio,
+        # CAPM
+        "beta": beta,
+        "alpha": alpha,
+        # 回撤持续期
+        "max_dd_duration": dd_info["max_dd_duration"],
+        "max_dd_recovery": dd_info["max_dd_recovery"],
+        # 捕获率
+        "up_capture": up_capture,
+        "down_capture": down_capture,
+        # 其他
+        "tail_ratio": tail_ratio,
+        "win_rate": win_rate,
+        "total_days": len(returns),
     }
