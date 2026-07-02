@@ -1,0 +1,21 @@
+{
+  "test_1": {
+    "passed": true,
+    "biased_detected": "True",
+    "correct_passed": true
+  },
+  "test_2": {
+    "passed": true,
+    "unexecutable_ratio": 0.23054417788180223
+  },
+  "test_3": {
+    "passed": true,
+    "break_even_slippage": null
+  },
+  "test_4": {
+    "passed": true,
+    "n_windows": 5,
+    "ret_cv": 0.5096160955587657,
+    "win_rate_cv": 0.03585905577873839
+  }
+}
