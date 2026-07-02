@@ -24,8 +24,8 @@ from typing import Dict, Any
 import numpy as np
 import pandas as pd
 
-from scripts.base.base_backtest_engine import BaseBacktestEngine
-from scripts.base.base_backtest import BaseBacktestMetrics
+from ..base.base_backtest_engine import BaseBacktestEngine
+from ..base.base_backtest import BaseBacktestMetrics
 from .extended_metrics import ExtendedMetrics
 
 

@@ -1,148 +1,216 @@
-{
-  "total": 20,
-  "passed": 20,
-  "failed": 0,
-  "pass_rate": 1.0,
-  "results": [
-    {
-      "name": "因子计算数值一致",
-      "category": "正确性",
-      "status": "PASS",
-      "detail": "公共列数=18, 最大绝对误差=0.00e+00",
-      "duration_sec": 0.1331
+[
+  {
+    "test": "vectorized_backtest",
+    "result": {
+      "total": 10,
+      "passed": 10,
+      "failed": 0,
+      "pass_rate": 1.0
     },
-    {
-      "name": "IC 分析数值一致（Spearman）",
-      "category": "正确性",
-      "status": "PASS",
-      "detail": "最大绝对误差=0.00e+00",
-      "duration_sec": 5.9658
+    "perf": {
+      "vectorized_sec": 0.0113,
+      "native_loop_sec": 0.0971,
+      "speedup": 8.6
     },
-    {
-      "name": "回测权益曲线一致",
-      "category": "正确性",
-      "status": "PASS",
-      "detail": "最终净值 base=838139.54, opt=838139.54, 最大误差=0.000000",
-      "duration_sec": 1.5826
+    "details": [
+      {
+        "name": "无成本下权益终值 ≈ 12100",
+        "status": "PASS",
+        "info": "实际=12100.00"
+      },
+      {
+        "name": "总收益率 ≈ 21%",
+        "status": "PASS",
+        "info": "实际=0.2100"
+      },
+      {
+        "name": "含成本终值 < 无成本终值",
+        "status": "PASS",
+        "info": "含成本=12032.85 < 无成本=12100.00"
+      },
+      {
+        "name": "调仓次数 = 2",
+        "status": "PASS",
+        "info": "实际=2"
+      },
+      {
+        "name": "向量化更快 (加速比 8.6x)",
+        "status": "PASS",
+        "info": "vec=0.0113s vs native=0.0971s"
+      },
+      {
+        "name": "两引擎终值同量级 (差异<30%)",
+        "status": "PASS",
+        "info": "vec=1816476 native=1765776 ratio=0.972"
+      },
+      {
+        "name": "单股票回测不报错",
+        "status": "PASS",
+        "info": ""
+      },
+      {
+        "name": "单股票调仓次数=1",
+        "status": "PASS",
+        "info": "实际=1"
+      },
+      {
+        "name": "全现金权益不变",
+        "status": "PASS",
+        "info": "终值=10000.00"
+      },
+      {
+        "name": "价格含 NaN 不崩溃",
+        "status": "PASS",
+        "info": ""
+      }
+    ]
+  },
+  {
+    "test": "factor_analysis",
+    "result": {
+      "total": 13,
+      "passed": 13,
+      "failed": 0,
+      "pass_rate": 1.0
     },
-    {
-      "name": "回测交易笔数一致",
-      "category": "正确性",
-      "status": "PASS",
-      "detail": "base=897, opt=897",
-      "duration_sec": 0
+    "perf": {
+      "ic_decay_sec": 0.0332,
+      "native_ic_sec": 0.1019,
+      "vectorized_ic_sec": 0.0139,
+      "ic_speedup": 7.3
     },
-    {
-      "name": "扩展指标已生成",
-      "category": "正确性",
-      "status": "PASS",
-      "detail": "新增指标: sortino=-3.378225591883824, turnover=7.674146046748914",
-      "duration_sec": 0
+    "details": [
+      {
+        "name": "5期 IC 为正 (因子有预测力)",
+        "status": "PASS",
+        "info": "ic_5=0.9594"
+      },
+      {
+        "name": "IC 随期数衰减 (5期 > 20期)",
+        "status": "PASS",
+        "info": "ic_5=0.9594 > ic_20=0.4623"
+      },
+      {
+        "name": "5期 IC 显著 (|t|>2)",
+        "status": "PASS",
+        "info": "t=1116.05"
+      },
+      {
+        "name": "Rank IC 为正",
+        "status": "PASS",
+        "info": "rank_ic_5=0.9594"
+      },
+      {
+        "name": "Rank IC std <= Normal IC std * 1.5",
+        "status": "PASS",
+        "info": "rank_std=0.0120 vs normal_std=0.0120"
+      },
+      {
+        "name": "换手率在 [0,1]",
+        "status": "PASS",
+        "info": "turnover=0.2798"
+      },
+      {
+        "name": "自相关性为正 (因子有一定持续性)",
+        "status": "PASS",
+        "info": "autocorr=0.7202"
+      },
+      {
+        "name": "分层收益有 5 层",
+        "status": "PASS",
+        "info": "层数=5"
+      },
+      {
+        "name": "多空收益为正 (Q_max > Q_min)",
+        "status": "PASS",
+        "info": "long_short=0.0884"
+      },
+      {
+        "name": "最高层 mean_return > 最低层",
+        "status": "PASS",
+        "info": "top=0.0482 > bottom=-0.0402"
+      },
+      {
+        "name": "向量化 IC 更快 (加速比 7.3x)",
+        "status": "PASS",
+        "info": "vec=0.0139s vs native=0.1019s"
+      },
+      {
+        "name": "向量化 IC 与循环 IC 均值一致 (差<0.01)",
+        "status": "PASS",
+        "info": "native=0.9594 vec=0.9594"
+      },
+      {
+        "name": "随机因子 5期 |IC| < 0.1",
+        "status": "PASS",
+        "info": "ic=0.0138"
+      }
+    ]
+  },
+  {
+    "test": "walk_forward",
+    "result": {
+      "total": 10,
+      "passed": 10,
+      "failed": 0,
+      "pass_rate": 1.0
     },
-    {
-      "name": "Alpha/Beta/IR 指标生成",
-      "category": "正确性",
-      "status": "PASS",
-      "detail": "alpha=-0.2815068813102661, beta=0.8411424912785681, IR=-4.08513543148428",
-      "duration_sec": 0
+    "perf": {
+      "walk_forward_run_sec": 0.0806,
+      "single_train_ic": -0.1689,
+      "rolling_train_ic": 0.8334
     },
-    {
-      "name": "Purged TS Split 无重叠",
-      "category": "正确性",
-      "status": "PASS",
-      "detail": "折数=3, 无重叠=True",
-      "duration_sec": 0
-    },
-    {
-      "name": "Walk-Forward Split 无重叠",
-      "category": "正确性",
-      "status": "PASS",
-      "detail": "折数=5, 无重叠=True",
-      "duration_sec": 0
-    },
-    {
-      "name": "Walk-Forward 预测覆盖",
-      "category": "正确性",
-      "status": "PASS",
-      "detail": "覆盖率=44.44%, 折数=5",
-      "duration_sec": 0
-    },
-    {
-      "name": "原 train 方法索引 Bug 确认",
-      "category": "Bug验证",
-      "status": "PASS",
-      "detail": "当 test_dates.index 为日期时，X_test 为空（0 行），全部数据进入训练集，无样本外验证",
-      "duration_sec": 0
-    },
-    {
-      "name": "因子计算性能",
-      "category": "性能",
-      "status": "PASS",
-      "detail": "base=0.316s, opt=0.224s, 加速比=1.41x",
-      "duration_sec": 0.2238
-    },
-    {
-      "name": "IC 分析性能",
-      "category": "性能",
-      "status": "PASS",
-      "detail": "base=20.498s, opt=2.066s, 加速比=9.92x",
-      "duration_sec": 2.0664
-    },
-    {
-      "name": "回测性能",
-      "category": "性能",
-      "status": "PASS",
-      "detail": "base=5.332s, opt=2.253s, 加速比=2.37x",
-      "duration_sec": 2.253
-    },
-    {
-      "name": "因子计算-空数据",
-      "category": "边界",
-      "status": "PASS",
-      "detail": "返回 empty=True",
-      "duration_sec": 0
-    },
-    {
-      "name": "IC 分析-空数据",
-      "category": "边界",
-      "status": "PASS",
-      "detail": "返回空 dict=True",
-      "duration_sec": 0
-    },
-    {
-      "name": "回测-空数据",
-      "category": "边界",
-      "status": "PASS",
-      "detail": "返回空结果=True",
-      "duration_sec": 0
-    },
-    {
-      "name": "因子计算-单只股票",
-      "category": "边界",
-      "status": "PASS",
-      "detail": "行数=60",
-      "duration_sec": 0
-    },
-    {
-      "name": "IC 分析-单只股票",
-      "category": "边界",
-      "status": "PASS",
-      "detail": "返回类型=dict",
-      "duration_sec": 0
-    },
-    {
-      "name": "因子计算-短历史",
-      "category": "边界",
-      "status": "PASS",
-      "detail": "ret_20d 全 NaN=True",
-      "duration_sec": 0
-    },
-    {
-      "name": "因子计算-全NaN列",
-      "category": "边界",
-      "status": "PASS",
-      "detail": "turnover_20d 全 NaN=True",
-      "duration_sec": 0
-    }
-  ]
-}
+    "details": [
+      {
+        "name": "生成多个 fold",
+        "status": "PASS",
+        "info": "folds=13"
+      },
+      {
+        "name": "泄漏校验通过",
+        "status": "PASS",
+        "info": "violations=[]"
+      },
+      {
+        "name": "测试集覆盖率 > 0",
+        "status": "PASS",
+        "info": "coverage=1.000"
+      },
+      {
+        "name": "所有 fold train_end < test_start",
+        "status": "PASS",
+        "info": ""
+      },
+      {
+        "name": "产出样本外预测",
+        "status": "PASS",
+        "info": "非空预测数=3900"
+      },
+      {
+        "name": "fold 数 = 窗口数",
+        "status": "PASS",
+        "info": "folds=13"
+      },
+      {
+        "name": "样本外 IC 计算成功",
+        "status": "PASS",
+        "info": ""
+      },
+      {
+        "name": "滚动训练 IC >= 单次训练 IC",
+        "status": "PASS",
+        "info": "rolling=0.8334 >= single=-0.1689"
+      },
+      {
+        "name": "gap=0 时仍无 train/test 重叠",
+        "status": "PASS",
+        "info": "violations=[]"
+      },
+      {
+        "name": "数据不足时返回空窗口",
+        "status": "PASS",
+        "info": "folds=0"
+      }
+    ]
+  }
+]

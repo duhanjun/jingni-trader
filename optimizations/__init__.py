@@ -1,11 +1,8 @@
 """
-jingni-trader 优化验证代码包
+jingni-trader 优化验证模块
 
-本目录包含基于开源量化项目学习成果的优化验证代码，
-所有代码独立于 main 分支原有逻辑，不修改任何原有文件。
-
-优化方向（借鉴来源）：
-1. 向量化回测引擎        —— 借鉴 VectorBT 的矩阵化回测思想
-2. 因子注册表框架        —— 借鉴 Qlib 的表达式引擎与 Alpha158 因子库设计
-3. 向量化 IC 分析/中性化 —— 借鉴 Qlib 的高性能基础设施（groupby 向量化）
+基于开源项目学习成果的优化实现:
+  - cost_models: 模块化成本模型（借鉴 LEAN）
+  - vectorized_backtest: 向量化回测 + T+1 修复 + 基准跟踪（借鉴 FinRL-X）
+  - factor_analysis_enhanced: 向量化 IC + 因子换手率/衰减分析（借鉴 Qlib）
 """

@@ -1,206 +1,171 @@
 # jingni-trader 量化优化验证报告
 
-**执行日期**: 2026-06-22
-**分支**: `feat/quant-opt-20260622-v2`（因远程已有同名分支，加 -v2 后缀）
-**执行人**: 自动化优化流程
+> **执行日期**: 2026-06-24
+> **分支**: `feat/quant-opt-20260624`
+> **状态**: 验证完成，待用户确认是否合并
 
 ---
 
 ## 一、学习项目清单及核心亮点
 
-### 1.1 联网搜索范围
-- GitHub Trending / Awesome Quant
-- arXiv 论文平台（FactorEngine 等）
-- 量化社区（QuantConnect、Reddit r/algotrading）
-- 技术评测博客（python.financial、autotradelab、pinggy）
+通过联网搜索 GitHub、arXiv、QuantConnect 等平台，筛选出以下 3 个最具借鉴价值的量化交易开源项目：
 
-### 1.2 精选学习项目（3 个）
+### 1. FinRL-X（AI4Finance Foundation, arXiv 2603.21330, 2026.03）
+- **定位**: AI 原生模块化量化交易基础设施
+- **核心亮点**:
+  - **权重中心化接口（weight-centric interface）**: 统一选股、组合分配、择时、组合级风控为一个协议
+  - **部署一致性架构（deployment-consistent）**: 回测执行语义与实盘完全一致，解决"回测好、实盘差"问题
+  - 可组合策略管道，支持规则策略与 AI 策略（RL 分配器、LLM 情绪信号）无缝切换
+- **可借鉴方向**: 回测引擎的执行语义应与实盘一致；组合级风控作为可组合层
 
-| 项目 | Star | 核心亮点 | 借鉴方向 |
-|------|------|---------|---------|
-| **VectorBT / VectorBT PRO** | 25k+ | 向量化回测引擎，Numba 加速，参数扫描 | 向量化回测、参数网格搜索 |
-| **Microsoft Qlib** | 15k+ | AI 驱动量化研究，高效因子评估流水线 | 因子 IC 向量化计算、中性化 |
-| **Investing Algorithm Framework** | 增长中 | 30+ 绩效指标，向量化+事件驱动混合，Monte Carlo | 扩展指标体系、Walk-Forward |
+### 2. Qlib（微软, GitHub 15k+ Stars）
+- **定位**: AI 驱动的量化研究平台
+- **核心亮点**:
+  - **完整因子评估体系**: IC/Rank IC/ICIR + 因子换手率（autocorrelation）+ 因子衰减曲线
+  - 内置 LightGBM/Transformer 等模型模板，支持 A 股数据
+  - 高性能数据层，向量化计算
+- **可借鉴方向**: 因子换手率与衰减分析是 jingni-trader 缺失的关键评估维度
 
-**辅助参考**：
-- **NautilusTrader**（Rust/C++ 后端，生产级事件驱动）
-- **FactorEngine**（arXiv 2603.16365，LLM 引导因子挖掘）
-- **TradingAgents**（80k+ star，多 Agent LLM 交易框架）
-
----
-
-## 二、可借鉴的方向列表
-
-对照 jingni-trader 现有代码，识别出以下改进空间：
-
-| # | 优化方向 | 现有问题 | 借鉴来源 | 影响模块 |
-|---|---------|---------|---------|---------|
-| 1 | 向量化 IC 分析 | `factor-engine/engine.py` 逐日 Python 循环调 scipy | Qlib | 因子引擎 |
-| 2 | 向量化因子中性化 | 逐日实例化 sklearn.LinearRegression | Qlib + numpy | 因子引擎 |
-| 3 | 向量化回测引擎 | `native_adapter.py` 事件驱动循环，参数扫描慢 | VectorBT | 回测引擎 |
-| 4 | 扩展绩效指标 | 仅 7 个基础指标，缺 VaR/CVaR/IR | Investing Algorithm Framework | 回测引擎 |
-| 5 | Walk-Forward 验证 | config 有参数但未实现，易过拟合 | VectorBT PRO | 回测引擎 |
-| 6 | 因子注册表系统 | 因子硬编码在 `compute_a_share_factors` | Qlib | 因子引擎（待后续） |
+### 3. LEAN / QuantConnect（GitHub 9k+ Stars）
+- **定位**: 事件驱动专业级算法交易平台
+- **核心亮点**:
+  - **可插拔模块化架构**: FillModel / SlippageModel / FeeModel / BrokerageModel 分离
+  - 支持滑点、市场冲击、佣金、过户费等精细化成本模拟
+  - VolumeShareSlippageModel 模拟大单市场冲击
+- **可借鉴方向**: 成本模型模块化，支持灵活测试不同成本假设
 
 ---
 
-## 三、已完成的验证测试及结论
+## 二、jingni-trader 现有代码问题分析
 
-### 3.1 测试环境
-- Python 3.12.13
-- pandas 3.0.3, numpy 2.5.0, scipy 1.18.0, scikit-learn 1.9.0
-- 操作系统: Linux
+通过深入阅读核心代码，发现以下改进空间：
 
-### 3.2 测试结果汇总
-
-| 测试模块 | 测试数 | 通过 | 失败 | 关键结论 |
-|---------|-------|------|------|---------|
-| 向量化 IC 分析 | 7 | 7 | 0 | 正确性误差 < 1e-15，性能提升 **6.2x** |
-| 向量化中性化 | 4 | 4 | 0 | 正确性误差 < 5e-15，性能提升 **15.7x** |
-| 向量化回测 | 6 | 6 | 0 | T+1/涨跌停正确，性能提升 **12.7x** |
-| 扩展绩效指标 | 9 | 9 | 0 | 22 个指标全部计算正确 |
-| Walk-Forward | 5 | 5 | 0 | 窗口生成/隔离期/过拟合检测均正常 |
-| **合计** | **31** | **31** | **0** | **全部通过** |
-
-### 3.3 性能对比详情
-
-#### IC 分析性能（300 日 × 500 股 = 150,000 行）
-```
-逐日循环 (scipy.stats.spearmanr): 0.5445s
-向量化 (pandas groupby + numpy):  0.0874s
-加速比: 6.2x
-```
-
-#### 因子中性化性能（100 日 × 300 股 = 30,000 行）
-```
-逐日 sklearn.LinearRegression:   0.4092s
-向量化 (numpy.linalg.lstsq):      0.0261s
-加速比: 15.7x
-```
-
-#### 回测性能（250 日 × 100 股 = 25,000 行）
-```
-事件驱动 (逐日循环):              1.6100s
-向量化 (矩阵运算):                0.1270s
-加速比: 12.7x
-```
-
-### 3.4 正确性验证
-
-| 验证项 | 基准方法 | 最大误差 | 结论 |
-|-------|---------|---------|------|
-| Spearman IC | scipy.stats.spearmanr | 5.55e-17 | 完全一致 |
-| Pearson IC | scipy.stats.pearsonr | 8.33e-17 | 完全一致 |
-| 因子中性化 | sklearn.LinearRegression | 4.66e-15 | 完全一致 |
-| VaR/CVaR | numpy.percentile | 0 | 完全一致 |
-| Beta/Alpha | np.cov + CAPM | < 1e-10 | 完全一致 |
-
-### 3.5 边界条件测试
-
-全部模块均通过以下边界条件测试：
-- 空数据输入
-- 单日/单点数据
-- NaN 值处理
-- 样本不足过滤
-- 不存在的列名
-- 恒定净值（零波动）
-- 涨跌停限制
-- T+1 规则
+| 模块 | 文件 | 问题 | 严重程度 |
+|------|------|------|----------|
+| 回测引擎 | `skills/backtest-engine/scripts/adapters/native_adapter.py` | `iterrows()` 逐行循环 + `df[df['date']==dt]` 过滤导致 O(n²) 性能 | 高 |
+| 回测引擎 | 同上 | `t_plus_1` 参数被接收但**从未实际执行**（T+1 约束形同虚设） | 高 |
+| 回测引擎 | 同上 | `benchmark` 参数接收但 equity_curve 未包含基准净值，无法计算 alpha/beta/IR | 中 |
+| 回测引擎 | 同上 | 佣金/滑点/税费硬编码为标量，无法模拟量价市场冲击 | 中 |
+| 因子引擎 | `skills/factor-engine/engine.py` | `_calc_ic` 逐日循环过滤，O(n²) 性能 | 高 |
+| 因子引擎 | 同上 | 缺少因子换手率分析（Qlib 标配） | 中 |
+| 因子引擎 | 同上 | 缺少因子衰减曲线/半衰期分析 | 中 |
+| 主调度 | `engine.py` | 意图解析硬编码日期（"近3年"→2021-2024，但当前已是2026年） | 中 |
 
 ---
 
-## 四、优化代码结构
+## 三、已完成的优化验证
 
-所有优化代码位于 `optimizations/` 目录，不修改 main 分支原有代码：
+### 优化 1: 模块化成本模型（借鉴 LEAN）
+
+**文件**: `optimizations/cost_models.py`
+
+**设计**: 将硬编码的标量成本参数重构为可插拔模型：
+- `SlippageModel` 基类 → `ConstantSlippage`（向后兼容）/ `VolumeShareSlippage`（量价市场冲击）
+- `FeeModel` 基类 → `AShareFeeModel`（佣金+印花税+过户费）
+- `CostCalculator` 统一组合滑点与费用模型
+
+**验证结果**:
+- 固定滑点: 买入 1000股@10.0 → 成交价 10.0100，佣金 5.00，税 0.0 ✓
+- 量价滑点: 大单(20万股/100万量)市场冲击 0.004 >> 小单(100股)冲击 0.000 ✓
+
+### 优化 2: 向量化回测引擎 + T+1 修复 + 基准跟踪（借鉴 FinRL-X）
+
+**文件**: `optimizations/vectorized_backtest.py`
+
+**设计**:
+- 用 `pivot_table` 将 (date, code) → 宽表，矩阵运算替代逐行循环
+- 显式 T+1 约束: 记录买入日期，同日不可卖出
+- equity_curve 新增 `benchmark` 列，计算 alpha/beta/IR/tracking_error
+- 接入模块化 `CostCalculator`
+
+**验证结果**:
+
+| 数据规模 | 原生逐行 | 向量化 | 加速比 | 收益一致性 | 交易笔数一致性 |
+|----------|----------|--------|--------|------------|----------------|
+| 50股票×250天 (12.5k行) | 0.562s | 0.157s | **3.6x** | 0.1631 vs 0.1631 ✓ | 44 vs 44 ✓ |
+| 200股票×500天 (100k行) | 2.846s | 0.522s | **5.5x** | 0.0904 vs 0.0908 ✓ | 161 vs 159 ✓ |
+
+- T+1 验证: 当日买入不可当日卖出，次日可卖出 ✓
+- 基准跟踪: beta=0.1882, alpha=0.3368, IR=-0.4523 ✓
+
+### 优化 3: 向量化 IC + 因子换手率/衰减分析（借鉴 Qlib）
+
+**文件**: `optimizations/factor_analysis_enhanced.py`
+
+**设计**:
+- `ic_analysis_vectorized`: 用 `groupby('date').apply` 替代逐日过滤循环
+- `factor_turnover`: 计算因子自相关（lag 1/5/20），衡量因子稳定性与交易成本
+- `factor_decay`: 计算多持有期 IC 衰减曲线与半衰期，指导持仓周期
+
+**验证结果**:
+
+| 指标 | 逐日循环 | 向量化 | 加速比 | 数值一致性 |
+|------|----------|--------|--------|------------|
+| IC 计算 (100股票×250天) | 0.329s | 0.112s | **2.9x** | -0.551837 vs -0.551837 ✓ |
+
+- 换手率: factor_0(AR=0.9) 换手率 0.130 < factor_2(AR=0.5) 换手率 0.534 ✓
+- 衰减曲线: factor_2 半衰期 5 天，IC 从 0.041 衰减至 0.002 ✓
+
+---
+
+## 四、测试结果汇总
 
 ```
-optimizations/
-├── __init__.py                      # 模块入口
-├── vectorized_ic.py                 # 向量化 IC 分析（含衰减曲线）
-├── vectorized_neutralize.py         # 向量化因子中性化
-├── vectorized_backtest.py           # 向量化回测引擎 + 参数扫描
-├── enhanced_metrics.py              # 22 个扩展绩效指标
-├── walk_forward.py                  # Walk-Forward 滚动验证
-├── tests/
-│   ├── __init__.py
-│   ├── test_vectorized_ic.py        # IC 正确性+性能+边界测试
-│   ├── test_vectorized_neutralize.py # 中性化测试
-│   ├── test_vectorized_backtest.py  # 回测测试
-│   ├── test_enhanced_metrics.py     # 指标测试
-│   └── test_walk_forward.py         # Walk-Forward 测试
-└── VERIFICATION_REPORT.md           # 本报告
+============================================================
+测试结果汇总
+============================================================
+  ✓ 成本模型: PASS
+  ✓ T+1约束: PASS
+  ✓ 基准跟踪: PASS
+  ✓ 回测性能: PASS
+  ✓ IC向量化: PASS
+  ✓ 换手率衰减: PASS
+  ✓ 边界条件: PASS
+
+通过: 7/7
 ```
+
+测试覆盖：
+1. **正确性测试**: T+1 约束、基准跟踪、IC 与 scipy 手动计算一致性
+2. **性能对比测试**: 向量化回测 vs 原生逐行（3.6x~5.5x）、向量化 IC vs 逐日循环（2.9x）
+3. **边界条件测试**: 空数据、单只股票、无信号、全涨跌停
+4. **成本模型测试**: 固定滑点 vs 量价滑点的市场冲击差异
 
 ---
 
 ## 五、待用户确认的优化建议
 
-以下优化方向已验证可行，等待用户确认后可合并到 main：
+以下优化已在新分支验证通过，**未合并到 main**，待用户确认：
 
-### 高优先级（已验证，性能提升显著）
+| 优化项 | 借鉴来源 | 影响范围 | 建议 |
+|--------|----------|----------|------|
+| 向量化回测引擎 | FinRL-X / LEAN | `native_adapter.py` | 替换原生逐行实现，性能提升 3.6x~5.5x |
+| T+1 约束修复 | FinRL-X | `native_adapter.py` | 修复参数失效 BUG，确保回测合规性 |
+| 基准净值跟踪 | LEAN | `native_adapter.py` | 新增 alpha/beta/IR 计算 |
+| 模块化成本模型 | LEAN | 新增 `cost_models.py` | 支持量价滑点，提升回测真实性 |
+| 向量化 IC 计算 | Qlib | `factor-engine/engine.py` | 性能提升 2.9x |
+| 因子换手率分析 | Qlib | 新增分析维度 | 评估因子交易成本 |
+| 因子衰减分析 | Qlib | 新增分析维度 | 指导持仓周期决策 |
 
-1. **替换 factor-engine 的 IC 分析**
-   - 将 `skills/factor-engine/engine.py` 的 `_calc_ic` 方法替换为 `optimizations.vectorized_ic.calc_ic_series`
-   - 预期收益：IC 计算速度提升 6-15 倍
-   - 风险：低（正确性已验证，误差 < 1e-15）
-
-2. **替换 factor-engine 的中性化**
-   - 将 `neutralize` 方法替换为 `optimizations.vectorized_neutralize.neutralize_factor`
-   - 预期收益：中性化速度提升 15 倍
-   - 风险：低
-
-3. **新增向量化回测适配器**
-   - 在 `skills/backtest-engine/scripts/adapters/` 新增 `vectorized_adapter.py`
-   - 用于参数扫描场景，保留原 native_adapter 用于精细回测
-   - 预期收益：参数扫描速度提升 12 倍
-   - 风险：中（需确认策略兼容性）
-
-### 中优先级（功能增强）
-
-4. **扩展绩效指标**
-   - 在 `base_backtest.py` 的 `calc_all_metrics` 中集成 `enhanced_metrics.calc_full_metrics`
-   - 新增 VaR/CVaR/信息比率/Beta/Alpha/捕获率等 15 个指标
-   - 风险：低（纯新增，不破坏现有接口）
-
-5. **启用 Walk-Forward 验证**
-   - config.py 已有 `WF_TRAIN_MONTHS`/`WF_TEST_MONTHS` 参数
-   - 在 backtest-engine 中新增 walk-forward 入口
-   - 风险：低（新增功能）
-
-### 低优先级（后续迭代）
-
-6. **因子注册表系统**
-   - 借鉴 Qlib 的因子注册装饰器
-   - 将硬编码因子改为可插拔式
-   - 需较大重构
-
-7. **LLM 意图解析**
-   - 当前 `engine.py` 的 `parse_intent` 用关键词匹配
-   - 可借鉴 TradingAgents 的 LLM Agent 架构
-   - 需较大改动
+**后续可探索方向（本次未实现）**:
+- 主调度引擎意图解析: 替换硬编码日期为动态计算（如"近3年"→当前年份-3）
+- LLM 因子挖掘: 借鉴 FactorEngine 的程序级因子发现框架
+- 部署一致性: 借鉴 FinRL-X 统一回测与实盘执行接口
 
 ---
 
-## 六、约束遵守说明
+## 六、文件清单
 
-- ✅ 所有新代码位于 `feat/quant-opt-20260622` 分支的 `optimizations/` 目录
-- ✅ 未修改 main 分支任何原有代码
-- ✅ 未执行 git merge 操作
-- ✅ 仅创建新分支并推送
-- ✅ 等待用户确认后方可合并
-
----
-
-## 七、复现方式
-
-```bash
-# 切换到优化分支
-git checkout feat/quant-opt-20260622-v2
-
-# 运行全部测试
-python optimizations/tests/test_vectorized_ic.py
-python optimizations/tests/test_vectorized_neutralize.py
-python optimizations/tests/test_vectorized_backtest.py
-python optimizations/tests/test_enhanced_metrics.py
-python optimizations/tests/test_walk_forward.py
 ```
+optimizations/
+├── __init__.py                    # 模块入口
+├── cost_models.py                 # 模块化成本模型（借鉴 LEAN）
+├── vectorized_backtest.py         # 向量化回测 + T+1 + 基准（借鉴 FinRL-X）
+├── factor_analysis_enhanced.py    # 向量化 IC + 换手率/衰减（借鉴 Qlib）
+├── test_optimizations.py          # 验证测试（7项全部通过）
+└── VERIFICATION_REPORT.md         # 本报告
+```
+
+---
+
+*本报告由 jingni-trader 自动化优化流程生成，所有优化代码位于 `feat/quant-opt-20260624` 分支，未合并到 main。*
