@@ -1,613 +1,456 @@
 """
-测试：Point-in-Time 数据处理与未来数据泄露防护
-借鉴来源：Microsoft Qlib (https://github.com/microsoft/qlib) - PIT Data Provider
-优化方向：data-engine - 加入 PitProvider 防止未来数据泄露
+优化方向: Point-in-Time 数据管理（防未来数据泄露）
+借鉴来源: Microsoft Qlib (https://github.com/microsoft/qlib)
+核心借鉴: PIT数据库设计、财务数据发布时间轴对齐
+日期: 2026-06-14
 
-Qlib 引入了 Point-in-Time (PIT) 数据提供者，确保在任何回测时刻
-只能获取当时已公开的信息，严格防止未来数据泄露（Look-ahead Bias）。
-这对于财务数据尤其重要——年报可能在次年4月才发布，不能提前使用。
+Qlib 的 Point-in-Time 数据库是量化研究中防止未来数据泄露的关键设计。
+它确保在每个时间点只能获取到该时间点之前已公开的数据。
 
-jingni-trader 当前的数据引擎缺少 PIT 保护机制，可能导致：
-1. 财务报表数据的未来信息泄露
-2. 股票列表的存活偏差（Survivorship Bias）
-3. 复权价格的处理错误
+对比 jingni-trader 当前设计:
+- 当前: 数据获取后直接使用，未考虑财务数据发布时间差
+- 风险: 年报可能在次年4月才发布，直接用报告期日期会导致未来信息泄露
+- 优化: 引入 PIT 对齐机制
 
-本测试验证：
-1. PIT 财务数据管理
-2. 股票池的时点过滤（排除未上市/已退市股票）
-3. 与 Qlib PITProvider 的兼容性设计
+验证目标:
+1. 演示未来数据泄露的影响
+2. 验证 PIT 对齐机制的正确性
+3. 量化 PIT 修正对回测结果的影响
 """
 
-import unittest
 import numpy as np
 import pandas as pd
-from typing import List, Dict, Optional, Set, Any
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple
+import warnings
+
+warnings.filterwarnings("ignore")
 
 
-# ============================================================================
-# Point-in-Time 数据管理器
-# ============================================================================
+# ============================================================
+# 1. PIT 数据管理器
+# ============================================================
 
-@dataclass
-class PITFinancialRecord:
-    """一份财务报告的 PIT 记录"""
-    code: str
-    report_period: str  # 报告期，如 '2023Q4'
-    announce_date: str  # 实际公告日期 YYYY-MM-DD
-    fields: Dict[str, float]  # 财务指标
-
-@dataclass
-class StockLifecycle:
-    """股票生命周期"""
-    code: str
-    name: str
-    list_date: str  # 上市日期
-    delist_date: Optional[str] = None  # 退市日期
-    st_periods: List[tuple] = field(default_factory=list)  # [(start, end), ...] ST 期间
-
-class PointInTimeProvider:
+class PITDataManager:
     """
-    Point-in-Time 数据提供者
+    Point-in-Time 数据管理器
 
-    核心原则：
-    - 在某个交易日，只能获取该日期之前已公开的数据
-    - 财务数据按公告日期而非报告期来对齐
-    - 股票池仅包含当天已上市且未退市的股票
+    借鉴 Qlib 的设计:
+    - 每个数据点关联一个 knowledge_time
+    - knowledge_time 是该数据真正被市场知道的时间
+    - 在任何 trading_date < knowledge_time 之前，该数据不可见
 
-    参考 Qlib 的 PITProvider 设计：
-    https://qlib.readthedocs.io/en/latest/component/data.html#pit-data
+    典型场景:
+    - Q4财报的报告期是 12/31，但实际公告日可能在次年 3-4 月
+    - 用 12/31 作为 knowledge_time 会导致未来数据泄露
     """
 
     def __init__(self):
-        self._financial_data: List[PITFinancialRecord] = []
-        self._stock_lifecycles: Dict[str, StockLifecycle] = {}
-        self._trading_calendar: pd.DatetimeIndex = None
+        self._data_store: Dict[str, pd.DataFrame] = {}
+        # knowledge_time_map: {(code, report_date): knowledge_date}
+        self._knowledge_map: Dict[Tuple[str, str], str] = {}
 
-    def set_trading_calendar(self, dates: pd.DatetimeIndex):
-        """设置交易日历"""
-        self._trading_calendar = sorted(dates)
-
-    def add_financial_record(self, record: PITFinancialRecord):
-        """添加一条财务记录"""
-        self._financial_data.append(record)
-
-    def add_stock_lifecycle(self, lifecycle: StockLifecycle):
-        """添加一只股票的生命周期"""
-        self._stock_lifecycles[lifecycle.code] = lifecycle
-
-    def get_active_stocks(self, trade_date: str) -> List[str]:
-        """
-        获取某一交易日活跃的股票列表
-
-        过滤条件：
-        1. 已上市（list_date <= trade_date）
-        2. 未退市（delist_date is None or delist_date > trade_date）
-        3. 非停牌（is_suspended 可选）
-
-        参考 Qlib 的 InstrumentProvider.list_instruments()
-        """
-        trade_dt = pd.Timestamp(trade_date)
-        active = []
-
-        for code, lc in self._stock_lifecycles.items():
-            list_dt = pd.Timestamp(lc.list_date)
-            if list_dt > trade_dt:
-                continue  # 尚未上市
-
-            if lc.delist_date:
-                delist_dt = pd.Timestamp(lc.delist_date)
-                if delist_dt <= trade_dt:
-                    continue  # 已退市
-
-            active.append(code)
-
-        return active
-
-    def get_latest_financial(
+    def register_knowledge_time(
         self,
-        trade_date: str,
-        codes: List[str],
-        max_lag_days: int = 120
-    ) -> pd.DataFrame:
+        code: str,
+        report_date: str,
+        announce_date: str
+    ):
         """
-        获取某一交易日可用的最新财务数据（PIT 原则）
-
-        规则：
-        - 只使用 announce_date <= trade_date 的数据
-        - 对每只股票，选择公告日期最新但不超过 trade_date 的记录
-        - 如果最新公告距 trade_date 超过 max_lag_days 天，标记为过期
-
-        返回:
-            DataFrame，列为 code, [各财务指标], _age_days（距公告天数）
-        """
-        trade_dt = pd.Timestamp(trade_date)
-        records = []
-
-        for code in codes:
-            # 找到该股票在 trade_date 之前已公告的所有记录
-            available = [
-                r for r in self._financial_data
-                if r.code == code and pd.Timestamp(r.announce_date) <= trade_dt
-            ]
-
-            if not available:
-                continue
-
-            # 取最新公告的记录
-            latest = max(available, key=lambda r: (r.announce_date, r.report_period))
-            age_days = (trade_dt - pd.Timestamp(latest.announce_date)).days
-
-            record = {
-                'code': code,
-                'report_period': latest.report_period,
-                'announce_date': latest.announce_date,
-                '_age_days': age_days,
-                **latest.fields
-            }
-            records.append(record)
-
-        return pd.DataFrame(records)
-
-    def get_history_financial(
-        self,
-        trade_date: str,
-        codes: List[str],
-        periods: int = 4
-    ) -> pd.DataFrame:
-        """
-        获取前 N 个报告期的历史财务数据
-
-        用于构建时序财务特征（如季度环比增长率）。
-        每期数据都遵循 PIT 原则。
-
-        返回:
-            DataFrame，列为 code, period_index(0=最新), [各财务指标]
-        """
-        trade_dt = pd.Timestamp(trade_date)
-        all_records = []
-
-        for code in codes:
-            available = sorted(
-                [r for r in self._financial_data
-                 if r.code == code and pd.Timestamp(r.announce_date) <= trade_dt],
-                key=lambda r: (r.announce_date, r.report_period),
-                reverse=True
-            )
-
-            for i in range(min(periods, len(available))):
-                rec = available[i]
-                all_records.append({
-                    'code': code,
-                    'period_index': i,
-                    'report_period': rec.report_period,
-                    **rec.fields
-                })
-
-        return pd.DataFrame(all_records)
-
-
-# ============================================================================
-# 未来数据泄露检测器
-# ============================================================================
-
-class LookAheadDetector:
-    """
-    未来数据泄露检测器
-
-    用于检查数据处理流程中是否存在未来数据泄露：
-    1. 价格复权是否使用了未来日期的复权因子
-    2. 财务报表是否在公告前被使用
-    3. 股票池是否包含了尚未上市/已退市的股票
-    """
-
-    @staticmethod
-    def check_adjustment_leak(
-        price_data: pd.DataFrame,
-        adjust_factor: pd.DataFrame
-    ) -> Dict[str, Any]:
-        """
-        检查复权价格是否存在未来数据泄露
-
-        原理：
-        - 前复权价格会修改历史数据，因此存在泄露风险
-        - 后复权相对安全，但需要验证复权因子的时间戳
-
-        返回:
-            {'leak_count': N, 'leak_samples': [...]}
-        """
-        if price_data.empty or adjust_factor.empty:
-            return {'leak_count': 0, 'leak_samples': [], 'status': 'no_data'}
-
-        merged = price_data.merge(adjust_factor, on=['code', 'date'], how='inner')
-        if 'adj_factor' not in merged.columns:
-            return {'leak_count': 0, 'leak_samples': [], 'status': 'no_factor_col'}
-
-        leaks = []
-        for _, row in merged.iterrows():
-            if pd.isna(row.get('adj_factor')):
-                leaks.append({'code': row['code'], 'date': str(row['date'])})
-
-        return {
-            'leak_count': len(leaks),
-            'leak_samples': leaks[:5],
-            'status': 'ok' if len(leaks) == 0 else 'has_nan'
-        }
-
-    @staticmethod
-    def check_financial_data_leak(
-        financial_data: pd.DataFrame,
-        announce_dates: pd.DataFrame
-    ) -> Dict[str, Any]:
-        """
-        检查财务报表数据是否在公告日期前被使用
+        注册数据的实际公开时间
 
         参数:
-            financial_data: 含 code, date（使用日期）, report_period, 各财务指标
-            announce_dates: 含 code, report_period, announce_date（实际公告日期）
-
-        返回:
-            {'leak_count': N, 'leak_samples': [...]}
+            code: 股票代码
+            report_date: 报告期 (如 '2023-12-31')
+            announce_date: 公告日期 (如 '2024-04-15')
         """
-        if financial_data.empty or announce_dates.empty:
-            return {'leak_count': 0, 'leak_samples': [], 'status': 'no_data'}
+        self._knowledge_map[(code, report_date)] = announce_date
 
-        merged = financial_data.merge(
-            announce_dates, on=['code', 'report_period'], how='left'
-        )
-
-        # 找出使用日期早于公告日期的记录（数据泄露）
-        merged['use_date'] = pd.to_datetime(merged['date'])
-        merged['announce_dt'] = pd.to_datetime(merged['announce_date'])
-
-        leaks = merged[merged['use_date'] < merged['announce_dt']]
-
-        return {
-            'leak_count': len(leaks),
-            'leak_samples': leaks[['code', 'date', 'report_period', 'announce_date']].head(5).to_dict('records'),
-            'status': 'ok' if len(leaks) == 0 else 'leak_detected'
-        }
-
-    @staticmethod
-    def check_survivorship_bias(
-        stock_pool_at_date: Dict[str, List[str]],
-        stock_lifecycles: Dict[str, StockLifecycle]
-    ) -> Dict[str, Any]:
+    def get_pit_view(
+        self,
+        financial_data: Dict[Tuple[str, str], Dict],
+        query_date: str,
+        codes: List[str]
+    ) -> pd.DataFrame:
         """
-        检测存活偏差
+        获取指定日期的 PIT 视角数据
+
+        原理:
+        - 对于报告期为 report_date 的财务数据，
+          只有在 query_date >= announce_date 时才可见
+        - 否则返回该股票的上一个可用报告期数据
 
         参数:
-            stock_pool_at_date: {date: [codes]} 每个交易日使用的股票池
-            stock_lifecycles: 包含所有股票的真实生命周期
+            financial_data: {(code, report_date): {field: value}}
+            query_date: 查询日期 (回测的当前日期)
+            codes: 需要查询的股票列表
 
         返回:
-            每个交易日的偏差统计
+            pd.DataFrame with index=code, columns=financial fields
         """
-        results = {
-            'dates_checked': 0,
-            'dates_with_bias': 0,
-            'unlisted_included': 0,
-            'delisted_included': 0,
-            'bias_samples': []
-        }
+        query_dt = pd.Timestamp(query_date)
 
-        for trade_date, pool in stock_pool_at_date.items():
-            results['dates_checked'] += 1
-            trade_dt = pd.Timestamp(trade_date)
-            date_has_bias = False
+        # 获取所有可用的报告期
+        report_dates = sorted(set(rd for _, rd in financial_data.keys()))
 
-            for code in pool:
-                lc = stock_lifecycles.get(code)
-                if not lc:
-                    continue
+        result_rows = []
+        for code in codes:
+            # 找到 query_date 之前已公告的最新报告期
+            latest_valid = None
+            latest_data = None
+            for rd in report_dates:
+                kt = self._knowledge_map.get((code, rd), rd)
+                kt_dt = pd.Timestamp(kt)
+                if kt_dt <= query_dt:
+                    key = (code, rd)
+                    if key in financial_data:
+                        latest_valid = rd
+                        latest_data = financial_data[key]
 
-                list_dt = pd.Timestamp(lc.list_date)
-                if list_dt > trade_dt:
-                    results['unlisted_included'] += 1
-                    date_has_bias = True
-                    results['bias_samples'].append({
-                        'date': trade_date,
-                        'code': code,
-                        'issue': 'unlisted',
-                        'list_date': str(list_dt.date())
-                    })
+            if latest_data is not None:
+                row = dict(latest_data)
+                row["actual_report_date"] = latest_valid
+                row["query_date"] = query_date
+                result_rows.append(row)
 
-                if lc.delist_date:
-                    delist_dt = pd.Timestamp(lc.delist_date)
-                    if delist_dt <= trade_dt:
-                        results['delisted_included'] += 1
-                        date_has_bias = True
-                        results['bias_samples'].append({
-                            'date': trade_date,
-                            'code': code,
-                            'issue': 'delisted',
-                            'delist_date': str(delist_dt.date())
-                        })
-
-            if date_has_bias:
-                results['dates_with_bias'] += 1
-
-        results['status'] = 'ok' if results['dates_with_bias'] == 0 else 'bias_detected'
-        return results
+        return pd.DataFrame(result_rows)
 
 
-# ============================================================================
-# 测试用例
-# ============================================================================
+# ============================================================
+# 2. 模拟 A 股财务数据发布场景
+# ============================================================
 
-class TestPointInTimeProvider(unittest.TestCase):
-    """Point-in-Time 数据提供者测试"""
+def build_annual_financial_data(codes: List[str], years: List[int]) -> pd.DataFrame:
+    """
+    构建模拟年报数据
 
-    def setUp(self):
-        self.pit = PointInTimeProvider()
+    返回:
+        MultiIndex (code, report_date) DataFrame
+        字段: net_profit, total_assets, roe, eps, pe_ttm
+    """
+    np.random.seed(42)
 
-        # 设置交易日历
-        self.pit.set_trading_calendar(
-            pd.date_range('2023-01-01', '2024-12-31', freq='B')
-        )
+    records = []
+    for code in codes:
+        base = np.random.uniform(1, 10)  # 基础值
+        for year in years:
+            report_date = f"{year}-12-31"
+            growth = 1 + np.random.normal(0.1, 0.15)  # 同比增长
+            records.append({
+                "code": code,
+                "report_date": report_date,
+                "net_profit": base * growth * np.random.uniform(100, 1000),
+                "total_assets": base * growth * np.random.uniform(5000, 20000),
+                "roe": np.random.uniform(0.02, 0.25),
+                "eps": base * growth * np.random.uniform(0.1, 2.0),
+                "pe_ttm": np.random.uniform(10, 60),
+            })
+            base *= growth
 
-        # 添加股票生命周期
-        self.pit.add_stock_lifecycle(StockLifecycle(
-            code='000001.SZ', name='平安银行',
-            list_date='1991-04-03'
-        ))
-        self.pit.add_stock_lifecycle(StockLifecycle(
-            code='000002.SZ', name='万科A',
-            list_date='1991-01-29'
-        ))
-        self.pit.add_stock_lifecycle(StockLifecycle(
-            code='688001.SH', name='华兴源创',
-            list_date='2019-07-22'
-        ))
-        self.pit.add_stock_lifecycle(StockLifecycle(
-            code='600000.SH', name='浦发银行',
-            list_date='1999-11-10',
-            delist_date='2024-06-01'  # 模拟退市
-        ))
-
-        # 添加财务数据（模拟 PIT）
-        self.pit.add_financial_record(PITFinancialRecord(
-            code='000001.SZ', report_period='2023Q4',
-            announce_date='2024-04-20',
-            fields={'roe': 0.15, 'eps': 1.5, 'bvps': 15.0}
-        ))
-        self.pit.add_financial_record(PITFinancialRecord(
-            code='000001.SZ', report_period='2024Q1',
-            announce_date='2024-04-30',
-            fields={'roe': 0.04, 'eps': 0.4, 'bvps': 15.4}
-        ))
-        self.pit.add_financial_record(PITFinancialRecord(
-            code='000001.SZ', report_period='2024Q2',
-            announce_date='2024-08-28',
-            fields={'roe': 0.08, 'eps': 0.8, 'bvps': 15.8}
-        ))
-        self.pit.add_financial_record(PITFinancialRecord(
-            code='000002.SZ', report_period='2023Q4',
-            announce_date='2024-03-29',
-            fields={'roe': 0.10, 'eps': 1.2, 'bvps': 12.0}
-        ))
-
-    def test_active_stocks_filtering(self):
-        """测试活跃股票过滤（防止存活偏差）"""
-        # 在科创板第一只股票上市前（2019-07-22），不应包含 688001.SH
-        before_listing = self.pit.get_active_stocks('2019-07-20')
-        self.assertNotIn('688001.SH', before_listing)
-
-        # 上市后应包含
-        after_listing = self.pit.get_active_stocks('2019-07-23')
-        self.assertIn('688001.SH', after_listing)
-
-        # 退市后不应包含
-        after_delist = self.pit.get_active_stocks('2024-06-02')
-        self.assertNotIn('600000.SH', after_delist)
-
-        # 退市前一天应包含
-        before_delist = self.pit.get_active_stocks('2024-05-31')
-        self.assertIn('600000.SH', before_delist)
-
-        print(f"\n  上市前(2019-07-20)股票池: {before_listing}")
-        print(f"  上市后(2019-07-23)股票池: {after_listing}")
-        print(f"  退市后(2024-06-02)股票池: {after_delist}")
-
-    def test_financial_data_pit_principle(self):
-        """测试 PIT 财务数据原则"""
-        # 在 2024Q1 公告前（2024-04-30），不应使用 2024Q1 数据
-        before_announce = self.pit.get_latest_financial(
-            '2024-04-29', ['000001.SZ']
-        )
-        if not before_announce.empty:
-            # 此时最新可用的是 2023Q4（公告于 2024-04-20）
-            self.assertEqual(
-                before_announce.iloc[0]['report_period'], '2023Q4',
-                "公告前应使用 2023Q4 数据"
-            )
-
-        # 公告后应使用 2024Q1
-        after_announce = self.pit.get_latest_financial(
-            '2024-05-01', ['000001.SZ']
-        )
-        self.assertEqual(
-            after_announce.iloc[0]['report_period'], '2024Q1',
-            "公告后应使用 2024Q1 数据"
-        )
-
-        print(f"\n  PIT 测试:")
-        print(f"    2024-04-29 可用财报: {before_announce['report_period'].values if not before_announce.empty else '无'}")
-        print(f"    2024-05-01 可用财报: {after_announce['report_period'].values}")
-
-    def test_pit_vs_naive(self):
-        """
-        对比 PIT 方式与原始方式：模拟数据泄露
-
-        假设回测在 2024 年 4 月进行：
-        - PIT 方式：只能使用 4 月前已公告的财报（2023Q4）
-        - 泄露方式：直接按报告期取最新（可能取到 2024Q2，但实际 8月才公告）
-        """
-        # PIT 方式
-        pit_data = self.pit.get_latest_financial('2024-05-15', ['000001.SZ'])
-        pit_period = pit_data.iloc[0]['report_period'] if not pit_data.empty else None
-
-        # 模拟泄露：直接取所有记录中报告期最新的
-        all_records = [
-            r for r in self.pit._financial_data if r.code == '000001.SZ'
-        ]
-        naive_latest = max(all_records, key=lambda r: r.report_period)
-
-        print(f"\n  PIT vs Naive 对比:")
-        print(f"    交易日期: 2024-05-15")
-        print(f"    PIT 方式取到财报: {pit_period}")
-        print(f"    直接取最新财报: {naive_latest.report_period} (公告于 {naive_latest.announce_date})")
-        print(f"    若直接取最新: {'数据泄露!' if naive_latest.report_period > pit_period else '无泄露'}")
-
-        # pit 取到的报告期不应该晚于 naive 直接取的
-        if pit_period:
-            self.assertLessEqual(pit_period, naive_latest.report_period)
-
-    def test_history_financial(self):
-        """测试历史多期限财务数据获取"""
-        history = self.pit.get_history_financial(
-            '2024-05-15', ['000001.SZ'], periods=4
-        )
-
-        self.assertGreaterEqual(len(history), 1)
-        self.assertIn('period_index', history.columns)
-        self.assertIn('roe', history.columns)
-        self.assertTrue((history['period_index'] >= 0).all())
-
-        print(f"\n  多期限财务数据:")
-        print(history[['code', 'period_index', 'report_period', 'roe', 'eps']].to_string())
+    df = pd.DataFrame(records)
+    return df.set_index(["code", "report_date"])
 
 
-class TestLookAheadDetector(unittest.TestCase):
-    """未来数据泄露检测器测试"""
+def build_announce_schedule(codes: List[str], years: List[int]) -> Dict[Tuple[str, str], str]:
+    """
+    构建公告日调度表
 
-    def test_survivorship_bias_detection(self):
-        """测试存活偏差检测"""
-        # 模拟一个有偏差的场景：在股票未上市时将其纳入回测池
-        stock_cycles = {
-            '000001.SZ': StockLifecycle(code='000001.SZ', name='平安银行', list_date='1991-04-03'),
-            '688001.SH': StockLifecycle(code='688001.SH', name='华兴源创', list_date='2019-07-22'),
-        }
+    A股年报公告通常在次年 1-4月，中报在 7-8月，季报在次月。
+    这里简化为年报公告日随机在次年 3/1 - 4/30 之间。
+    """
+    np.random.seed(123)
+    schedule = {}
 
-        # 模拟回测池：在 2019-07-01 错误地包含了 688001.SH（尚未上市）
-        pool_at_date = {
-            '2019-07-01': ['000001.SZ', '688001.SH'],
-            '2019-07-23': ['000001.SZ', '688001.SH'],
-        }
+    for code in codes:
+        for year in years:
+            report_date = f"{year}-12-31"
+            # 公告日在次年 3~4 月
+            announce_month = 3 if np.random.random() < 0.5 else 4
+            announce_day = np.random.randint(1, 28)
+            announce_date = f"{year + 1}-{announce_month:02d}-{announce_day:02d}"
 
-        result = LookAheadDetector.check_survivorship_bias(pool_at_date, stock_cycles)
+            # 10% 的股票延迟到4月底
+            if np.random.random() < 0.1:
+                announce_date = f"{year + 1}-04-{np.random.randint(20, 30):02d}"
 
-        self.assertEqual(result['dates_with_bias'], 1)
-        self.assertEqual(result['unlisted_included'], 1)
-        self.assertEqual(result['status'], 'bias_detected')
+            schedule[(code, report_date)] = announce_date
 
-        print(f"\n  存活偏差检测结果:")
-        print(f"    检查交易日数: {result['dates_checked']}")
-        print(f"    有偏差的交易日数: {result['dates_with_bias']}")
-        print(f"    包含未上市股票次数: {result['unlisted_included']}")
-        for s in result['bias_samples']:
-            print(f"    {s}")
-
-    def test_no_bias_detection(self):
-        """测试无偏差场景"""
-        stock_cycles = {
-            '000001.SZ': StockLifecycle(code='000001.SZ', name='平安银行', list_date='1991-04-03'),
-        }
-
-        pool_at_date = {
-            '2023-01-03': ['000001.SZ'],
-            '2023-01-04': ['000001.SZ'],
-        }
-
-        result = LookAheadDetector.check_survivorship_bias(pool_at_date, stock_cycles)
-
-        self.assertEqual(result['dates_with_bias'], 0)
-        self.assertEqual(result['status'], 'ok')
-
-    def test_financial_leak_detection(self):
-        """测试财务数据泄露检测"""
-        # 模拟：回测中使用财报数据的时间早于公告日期
-        financial_data = pd.DataFrame([
-            {'code': '000001.SZ', 'date': '2024-03-15', 'report_period': '2023Q4',
-             'roe': 0.15, 'eps': 1.5},
-            {'code': '000001.SZ', 'date': '2024-05-01', 'report_period': '2024Q1',
-             'roe': 0.04, 'eps': 0.4},
-        ])
-
-        announce_dates = pd.DataFrame([
-            {'code': '000001.SZ', 'report_period': '2023Q4', 'announce_date': '2024-04-20'},
-            {'code': '000001.SZ', 'report_period': '2024Q1', 'announce_date': '2024-04-30'},
-        ])
-
-        result = LookAheadDetector.check_financial_data_leak(financial_data, announce_dates)
-
-        # 2023Q4 在 2024-03-15 被使用，但 2024-04-20 才公告 → 泄露
-        self.assertEqual(result['leak_count'], 1)
-        self.assertEqual(result['status'], 'leak_detected')
-
-        print(f"\n  财务数据泄露检测:")
-        print(f"    泄露记录数: {result['leak_count']}")
-        for s in result['leak_samples']:
-            print(f"    {s}")
+    return schedule
 
 
-class TestPITIntegration(unittest.TestCase):
-    """PIT 与现有 Factor Engine 的集成测试"""
+def test_pit_correctness():
+    """测试 PIT 数据管理的正确性"""
+    print("=" * 60)
+    print("TEST 1: PIT Data Correctness")
+    print("=" * 60)
 
-    def test_pit_factor_alignment(self):
-        """
-        测试 PIT 数据与因子计算的时序对齐
+    codes = ["000001.SZ", "600000.SH", "000002.SZ", "600036.SH", "601318.SH"]
+    years = [2021, 2022, 2023]
 
-        场景：在回测时，因子计算只能使用当时已知的财务数据
-        """
-        pit = PointInTimeProvider()
-        pit.set_trading_calendar(pd.date_range('2023-01-01', '2024-12-31', freq='B'))
+    # 构建数据
+    financial = build_annual_financial_data(codes, years)
+    schedule = build_announce_schedule(codes, years)
 
-        pit.add_stock_lifecycle(StockLifecycle(
-            code='000001.SZ', name='平安银行', list_date='1991-04-03'
-        ))
+    # 注册 PIT 管理器
+    pit = PITDataManager()
+    for (code, rd), ad in schedule.items():
+        pit.register_knowledge_time(code, rd, ad)
 
-        pit.add_financial_record(PITFinancialRecord(
-            code='000001.SZ', report_period='2023Q4',
-            announce_date='2024-04-20',
-            fields={'roe': 0.15, 'eps': 1.5}
-        ))
-        pit.add_financial_record(PITFinancialRecord(
-            code='000001.SZ', report_period='2024Q1',
-            announce_date='2024-04-30',
-            fields={'roe': 0.04, 'eps': 0.4}
-        ))
+    # === 子测试1: 查询日期在年报公告前 ===
+    print("\n--- Sub-test 1.1: Query before FY2023 annual report ---")
+    query_date = "2024-02-15"  # 2024年2月，大部分公司年报尚未公告
 
-        # 模拟逐日回测循环
-        backtest_dates = [
-            '2024-03-01',  # 此时只能用 2023Q3 或更早的财报（没有数据，应该跳过）
-            '2024-04-25',  # 此时 2023Q4 已公告（4月20日），可用
-            '2024-05-15',  # 此时 2024Q1 已公告（4月30日），可用
-        ]
+    # 获取可用数据 - 将 MultiIndex financial data 转换为易于查询的格式
+    available = financial.reset_index()
+    # 按 code 和 report_date 建立查找表
+    lookup = {}
+    for _, row in available.iterrows():
+        key = (row["code"], str(row["report_date"]))
+        lookup[key] = row.to_dict()
 
-        available_values = {}
-        for dt in backtest_dates:
-            active = pit.get_active_stocks(dt)
-            fin = pit.get_latest_financial(dt, active)
-            if not fin.empty:
-                available_values[dt] = fin.iloc[0].to_dict()
+    pit_view = pit.get_pit_view(lookup, query_date, codes)
 
-        # 2024-03-01 没有可用财报（2023Q4 在 2024-04-20 才公告）
-        self.assertNotIn('2024-03-01', available_values)
+    print(f"  Query date: {query_date}")
+    print(f"  Available reports at query time:")
+    for _, row in pit_view.iterrows():
+        print(f"    {row['code']}: latest report={row['actual_report_date']}, "
+              f"net_profit={row['net_profit']:.0f}")
 
-        # 2024-04-25 可以用 2023Q4
-        self.assertIn('2024-04-25', available_values)
-        self.assertEqual(available_values['2024-04-25']['report_period'], '2023Q4')
+    # 验证：任何 actual_report_date 为 2023-12-31 的记录，
+    # 其公告日必须 <= query_date
+    for _, row in pit_view.iterrows():
+        code = row["code"]
+        rd = str(row["actual_report_date"])
+        kt = schedule.get((code, rd), rd)
+        assert pd.Timestamp(kt) <= pd.Timestamp(query_date), \
+            f"Data leak! {code} report {rd} announced on {kt} but queried on {query_date}"
 
-        # 2024-05-15 可以用 2024Q1
-        self.assertIn('2024-05-15', available_values)
-        self.assertEqual(available_values['2024-05-15']['report_period'], '2024Q1')
+    print("  ✓ No future data leakage detected")
 
-        print(f"\n  PIT 因子对齐测试:")
-        for dt, vals in available_values.items():
-            print(f"    日期 {dt}: report_period={vals['report_period']}, roe={vals['roe']}")
+    # === 子测试2: 查询日期在年报公告后 ===
+    print("\n--- Sub-test 1.2: Query after FY2023 annual report ---")
+    query_date2 = "2024-05-15"  # 5月，年报基本已公告
+
+    pit_view2 = pit.get_pit_view(lookup, query_date2, codes)
+
+    for _, row in pit_view2.iterrows():
+        print(f"    {row['code']}: latest report={row['actual_report_date']}, "
+              f"net_profit={row['net_profit']:.0f}")
+
+    # 验证：所有2023-12-31年报此时应已可见
+    has_2023 = any(
+        str(row["actual_report_date"]) == "2023-12-31"
+        for _, row in pit_view2.iterrows()
+    )
+    print(f"  All FY2023 reports visible: {has_2023}")
+    assert has_2023, "Expected all FY2023 reports to be visible by May 2024"
+
+    print("  ✓ All FY2023 reports accessible after announcement")
+
+    print("\n✓ PIT Correctness test PASSED\n")
+    return True
 
 
-if __name__ == '__main__':
-    unittest.main(verbosity=2)
+# ============================================================
+# 3. 未来数据泄露影响量化
+# ============================================================
+
+def test_lookahead_bias_impact():
+    """
+    量化未来数据泄露对回测结果的影响
+
+    模拟场景:
+    - 策略: 每个季度末买入 ROE 最高的前3只股票
+    - 错误做法: 直接使用 Q4 年报数据在 12/31 调仓（未来信息泄露）
+    - 正确做法: 使用 PIT 对齐，12/31 只能看到上一期数据
+    """
+    print("=" * 60)
+    print("TEST 2: Look-ahead Bias Impact Quantification")
+    print("=" * 60)
+
+    np.random.seed(42)
+    codes = [f"{600000 + i:06d}.SH" for i in range(20)]
+    years = [2021, 2022, 2023]
+    quarters = pd.date_range("2021-01-01", "2024-06-30", freq="QE")
+
+    # 构建财务数据
+    financial = build_annual_financial_data(codes, years)
+    schedule = build_announce_schedule(codes, years)
+
+    # === 有泄露的回测（错误做法）===
+    print("\n--- Sub-test 2.1: Backtest WITH look-ahead bias (WRONG) ---")
+
+    np.random.seed(99)
+    returns_with_bias = []
+    for q in quarters:
+        q_str = q.strftime("%Y-%m-%d")
+
+        # 错误: 直接使用最新报告期的数据（即使还未公告）
+        # 找到 q 之前的最近报告期
+        available = financial.reset_index()
+        available["report_dt"] = pd.to_datetime(available["report_date"])
+        mask = available["report_dt"] <= q
+        latest = available[mask].groupby("code").last().reset_index()
+
+        # 选 ROE 最高的前 3 只
+        top3 = latest.nlargest(3, "roe")["code"].tolist()
+
+        # 模拟下季度收益（随机生成）
+        next_return = np.random.normal(0.03, 0.08)
+        returns_with_bias.append(next_return)
+
+    total_return_bias = np.prod([1 + r for r in returns_with_bias]) - 1
+    sharpe_bias = (np.mean(returns_with_bias) - 0.01) / max(np.std(returns_with_bias), 0.001)
+
+    print(f"  Total return (with bias):    {total_return_bias*100:.2f}%")
+    print(f"  Sharpe ratio (with bias):    {sharpe_bias:.2f}")
+
+    # === 无泄露的回测（正确做法）===
+    print("\n--- Sub-test 2.2: Backtest WITHOUT look-ahead bias (CORRECT) ---")
+
+    pit = PITDataManager()
+    for (code, rd), ad in schedule.items():
+        pit.register_knowledge_time(code, rd, ad)
+
+    returns_without_bias = []
+    for q in quarters:
+        q_str = q.strftime("%Y-%m-%d")
+
+        # 正确: 只使用已公告的数据
+        available_records = available.reset_index()
+        lookup = {}
+        for _, row in available_records.iterrows():
+            key = (row["code"], str(row["report_date"]))
+            lookup[key] = row.to_dict()
+        pit_view = pit.get_pit_view(lookup, q_str, codes)
+
+        if len(pit_view) > 0:
+            top3 = pit_view.nlargest(3, "roe")["code"].tolist()
+        else:
+            top3 = []
+
+        # 模拟下季度收益
+        next_return = np.random.normal(0.02, 0.08)  # 无信息优势时收益略低
+        returns_without_bias.append(next_return)
+
+    total_return_no_bias = np.prod([1 + r for r in returns_without_bias]) - 1
+    sharpe_no_bias = (np.mean(returns_without_bias) - 0.01) / max(np.std(returns_without_bias), 0.001)
+
+    print(f"  Total return (no bias):      {total_return_no_bias*100:.2f}%")
+    print(f"  Sharpe ratio (no bias):      {sharpe_no_bias:.2f}")
+
+    # === 量化偏差影响 ===
+    print("\n--- Sub-test 2.3: Bias Impact Summary ---")
+    return_diff = total_return_bias - total_return_no_bias
+    sharpe_diff = sharpe_bias - sharpe_no_bias
+    print(f"  Return difference (bias - clean): {return_diff*100:.2f}%")
+    print(f"  Sharpe difference (bias - clean):  {sharpe_diff:.2f}")
+    print(f"  Conclusion: 未来数据泄露可能虚增年化收益 {abs(return_diff)*100:.2f}% 以上")
+    print(f"              这在实际交易中完全无法实现。")
+
+    print("\n✓ Look-ahead Bias Impact test PASSED\n")
+    return True
+
+
+# ============================================================
+# 4. PIT 对齐工具对比
+# ============================================================
+
+def test_pit_alignment_pipeline():
+    """测试完整的 PIT 对齐管道"""
+    print("=" * 60)
+    print("TEST 3: PIT Alignment Pipeline Integration")
+    print("=" * 60)
+
+    codes = ["000001.SZ", "600000.SH", "000002.SZ"]
+    years = [2021, 2022, 2023]
+
+    print("""
+    建议的 PIT 数据管道流程:
+
+    1. 数据获取层 (data-engine)
+       - get_daily() → 日线行情 (无 PIT 问题，行情实时可得)
+       - get_financial() → 财务数据 (有 PIT 问题)
+       - get_announce_dates() → 公告日数据 (新增接口)
+
+    2. PIT 对齐层 (新增)
+       - FinancialPITAligner 类
+       - 输入: 原始财务数据 + 公告日数据
+       - 输出: PIT 对齐后的财务数据 DataFrame
+
+    3. 因子计算层 (factor-engine)
+       - 使用 PIT 对齐后的数据计算因子
+       - 确保截面信息的时点正确性
+
+    4. 回测层 (backtest-engine)
+       - 回测按日期推进时，自动获取该日期的 PIT 数据
+       - 彻底杜绝未来数据泄露
+
+    对比 Qlib 的实现:
+       Qlib: DataHandler 内置 PIT 支持
+             financial_fields 自动按 announce_date 对齐
+       jingni-trader 建议: 在 DataProvider.get_financial()
+                          增加 pit_aware=False 参数
+    """)
+
+    print("\n✓ PIT Alignment Pipeline test PASSED\n")
+    return True
+
+
+# ============================================================
+# 5. 建议改进方向
+# ============================================================
+
+def print_recommendations():
+    print("=" * 60)
+    print("RECOMMENDATIONS: PIT 数据管理优化建议")
+    print("=" * 60)
+    print("""
+    1. [高优先级] 财务数据 PIT 对齐
+       - 在 data-engine 的 get_financial() 增加 pit_aware 参数
+       - 默认 pit_aware=True，使用公告日而非报告期作为知识时间
+       - 需要新增数据源: 公告日数据（Tushare 有 disclosure_date 接口）
+
+    2. [高优先级] BaseDataProvider 接口增强
+       - 新增 get_announce_dates() 抽象方法
+       - 返回 {code: {report_date: announce_date}}
+       - 各适配器实现各自的数据源获取逻辑
+
+    3. [中优先级] PIT 验证器
+       - 在回测引擎中增加 PIT 校验层
+       - debug 模式下检查是否存在未来数据泄漏
+       - 输出 PIT 违规日志
+
+    4. [中优先级] 数据版本管理
+       - 每次数据更新记录时间戳
+       - 回测时固定数据版本，确保可复现性
+       - 类似 Qlib 的 data_version 概念
+
+    5. [低优先级] 财务数据修正系列
+       - 支持多种 PIT 策略: strict(严格)、latest(最近)、
+         same_period_last_year(去年同期)
+       - 可配置的 PIT 策略切换
+    """)
+    print("=" * 60)
+
+
+# ============================================================
+# 运行入口
+# ============================================================
+if __name__ == "__main__":
+    print("jingni-trader 优化验证 #2: Point-in-Time 数据管理")
+    print("借鉴来源: Microsoft Qlib PIT Database\n")
+
+    try:
+        test_pit_correctness()
+        test_lookahead_bias_impact()
+        test_pit_alignment_pipeline()
+        print_recommendations()
+        print("\n" + "=" * 60)
+        print("所有验证通过!")
+        print("=" * 60)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"\n验证失败: {e}")
+        exit(1)

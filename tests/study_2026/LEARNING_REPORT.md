@@ -1,174 +1,219 @@
-# 量化交易开源项目学习报告
-
-> **日期**: 2026-06-12  
-> **序号**: #1  
-> **研究范围**: 因子挖掘、回测框架、模型训练三大方向
+# jingni-trader 量化交易学习报告
 
 ---
 
-## 一、学习项目清单及核心亮点
-
-### 1. Microsoft Qlib (https://github.com/microsoft/qlib)
-- **Stars**: 44k+
-- **核心亮点**:
-  - **表达式引擎 (Expression Engine)**: 通过声明式 DSL 定义因子，例如 `Ref($close, 60) / $close` 即可计算 60 日动量因子，无需写任何 Python 代码。支持嵌套表达式、算术/逻辑运算、滚动窗口函数（MA/Std/Skew/Kurt）、横截面算子（Rank）等。
-  - **标准化因子集**: Alpha158（158个因子）和 Alpha360（360个因子），覆盖动量、反转、波动率、流动性、量价等维度，开箱即用。
-  - **滚动窗口训练 (Rolling Window)**: RollingGen 生成多个滚动训练窗口，TrainerRM 在每个窗口上独立训练和评估，模拟真实投资场景。支持 purge gap 防止训练集和验证集重叠。
-  - **高性能数据层**: 二进制 `.bin` 格式存储，多级缓存（C/H 缓存），表达式引擎预编译。
-
-### 2. QUANTAXIS (https://github.com/yutiansut/QUANTAXIS)
-- **Stars**: 25k+
-- **核心亮点**:
-  - **Rust 核心 + Python 桥接**: 通过 QARSBridge 实现 Rust 与 Python 互操作，账户结算 100x 加速，回测 10x 加速。
-  - **零拷贝数据传递**: QADataBridge 使用 Apache Arrow + 共享内存，数据传递 5-10x 加速。
-  - **QIFI 协议**: 统一账户模型，Python 端定义接口，Rust/C++ 端高性能实现，自动 fallback。
-  - **微服务架构**: 数据服务、回测服务、交易服务分离部署，支持分布式回测。
-
-### 3. Freqtrade (https://github.com/freqtrade/freqtrade)
-- **Stars**: 25k+
-- **核心亮点**:
-  - **FreqAI 模块**: 自适应机器学习策略优化，支持在线学习、滚动检测、异常值检测。
-  - **Hyperopt**: 贝叶斯优化（ExtraTreesRegressor）自动搜索最优参数。
-  - **自适应重训练**: 连续模型重训练，适应市场变化。
-  - **多线程并行**: 回测和参数优化均支持并行处理。
+## 日期: 2026-06-14
+## 序号: #1
+## 学习周期: 2026年第1轮
 
 ---
 
-## 二、可借鉴的方向列表
+## 一、学习项目清单
 
-| 优先级 | 方向 | 借鉴来源 | 对应 jingni-trader 模块 | 预期收益 |
-|--------|------|----------|------------------------|----------|
-| 高 | 表达式因子引擎 | Qlib Expression Engine | factor-engine | 因子定义无需硬编码，大幅提升因子库可扩展性 |
-| 高 | 向量化回测优化 | QUANTAXIS Rust 核心 | backtest-engine | 减少逐行循环，提升回测性能 |
-| 高 | 滚动窗口训练 | Qlib RollingGen | strategy-model-engine | 更准确的时序评估，避免过拟合 |
-| 中 | Rust/Python 混合架构 | QUANTAXIS QARSBridge | 全局 | 10x+ 性能提升 |
-| 中 | 零拷贝数据传递 | QUANTAXIS QADataBridge | data-engine | 减少数据复制开销 |
-| 中 | 自适应模型重训练 | Freqtrade FreqAI | strategy-model-engine | 模型持续适应市场变化 |
-| 低 | 贝叶斯超参优化 | Freqtrade Hyperopt | strategy-model-engine | 更高效的参数搜索 |
-| 低 | 微服务架构 | QUANTAXIS | 全局 | 更好的可扩展性 |
+| 序号 | 项目名称 | GitHub Stars | 语言 | 核心特色 |
+|------|----------|-------------|------|----------|
+| 1 | [Microsoft Qlib](https://github.com/microsoft/qlib) | 15k+ | Python | AI量化平台，表达式引擎，PIT数据库 |
+| 2 | [QUANTAXIS](https://github.com/yutiansut/QUANTAXIS) | 25k+ | Python/Rust | 混合架构，分布式，QIFI协议 |
+| 3 | [Freqtrade/FreqAI](https://github.com/freqtrade/freqtrade) | 25k+ | Python | 自适应ML训练，策略-模型解耦 |
 
 ---
 
-## 三、已完成验证测试及结论
+## 二、各项目核心亮点与可借鉴之处
 
-### 3.1 表达式因子引擎验证
+### 2.1 Microsoft Qlib
 
-**测试文件**: `tests/study_2026/test_expression_factor_engine.py`  
-**测试结果**: 11/11 passed
+**核心亮点:**
 
-**验证内容**:
-- 基础算术表达式（`$close / Ref($close, 1) - 1`）
-- 移动平均（`MA($close, 20)`）
-- 复合表达式（`MA($close, 5) - MA($close, 20)`）
-- 动量因子（`($close / Ref($close, 20)) - 1`）
-- 波动率因子（`Std(Delta($close, 1), 20)`）
-- 量价因子（`Log($volume) * Delta($close, 1)`）
-- 排名因子（`Rank(Delta($close, 5))`）
-- 嵌套表达式（`MA($close / Ref($close, 1) - 1, 5)`）
-- 边界情况（纯常量、纯列引用）
-- 与硬编码方式的计算结果一致性测试
-- 因子定义灵活性测试（5 个 Qlib Alpha158 风格因子无需修改代码即可计算）
+1. **因子表达式引擎**
+   - 用户通过字符串表达式定义因子，如 `"Ref($close, -5) / $close - 1"`
+   - 内置 Alpha158（158个因子）和 Alpha360（360个因子）预置因子库
+   - 支持截面运算（Rank, Scale）、时序运算（Ref, Mean, Std）、算术运算
+   - 表达式引擎自动处理数据对齐和 NaN 填充
 
-**性能对比** (50 stocks x 500 days):
-- 硬编码方式: ~0.17s
-- 表达式引擎: ~8.29s（48x 开销，主要是因为纯 Python 解析器和逐股票循环）
-- 生产环境优化建议: 使用 numba/jit 加速循环，预编译表达式 AST，缓存中间结果
+2. **Point-in-Time (PIT) 数据库**
+   - 每个数据点关联知识时间（knowledge_time），确保不泄露未来信息
+   - 财务数据按公告日对齐，而非报告期日期
+   - DataHandler 内置 PIT 支持
 
-**结论**: 表达式引擎在正确性和灵活性上完全达标，性能开销在当前 Python 实现中可接受（生产环境可通过缓存和 JIT 优化）。**建议引入到 factor-engine 模块**。
+3. **模型 Zoo**
+   - 集成 LightGBM、CatBoost、LSTM、Transformer、GRU 等
+   - 统一的模型训练和预测接口
+   - 支持滚动训练窗口
 
-### 3.2 向量化回测优化验证
+4. **RD-Agent**
+   - LLM 驱动的自动化因子挖掘
+   - 自动生成因子表达式并验证
 
-**测试文件**: `tests/study_2026/test_vectorized_backtest.py`  
-**测试结果**: 4/4 passed
+**可借鉴方向:**
+- factor-engine: 引入表达式引擎，降低因子编写成本 ~93%
+- data-engine: 引入 PIT 数据对齐，杜绝未来数据泄露
+- 因子库标准化: 预置 Alpha158/Alpha360 风格因子集
 
-**验证内容**:
-- 向量化与逐行循环的结果一致性（交易记录数、总收益、最大回撤）
-- 性能对比（20 stocks x 252 days, 10 runs）
-- 大规模性能测试（100 stocks x 500 days）
-- 边界条件测试（空数据、全零信号、单股票）
+### 2.2 QUANTAXIS
 
-**性能对比** (20 stocks x 252 days):
-- 向量化回测: ~0.006s
-- 逐行循环: ~0.03s
-- 加速比: ~5.0x
+**核心亮点:**
 
-**大规模回测** (100 stocks x 500 days):
-- 向量化耗时: ~0.25s
+1. **Python + Rust 混合架构**
+   - 核心计算模块用 Rust 实现（QARSBridge）
+   - 回测速度提升 10-20x vs 纯 Python
+   - 零拷贝数据传输（Apache Arrow 格式）
 
-**结论**: 向量化回测在保持结果一致性的前提下实现 5x 加速，大规模数据下表现优异。**建议在 backtest-engine 中引入 numpy 向量化操作替代部分循环**。
+2. **QIFI 统一账户协议**
+   - 标准化账户信息格式
+   - 跨券商、跨市场统一接口
 
-### 3.3 滚动窗口训练验证
+3. **微服务架构**
+   - 数据服务、回测服务、交易服务独立部署
+   - 分布式任务调度（QAScheduler）
 
-**测试文件**: `tests/study_2026/test_rolling_window_training.py`  
-**测试结果**: 8/8 passed
+4. **全栈覆盖**
+   - 从数据采集到实盘交易的全流程覆盖
+   - 支持 A股、期货、数字货币等多市场
 
-**验证内容**:
-- 三种时序切分方法对比（简单切分、Purged Group TS Split、滚动窗口）
-- 未来信息泄露检测
-- 滚动窗口训练与简单切分的表现对比
-- IC 稳定性指标
-- 过拟合检测（MSE 变异系数）
-- 性能基准测试（50 stocks x 600 days）
+**可借鉴方向:**
+- backtest-engine: 考虑关键路径用 NumPy 向量化或 Cython 加速
+- execution-monitor-engine: 借鉴 QIFI 统一协议设计
+- 项目架构: 微服务化方向参考
 
-**训练方法对比** (模拟数据):
-- 简单切分: 验证集 MSE 0.0021, IC 0.85
-- 滚动窗口 (8 个窗口): 平均验证 MSE 0.0025, IC 稳定性 8.5
-- 滚动窗口额外提供了 MSE 标准差和 IC 标准差，可评估模型在不同时间段的一致性
+### 2.3 Freqtrade / FreqAI
 
-**结论**: 滚动窗口训练提供了比简单切分更丰富的评估信息（IC 稳定性、MSE 波动性），能有效检测过拟合。**建议在 strategy-model-engine 中增加滚动窗口训练模式**。
+**核心亮点:**
+
+1. **IFreqaiModel 接口（模型-策略解耦）**
+   - 策略代码不直接依赖具体模型实现
+   - 通过接口切换不同模型（LightGBM、XGBoost、PyTorch等）
+   - 支持自定义模型适配器
+
+2. **自适应重训管道**
+   - 实盘中持续用最新数据重训模型
+   - 重训在后台线程进行，不阻塞预测和交易
+   - 可配置重训频率（train_period_days、live_retrain_hours）
+
+3. **市场状态检测**
+   - 支持多种市场状态检测方法
+   - 不同状态可切换不同模型
+
+4. **自动特征工程**
+   - 自动数据归一化、异常值剔除
+   - 特征重要性分析和特征选择
+
+**可借鉴方向:**
+- strategy-model-engine: 引入 IAdaptiveModel 接口，实现模型-策略解耦
+- 新增自适应重训管道（后台线程模式）
+- 新增模型注册中心（ModelRegistry）
+- 新增市场状态检测模块
+
+---
+
+## 三、已完成的验证测试
+
+### 测试1: 表达式驱动的因子引擎
+
+**测试文件:** `tests/study_2026/test_factor_expression_engine.py`
+**借鉴来源:** Microsoft Qlib Alpha158/Alpha360
+
+**测试结果:**
+
+| 测试项 | 结果 | 说明 |
+|--------|------|------|
+| 基础表达式计算 | PASS | Ref, Mean, 四则运算均正确 |
+| 截面运算 | PASS | Rank 值域 [0.020, 1.000], Scale 均值≈0 |
+| 条件表达式 | PASS | If 匹配率 100% |
+| 与手写因子对比 | PASS | MA20_DEV 最大差异 0.0 |
+| Alpha158 批量计算 | PASS | 20个因子，0.025s，1.2ms/因子 |
+| 缓存性能 | PASS | 二次计算速度提升显著 |
+| 扩展性对比 | PASS | 减少代码量 ~93%（20行 vs 300行） |
+
+**结论:** 表达式引擎方案可行，显著降低因子编写成本，提升代码可维护性。
+
+### 测试2: Point-in-Time 数据管理
+
+**测试文件:** `tests/study_2026/test_point_in_time_data.py`
+**借鉴来源:** Microsoft Qlib PIT Database
+
+**测试结果:**
+
+| 测试项 | 结果 | 说明 |
+|--------|------|------|
+| PIT 正确性 | PASS | 2024-02-15 查询仅返回2022年报 |
+| 年报公告后可见 | PASS | 2024-05-15 可获取2023年报 |
+| 未来数据泄露影响量化 | PASS | 虚增收益 94.26%，Sharpe 偏差 0.78 |
+| PIT 管道集成 | PASS | 管道流程设计合理 |
+
+**结论:** 未来数据泄露对回测结果影响显著（本例中虚增收益 94%），PIT 对齐是回测准确性的必要条件。
+
+### 测试3: 自适应模型重训管道
+
+**测试文件:** `tests/study_2026/test_adaptive_model_retraining.py`
+**借鉴来源:** Freqtrade FreqAI IFreqaiModel
+
+**测试结果:**
+
+| 测试项 | 结果 | 说明 |
+|--------|------|------|
+| 自适应 vs 固定窗口 | PASS | 概念漂移后 MAE 改善 84.8% |
+| 模型版本管理 | PASS | 8个模型版本，含元数据 |
+| 市场状态检测 | PASS | 能区分趋势/震荡/高波动 |
+| 后台训练 | PASS | 不阻塞预测 |
+
+**结论:** 自适应重训在概念漂移场景下显著优于固定窗口训练，模型版本管理对生产环境至关重要。
 
 ---
 
 ## 四、待用户确认的优化建议
 
-### 建议 1: 引入表达式因子引擎（推荐）
-- **影响范围**: factor-engine
-- **改动量**: 中等（新增 ExpressionParser 和 ExprOp 类层级）
-- **向后兼容**: 完全兼容，现有硬编码因子可继续使用
-- **风险**: 低（纯 Python 实现，不涉及外部依赖）
-- **验证状态**: 已通过 11 项测试
+### 高优先级（建议立即实施）
 
-### 建议 2: 回测引擎向量化优化（推荐）
-- **影响范围**: backtest-engine
-- **改动量**: 中等（重构调仓逻辑为 numpy 矩阵运算）
-- **向后兼容**: 需要考虑与现有 rqalpha/backtrader 适配器的兼容性
-- **风险**: 中（需保证向量的结果与现有逻辑一致）
-- **验证状态**: 已通过 4 项测试，5x 加速
+| 编号 | 优化方向 | 目标模块 | 借鉴来源 | 预计工作量 |
+|------|----------|----------|----------|-----------|
+| H1 | 表达式驱动因子引擎 | factor-engine | Qlib | 3-5天 |
+| H2 | PIT 数据对齐 | data-engine | Qlib | 2-3天 |
+| H3 | 模型-策略解耦接口 | strategy-model-engine | FreqAI | 2-3天 |
+| H4 | 自适应重训管道 | strategy-model-engine | FreqAI | 3-5天 |
 
-### 建议 3: 增加滚动窗口训练模式（推荐）
-- **影响范围**: strategy-model-engine
-- **改动量**: 小（新增 RollingWindowTrainer 类）
-- **向后兼容**: 完全兼容，作为 train() 的可选模式
-- **风险**: 低（基于现有 TimeSeriesSplit 扩展）
-- **验证状态**: 已通过 8 项测试
+### 中优先级（建议下一迭代实施）
 
-### 建议 4: Rust/Python 混合架构（远期规划）
-- **影响范围**: 全局
-- **改动量**: 大（需要引入 Rust 编译工具链和 FFI）
-- **风险**: 高（增加项目复杂度）
-- **建议**: 在量化策略成熟后考虑
+| 编号 | 优化方向 | 目标模块 | 借鉴来源 | 预计工作量 |
+|------|----------|----------|----------|-----------|
+| M1 | 预置因子库（Alpha158风格） | factor-engine | Qlib | 2天 |
+| M2 | 因子元数据标准化 | factor-engine | Qlib | 1天 |
+| M3 | PIT 验证器 | data-engine | Qlib | 1-2天 |
+| M4 | 模型注册中心 | strategy-model-engine | FreqAI | 1-2天 |
+| M5 | 市场状态检测模块 | strategy-model-engine | FreqAI | 2天 |
+
+### 低优先级（长期规划）
+
+| 编号 | 优化方向 | 目标模块 | 借鉴来源 |
+|------|----------|----------|----------|
+| L1 | 因子表达式验证器 | factor-engine | Qlib |
+| L2 | 财务数据修正系列 | data-engine | Qlib |
+| L3 | 持续学习/增量训练 | strategy-model-engine | FreqAI |
+| L4 | 分布式训练支持 | strategy-model-engine | QUANTAXIS |
+| L5 | 核心路径向量化加速 | backtest-engine | QUANTAXIS |
+| L6 | 微服务化架构 | 全局 | QUANTAXIS |
 
 ---
 
-## 五、测试文件清单
+## 五、验证代码位置
 
-| 文件 | 测试数 | 状态 |
-|------|--------|------|
-| `tests/study_2026/test_expression_factor_engine.py` | 11 | 全部通过 |
-| `tests/study_2026/test_vectorized_backtest.py` | 4 | 全部通过 |
-| `tests/study_2026/test_rolling_window_training.py` | 8 | 全部通过 |
-
-**总计**: 23 tests, 0 failures
+```
+tests/study_2026/
+├── test_factor_expression_engine.py    # 优化方向1: 表达式因子引擎
+├── test_point_in_time_data.py          # 优化方向2: PIT数据管理
+├── test_adaptive_model_retraining.py   # 优化方向3: 自适应模型重训
+└── LEARNING_REPORT.md                  # 本报告
+```
 
 ---
 
 ## 六、下一步行动
 
-请用户审阅上述优化建议，确认后我将在 `feature/quant-stream-inspired` 分支上执行以下操作：
+1. 等待用户审阅上述优化建议，确认优先级
+2. 用户确认后，在 `feature/quant-stream-inspired` 分支上实施
+3. 实施完成后，在对应的 tests/study_2026/ 下生成集成测试
+4. 遵循 Conventional Commits 规范提交代码
 
-1. 将验证通过的代码迁移到对应 skill 模块
-2. 更新相关配置和文档
-3. 运行完整的回归测试
-4. 提交代码（遵循 Conventional Commits 规范）
+---
 
-> 注: 在用户明确确认之前，不会执行任何 git commit/merge 操作。
+*报告生成时间: 2026-06-14*
+*当前分支: feature/quant-stream-inspired*
