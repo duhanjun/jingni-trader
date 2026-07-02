@@ -1,0 +1,97 @@
+# 配置化量化流水线示例
+# 借鉴 Qlib qrun YAML 结构，适配 jingni-trader 的阶段机
+#
+# 用法:
+#   python scripts/pipeline/runner.py config/pipeline_momentum_factor.yaml
+
+# 流水线元信息
+name: "20日动量因子选股回测"
+description: "使用表达式引擎计算20日动量因子，结合增强回测引擎验证策略表现"
+
+# 全局初始化参数
+init:
+  data_source: tushare
+  region: cn
+
+# 全局参数（所有阶段共享）
+global:
+  start_date: "2022-01-01"
+  end_date: "2024-12-31"
+  stock_pool:
+    - "000001.SZ"
+    - "000002.SZ"
+    - "600000.SH"
+    - "600036.SH"
+    - "000858.SZ"
+    - "600519.SH"
+    - "000333.SZ"
+    - "002415.SZ"
+    - "300750.SZ"
+    - "601318.SH"
+  init_capital: 1000000
+  benchmark: "000300.SH"
+  output_dir: "./output"
+
+# 各阶段配置
+stages:
+  data:
+    enabled: true
+    params:
+      frequency: daily
+      adjust: hfq
+    continue_on_error: false
+
+  factor:
+    enabled: true
+    depends_on: [data]
+    # 使用表达式引擎定义因子（借鉴 quant-stream）
+    factor_type: expression
+    expressions:
+      momentum_20d: "RANK(DELTA($close, 20))"     # 20日动量排名
+      reversal_5d: "RANK(DELTA($close, 5))"        # 5日反转
+      volume_trend: "ZSCORE(TS_MEAN($volume, 20))" # 量能趋势
+      volatility: "TS_STD(DELTA($close, 1), 20)"   # 波动率
+    # 同时启用扩展因子库（借鉴 Qlib Alpha158）
+    extended_factors:
+      - momentum_20d
+      - rsi_14
+      - bias_20d
+      - bb_position
+    continue_on_error: false
+
+  model:
+    enabled: true
+    depends_on: [factor]
+    params:
+      model_type: lightgbm
+      features: [momentum_20d, reversal_5d, volume_trend, volatility]
+      label: ret_fwd_5d
+      train_split: 0.6
+      valid_split: 0.2
+    continue_on_error: false
+
+  backtest:
+    enabled: true
+    depends_on: [model]
+    # 使用增强回测（借鉴 quant-stream）
+    enhanced: true
+    t_plus_1: true
+    params:
+      commission_rate: 0.00025
+      stamp_tax_rate: 0.001
+      slippage: 0.0001
+      price_limit: true
+      cost_reserve: 0.02
+      max_single_weight: 0.10
+    continue_on_error: false
+
+  portfolio:
+    enabled: false
+    break_on_success: false
+
+  report:
+    enabled: true
+    depends_on: [backtest]
+    params:
+      output_format: html
+    output: "reports/momentum_20d_{date}.html"
