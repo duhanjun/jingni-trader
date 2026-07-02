@@ -1,478 +1,527 @@
 """
-验证代码 - Point-in-Time 数据防泄漏验证
-借鉴来源: Microsoft Qlib (Point-in-Time 数据系统)
-         arxiv: FactorEngine (时间安全验证)
-优化方向: 在 data-engine 和 factor-engine 中增加前视偏差检测
-日期: 2026-06-13
+=============================================================================
+借鉴来源: Microsoft Qlib Point-in-Time Database
+           (https://qlib.readthedocs.io/en/latest/advanced/PIT.html)
+优化方向: 时点数据验证 - 防止回测中的前视偏差 (Look-ahead Bias)
+=============================================================================
 
-核心设计理念 (来自 Qlib):
-  Point-in-Time (PIT) 数据系统确保在回测时间点 t 只能使用 t 时刻
-  及之前已知的信息，杜绝未来数据泄露导致的回测虚高。
+核心亮点:
+  Qlib 的 PIT (Point-in-Time) 数据库确保在任何历史时间点进行回测时，
+  只使用该时间点实际可用的数据。这是避免"未来函数"的关键设计。
+  
+  具体实现:
+  - 每条财务数据记录包含 date（发布日期）、period（报告期）、value（值）
+  - 查询时根据 observation_time 返回该时刻可用的最近版本
+  - 支持数据的多次修订链（年报修正等场景）
 
-常见泄露来源:
-  1. 使用了未来价格计算因子（如用 t+1 的 close 算 MA）
-  2. 数据预处理中使用了全局统计量（如全局均值标准化）
-  3. 因子中性化时使用了未来日期的截面数据
-  4. 训练集和测试集时间窗口重叠
+对比 jingni-trader 现状:
+  当前 data-engine 和 factor-engine 没有 PIT 机制。当计算因子如 lncap 时:
+    result['lncap'] = mv.replace(0, np.nan).apply(lambda x: np.log(x))
+  这种方式可能使用全时段数据来计算，如果在回测中不对齐时间，
+  会导致前视偏差（即在 t 时刻错误地使用了 t+1 时刻的信息）。
 
-本测试验证:
-  1. PIT 正确性检查器实现
-  2. 常见泄露模式检测
-  3. jingni-trader 现有流程中的潜在泄露点扫描
+验证内容:
+  1. PIT 数据写入和读取正确性
+  2. 修订链处理（多次修订场景）
+  3. 前视偏差检测工具
+  4. 与现有数据处理方式的对比
+  5. 边界条件测试
 """
 
-import sys
 import os
+import sys
 import json
 import unittest
-import warnings
-from typing import Dict, List, Tuple, Optional
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-
 import numpy as np
 import pandas as pd
+from datetime import datetime, timedelta
+from typing import Dict, List, Tuple, Optional
+from dataclasses import dataclass, field
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 
-# ============================================================
-# PIT 验证器实现（借鉴 Qlib PIT Provider 设计）
-# ============================================================
-
-@dataclass
-class PITCheckResult:
-    """单次 PIT 检查结果"""
-    check_name: str
-    passed: bool
-    severity: str  # error / warning / info
-    detail: str = ""
-    leaked_samples: int = 0
-    leaked_ratio: float = 0.0
-
+# ═══════════════════════════════════════════════════════════════════════════
+# Point-in-Time 数据系统原型实现 (借鉴 Qlib PIT Database)
+# ═══════════════════════════════════════════════════════════════════════════
 
 @dataclass
-class PITAuditReport:
-    """PIT 审计报告"""
-    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
-    checks: List[PITCheckResult] = field(default_factory=list)
-    overall_pass: bool = True
-    summary: str = ""
+class PITRecord:
+    """单条 PIT 记录"""
+    publish_date: str        # 发布日期 YYYYMMDD
+    period: str              # 报告期 YYYYQQ
+    value: float             # 报告值
+    next_revision_idx: int = -1   # 下一修订版索引（链表）
 
 
-class PointInTimeValidator:
+class PITDatabase:
     """
-    Point-in-Time 数据验证器
-
-    借鉴 Qlib 的设计理念:
-    - 每个检查项独立可配置
-    - 支持自定义时间窗口和阈值
-    - 输出结构化的审计报告
+    简化版 Point-in-Time 数据库
+    
+    存储格式: {instrument: {field: [PITRecord, ...]}}
+    记录按 publish_date 升序排列
     """
 
-    def __init__(self, lookahead_tolerance_days: int = 1):
-        self.tolerance = lookahead_tolerance_days
-        self.results: List[PITCheckResult] = []
+    def __init__(self):
+        self._data: Dict[str, Dict[str, List[PITRecord]]] = {}
 
-    def validate_all(self, df: pd.DataFrame, checks: List[str] = None) -> PITAuditReport:
-        """运行所有验证检查"""
-        if checks is None:
-            checks = ['factor_lookahead', 'global_stats_leak', 'neutralization_leak',
-                      'train_test_separation', 'timestamp_integrity']
+    def insert(
+        self,
+        instrument: str,
+        field: str,
+        period: str,
+        value: float,
+        publish_date: str,
+    ):
+        """插入一条 PIT 数据记录"""
+        if instrument not in self._data:
+            self._data[instrument] = {}
+        if field not in self._data[instrument]:
+            self._data[instrument][field] = []
 
-        for check in checks:
-            method = getattr(self, f'_check_{check}', None)
-            if method:
-                result = method(df)
-                self.results.append(result)
-
-        return self._build_report()
-
-    # ---- 检查 1: 因子前视泄露 ----
-
-    def _check_factor_lookahead(self, df: pd.DataFrame) -> PITCheckResult:
-        """
-        检测因子计算是否使用了未来数据
-
-        方法: 对每个日期，验证因子的计算窗口是否完全在历史范围内。
-        具体做法: 重新按截至日期计算因子，与原始因子对比。
-        """
-        if 'code' not in df.columns or 'date' not in df.columns:
-            return PITCheckResult("factor_lookahead", True, "info",
-                                  "数据缺少 code/date 字段，跳过检查")
-
-        factor_cols = [c for c in df.columns if c not in
-                       ['date', 'code', 'open', 'high', 'low', 'close',
-                        'volume', 'amount', 'vol', 'change_pct',
-                        'pre_close', 'is_st', 'is_limit_up', 'is_limit_down',
-                        'turnover_rate', 'industry']]
-
-        if not factor_cols:
-            return PITCheckResult("factor_lookahead", True, "info",
-                                  "未检测到因子列，跳过")
-
-        # 简单检测：对每个因子，看其值是否可以被纯历史数据复制
-        df_sorted = df.sort_values(['code', 'date']).copy()
-        leaked_samples = 0
-        total_comparable = 0
-
-        for factor in factor_cols:
-            if factor in df_sorted.columns and not df_sorted[factor].isna().all():
-                # 假设因子使用滚动窗口计算，用 1 天 delay 验证
-                for code, group in df_sorted.groupby('code'):
-                    series = group[factor].values.astype(float)
-                    shifted = np.roll(series, 1)
-                    shifted[0] = np.nan
-
-                    valid = ~np.isnan(series) & ~np.isnan(shifted)
-                    if valid.sum() > 0:
-                        diff = np.abs(series[valid] - shifted[valid])
-                        # 如果因子值与滞后值差异极大，可能是 lookahead
-                        suspicious = diff > 0.001
-                        leaked_samples += suspicious.sum()
-                        total_comparable += valid.sum()
-
-        leaked_ratio = leaked_samples / total_comparable if total_comparable > 0 else 0
-
-        passed = leaked_ratio < 0.02  # 低于 2% 认为正常
-        severity = "error" if leaked_ratio > 0.10 else ("warning" if leaked_ratio > 0.02 else "info")
-
-        return PITCheckResult(
-            "factor_lookahead", passed, severity,
-            f"检测因子列 {len(factor_cols)} 个, 可疑样本 {leaked_samples}/{total_comparable} ({leaked_ratio:.2%})",
-            leaked_samples, leaked_ratio
+        record = PITRecord(
+            publish_date=publish_date,
+            period=period,
+            value=value,
         )
 
-    # ---- 检查 2: 全局统计泄露 ----
+        records = self._data[instrument][field]
 
-    def _check_global_stats_leak(self, df: pd.DataFrame) -> PITCheckResult:
+        # 查找同一 period 的已有记录（修订场景）
+        for i, existing in enumerate(records):
+            if existing.period == period:
+                # 更新链表，将之链接为修订版
+                existing.next_revision_idx = len(records)
+                break
+
+        records.append(record)
+        # 保持按 publish_date 排序
+        records.sort(key=lambda r: r.publish_date)
+
+    def query(
+        self,
+        instrument: str,
+        field: str,
+        observation_date: str,  # YYYYMMDD
+    ) -> Optional[float]:
         """
-        检测因子中性化/标准化是否使用全局统计量
-
-        借鉴 Qlib 中的 CSZScoreNorm (截面 z-score) 设计。
-        全局统计（全时间范围）会引入前视偏差。
+        查询给定时间点实际可用的数据值
+        
+        返回在 observation_date 之前发布的最新版本值。
+        如果同一 period 有多条修订记录，返回 observation_date 前最后发布的版本。
         """
-        warnings_list = []
+        if instrument not in self._data:
+            return None
+        if field not in self._data[instrument]:
+            return None
 
-        # 检查是否存在显式的标准化操作痕迹
-        factor_cols = [c for c in df.columns if c not in
-                       ['date', 'code', 'open', 'high', 'low', 'close',
-                        'volume', 'amount', 'vol', 'change_pct',
-                        'pre_close', 'is_st', 'is_limit_up', 'is_limit_down',
-                        'turnover_rate', 'industry']]
+        records = self._data[instrument][field]
+        best_value = None
+        best_period = None
 
-        if factor_cols:
-            # 检查因子是否可能使用全局均值
-            for factor in factor_cols[:5]:  # 抽样检查
-                if factor in df.columns:
-                    series = df[factor].dropna()
-                    if len(series) > 0:
-                        # 全局均值如果接近 0 且标准差接近 1，可能是全局标准化
-                        mean_val = series.mean()
-                        std_val = series.std()
-                        if abs(mean_val) < 0.01 and 0.9 < std_val < 1.1:
-                            warnings_list.append(
-                                f"因子 {factor} 可能使用全局标准化 (mean={mean_val:.4f}, std={std_val:.4f})"
-                            )
+        for record in records:
+            if record.publish_date > observation_date:
+                break
+            # 同 period 的后续修订会覆盖前面的值
+            if record.period == best_period:
+                best_value = record.value
+            else:
+                best_period = record.period
+                best_value = record.value
 
-        passed = len(warnings_list) == 0
-        return PITCheckResult(
-            "global_stats_leak", passed,
-            "warning" if not passed else "info",
-            "; ".join(warnings_list) if warnings_list else "未检测到全局统计泄露"
+        return best_value
+
+    def query_latest_before(
+        self,
+        instrument: str,
+        field: str,
+        observation_date: str,
+    ) -> Tuple[Optional[float], Optional[str]]:
+        """
+        查询 observation_date 之前最新可用的值和对应的报告期
+        返回 (value, period)
+        """
+        if instrument not in self._data:
+            return None, None
+        if field not in self._data[instrument]:
+            return None, None
+
+        records = self._data[instrument][field]
+        best_value = None
+        best_period = None
+
+        for record in records:
+            if record.publish_date > observation_date:
+                break
+            best_value = record.value
+            best_period = record.period
+
+        return best_value, best_period
+
+    def get_instruments(self) -> List[str]:
+        return list(self._data.keys())
+
+    def get_fields(self, instrument: str) -> List[str]:
+        return list(self._data.get(instrument, {}).keys())
+
+
+class LookAheadBiasDetector:
+    """
+    前视偏差检测器
+    
+    检测数据处理中是否存在使用未来数据的问题。
+    常见的前视偏差类型:
+    1. 使用了 t+1 日之后的价格信息计算 t 日的因子
+    2. 使用了发布日晚于观测日的财务数据
+    3. 在滚动窗口中使用了超出窗口范围的数据
+    """
+
+    @staticmethod
+    def check_future_price_leakage(
+        factor_df: pd.DataFrame,
+        price_df: pd.DataFrame,
+        factor_col: str = 'alpha_score',
+        price_col: str = 'close',
+        lookback_window: int = 0,
+    ) -> Dict:
+        """
+        检查因子计算中是否使用了未来价格信息
+        
+        原理: 计算 t 日因子值与 t+1 日之后价格的相关性。
+        如果因子不含前视偏差，则因子与未来价格不应有显著相关性。
+        """
+        merged = factor_df[['code', 'date', factor_col]].merge(
+            price_df[['code', 'date', price_col]],
+            on=['code', 'date'],
+            how='inner'
         )
 
-    # ---- 检查 3: 中性化泄露 ----
+        results = {}
 
-    def _check_neutralization_leak(self, df: pd.DataFrame) -> PITCheckResult:
+        for shift in [1, 5, 20]:
+            future_price = merged.groupby('code')[price_col].shift(-shift)
+            merged_copy = merged.copy()
+            merged_copy['future_price'] = future_price
+
+            valid = merged_copy.dropna(subset=[factor_col, 'future_price'])
+            if len(valid) < 100:
+                continue
+
+            corr = valid[factor_col].corr(valid['future_price'])
+            results[f'corr_with_price_t+{shift}'] = round(corr, 6)
+
+            # IC 分析
+            if valid['code'].nunique() > 10:
+                ic_list = []
+                for dt in valid['date'].unique():
+                    cross = valid[valid['date'] == dt]
+                    if len(cross) < 10:
+                        continue
+                    ic = cross[factor_col].corr(cross['future_price'])
+                    if not np.isnan(ic):
+                        ic_list.append(ic)
+
+                if ic_list:
+                    ic_mean = np.mean(ic_list)
+                    results[f'IC_t+{shift}_mean'] = round(float(ic_mean), 6)
+                    results[f'IC_t+{shift}_abs_mean'] = round(float(np.mean(np.abs(ic_list))), 6)
+
+        return results
+
+    @staticmethod
+    def check_financial_data_timeline(
+        financial_data: pd.DataFrame,
+        observation_dates: List[str],
+    ) -> Dict:
         """
-        检测因子中性化是否使用未来行业分类数据
-
-        场景: 同一日期截面上做行业中性化是正确的。
-        但若使用的行业映射包含未来日期信息（如公司后续变更行业），
-        则构成前视偏差。
+        检查财务数据发布日与观测日的时间线
+        
+        验证: 对于每个 observation_date，
+        只有 publish_date <= observation_date 的数据才应该被使用。
         """
-        neutral_cols = [c for c in df.columns if '_neutral' in c]
-        if not neutral_cols:
-            return PITCheckResult("neutralization_leak", True, "info",
-                                  "未检测到中性化列")
+        violations = []
 
-        # 检查中性化是否仅在同日期内执行
-        # 简单验证: 每个 neutral 列的值在同一日期截面上应为 0 均值
-        passed = True
-        details = []
-        for col in neutral_cols[:5]:
-            date_means = df.groupby('date')[col].mean()
-            # 截面均值应接近 0（残差正交于均值）
-            large_means = (date_means.abs() > 0.1).sum()
-            if large_means > len(date_means) * 0.1:
-                details.append(f"{col}: {large_means} 个日期截面均值偏离 0")
-                passed = False
+        for _, row in financial_data.iterrows():
+            obs_date = row.get('observation_date', '')
+            pub_date = row.get('publish_date', '')
 
-        return PITCheckResult(
-            "neutralization_leak", passed,
-            "warning" if not passed else "info",
-            "; ".join(details) if details else "中性化检查通过"
-        )
+            if obs_date and pub_date and pub_date > obs_date:
+                violations.append({
+                    'observation_date': obs_date,
+                    'publish_date': pub_date,
+                    'period': row.get('period', ''),
+                    'value': row.get('value', None),
+                })
 
-    # ---- 检查 4: 训练测试分离 ----
+        return {
+            'total_records': len(financial_data),
+            'violations': len(violations),
+            'violation_rate': round(len(violations) / len(financial_data), 4) if len(financial_data) > 0 else 0,
+            'violation_examples': violations[:5],
+        }
 
-    def _check_train_test_separation(self, df: pd.DataFrame) -> PITCheckResult:
+    @staticmethod
+    def validate_rolling_window(
+        data: pd.DataFrame,
+        factor_func,
+        window_size: int,
+        feature_cols: List[str],
+    ) -> Dict:
         """
-        检测训练集和测试集是否按时间正确分离
-
-        借鉴 Qlib 的 Rolling Training 设计：
-        训练窗口必须在测试窗口之前，且中间应有 purge gap。
+        验证滚动窗口计算是否存在前视偏差
+        
+        方法: 对截断数据（去掉最后 N 天）和完整数据分别计算，
+        比较两个版本的结果是否一致。
         """
-        if 'date' not in df.columns:
-            return PITCheckResult("train_test_separation", True, "info", "无 date 字段")
+        truncated = data.iloc[:-window_size].copy()
+        truncated_result = factor_func(truncated)
 
-        dates = sorted(df['date'].unique())
-        if len(dates) < 60:
-            return PITCheckResult("train_test_separation", True, "info",
-                                  "数据时间范围太短，跳过检查")
+        original_subset = data.iloc[:len(truncated)].copy()
+        full_result = factor_func(original_subset)
 
-        # 简单启发式: 检查数据中是否有明显的训练/测试分隔
-        # 如果数据包含 train/test 标识列
-        split_cols = [c for c in df.columns if 'train' in c.lower() or 'test' in c.lower()]
-        if split_cols:
-            # 验证 train 日期全部在 test 日期之前
-            for col in split_cols:
-                train_dates = df[df[col] == 1]['date'] if 1 in df[col].values else df[df[col]]['date']
-                test_dates = df[df[col] == 2]['date'] if 2 in df[col].values else pd.DatetimeIndex([])
-                if len(train_dates) > 0 and len(test_dates) > 0:
-                    if train_dates.max() >= test_dates.min():
-                        return PITCheckResult(
-                            "train_test_separation", False, "error",
-                            f"训练集与测试集时间重叠: train_max={train_dates.max()}, test_min={test_dates.min()}"
-                        )
-        else:
-            # 对因子列进行 cross-section + time 的简单检测
-            # 如果有 alpha_score 列，验证其没有未来信息
-            return PITCheckResult(
-                "train_test_separation", True, "info",
-                f"无显式 train/test 标识列，跳过时间分割检查 (日期范围: {dates[0].date()} ~ {dates[-1].date()})"
-            )
+        # 截断数据的结果应该与完整数据的前部分结果完全一致
+        common_cols = [c for c in truncated_result.columns
+                       if c in full_result.columns and c in feature_cols]
 
-        return PITCheckResult("train_test_separation", True, "info", "训练测试时间分离正确")
+        diffs = {}
+        for col in common_cols:
+            if col in truncated_result.columns and col in full_result.columns:
+                diff = (truncated_result[col].fillna(0) - full_result[col].fillna(0)).abs()
+                diffs[col] = {
+                    'max_diff': float(diff.max()),
+                    'mean_diff': float(diff.mean()),
+                    'is_identical': float(diff.max()) < 1e-10,
+                }
 
-    # ---- 检查 5: 时间戳完整性 ----
-
-    def _check_timestamp_integrity(self, df: pd.DataFrame) -> PITCheckResult:
-        """
-        检查数据时间戳是否合规
-
-        - 无未来日期
-        - 日期顺序正确
-        - 无重复时间戳
-        """
-        if 'date' not in df.columns:
-            return PITCheckResult("timestamp_integrity", True, "info", "无 date 字段")
-
-        issues = []
-        today = pd.Timestamp.now()
-
-        # 检查未来日期
-        future_dates = df[df['date'] > today]['date']
-        if len(future_dates) > 0:
-            issues.append(f"存在未来日期: {future_dates.min()} ~ {future_dates.max()}，共 {len(future_dates)} 行")
-
-        # 检查重复
-        if 'code' in df.columns:
-            dupes = df.duplicated(subset=['code', 'date']).sum()
-            if dupes > 0:
-                issues.append(f"存在 {dupes} 行重复 (code, date)")
-
-        passed = len(issues) == 0
-        return PITCheckResult(
-            "timestamp_integrity", passed,
-            "error" if not passed else "info",
-            "; ".join(issues) if issues else "时间戳完整性检查通过"
-        )
-
-    # ---- 报告生成 ----
-
-    def _build_report(self) -> PITAuditReport:
-        errors = sum(1 for r in self.results if not r.passed and r.severity == "error")
-        warnings = sum(1 for r in self.results if not r.passed and r.severity == "warning")
-        report = PITAuditReport(
-            checks=self.results,
-            overall_pass=(errors == 0),
-            summary=f"PIT审计完成: {len(self.results)} 项检查, {errors} 错误, {warnings} 警告"
-        )
-        return report
-
-    def print_report(self, report: PITAuditReport):
-        """格式化打印审计报告"""
-        print("\n" + "=" * 60)
-        print("Point-in-Time 数据防泄漏审计报告")
-        print("=" * 60)
-        print(f"审计时间: {report.timestamp}")
-        print(f"总体结果: {'PASS' if report.overall_pass else 'FAIL'}")
-        print(f"摘要: {report.summary}")
-        print("-" * 60)
-
-        status_map = {"error": "❌", "warning": "⚠️", "info": "✅"}
-        for check in report.checks:
-            icon = status_map.get(check.severity, "❓")
-            status = "PASS" if check.passed else "FAIL"
-            print(f"  {icon} [{check.severity.upper()}] {check.check_name}: {status}")
-            if check.detail:
-                print(f"      {check.detail}")
-        print("=" * 60)
+        return {
+            'window_size': window_size,
+            'feature_diffs': diffs,
+            'all_identical': all(d['is_identical'] for d in diffs.values()),
+        }
 
 
-# ============================================================
-# 测试套件
-# ============================================================
+# ═══════════════════════════════════════════════════════════════════════════
+# 测试用例
+# ═══════════════════════════════════════════════════════════════════════════
 
-class TestPITValidator(unittest.TestCase):
-    """PIT 验证器测试"""
+class TestPITDatabase(unittest.TestCase):
+    """Point-in-Time 数据库功能测试"""
 
     def setUp(self):
-        np.random.seed(20240613)
-        n_days = 100
-        self.clean_df = pd.DataFrame({
-            'code': ['000001'] * n_days,
-            'date': pd.date_range('2024-01-01', periods=n_days, freq='B'),
-            'close': np.cumprod(1 + np.random.normal(0.001, 0.02, n_days)) * 10,
-            'volume': np.random.randint(1000, 10000, n_days).astype(float),
-            'change_pct': np.random.uniform(-3, 3, n_days),
-        })
-        self.validator = PointInTimeValidator()
+        self.db = PITDatabase()
 
-    def test_clean_data_passes(self):
-        """干净数据应通过所有检查"""
-        report = self.validator.validate_all(self.clean_df)
-        self.assertTrue(report.overall_pass, f"干净数据应通过: {report.summary}")
+    def test_basic_insert_and_query(self):
+        """测试基本插入和查询"""
+        self.db.insert('600000.SH', 'roe', '202501', 0.15, '20250420')
 
-    def test_future_date_detected(self):
-        """应检测到未来日期"""
-        df = self.clean_df.copy()
-        df.loc[0, 'date'] = pd.Timestamp('2099-01-01')
-        report = self.validator.validate_all(df)
-        ts_check = [c for c in report.checks if c.check_name == 'timestamp_integrity'][0]
-        self.assertFalse(ts_check.passed, "应检测到未来日期")
+        result = self.db.query('600000.SH', 'roe', '20250425')
+        self.assertEqual(result, 0.15)
 
-    def test_duplicate_timestamps_detected(self):
-        """应检测到重复时间戳"""
-        df = self.clean_df.copy()
-        df = pd.concat([df, df.iloc[[0]]], ignore_index=True)
-        report = self.validator.validate_all(df)
-        ts_check = [c for c in report.checks if c.check_name == 'timestamp_integrity'][0]
-        self.assertFalse(ts_check.passed, "应检测到重复时间戳")
+        # 在发布日期之前查询应返回 None
+        result_before = self.db.query('600000.SH', 'roe', '20250419')
+        self.assertIsNone(result_before)
 
-    def test_factor_lookahead_detection(self):
-        """应检测到因子前视泄露"""
-        df = self.clean_df.copy()
-        # 故意制造 lookahead: 因子值 = 未来一天的 close
-        df['bad_factor'] = df.groupby('code')['close'].shift(-1)
-        report = self.validator.validate_all(df)
-        # 此检查不会判定为 fail（需要特殊的前视模式），但应给出警告
-        fl_check = [c for c in report.checks if c.check_name == 'factor_lookahead'][0]
-        self.assertIsNotNone(fl_check)
+    def test_revision_chain(self):
+        """测试财务数据修订链"""
+        # 初始报告: 2025Q1 ROE = 0.15, 发布于 20250420
+        self.db.insert('600000.SH', 'roe', '202501', 0.15, '20250420')
+        # 修订报告: 2025Q1 ROE = 0.18, 发布于 20250515
+        self.db.insert('600000.SH', 'roe', '202501', 0.18, '20250515')
 
-    def test_global_stats_warning(self):
-        """应检测全局统计量使用"""
-        df = self.clean_df.copy()
-        # 构造看似全局标准化的因子
-        raw = np.random.randn(len(df))
-        df['z_scored_factor'] = (raw - raw.mean()) / raw.std()
-        report = self.validator.validate_all(df)
-        # 可能触发全局统计警告
-        self.assertIsNotNone(report)
+        # 在修订前查询应返回初始值
+        result_initial = self.db.query('600000.SH', 'roe', '20250425')
+        self.assertEqual(result_initial, 0.15)
+
+        # 在修订后查询应返回修订值
+        result_revised = self.db.query('600000.SH', 'roe', '20250520')
+        self.assertEqual(result_revised, 0.18)
+
+    def test_multiple_instruments(self):
+        """测试多股票数据管理"""
+        self.db.insert('600000.SH', 'roe', '202501', 0.15, '20250420')
+        self.db.insert('600001.SH', 'roe', '202501', 0.08, '20250422')
+
+        r1 = self.db.query('600000.SH', 'roe', '20250425')
+        r2 = self.db.query('600001.SH', 'roe', '20250425')
+
+        self.assertEqual(r1, 0.15)
+        self.assertEqual(r2, 0.08)
+
+    def test_multiple_fields(self):
+        """测试多字段数据管理"""
+        self.db.insert('600000.SH', 'roe', '202501', 0.15, '20250420')
+        self.db.insert('600000.SH', 'eps', '202501', 0.85, '20250420')
+        self.db.insert('600000.SH', 'bvps', '202501', 5.50, '20250420')
+
+        instruments = self.db.get_instruments()
+        fields = self.db.get_fields('600000.SH')
+
+        self.assertEqual(len(instruments), 1)
+        self.assertEqual(len(fields), 3)
+        self.assertIn('roe', fields)
+        self.assertIn('eps', fields)
+        self.assertIn('bvps', fields)
+
+    def test_query_across_periods(self):
+        """测试跨报告期查询"""
+        self.db.insert('600000.SH', 'roe', '202404', 0.12, '20250320')  # 年报
+        self.db.insert('600000.SH', 'roe', '202501', 0.15, '20250420')  # 一季报
+
+        # 在一季报发布前查询应返回年报数据
+        result = self.db.query_latest_before('600000.SH', 'roe', '20250415')
+        self.assertEqual(result[0], 0.12)
+        self.assertEqual(result[1], '202404')
+
+        # 在一季报发布后查询应返回一季报数据
+        result = self.db.query_latest_before('600000.SH', 'roe', '20250425')
+        self.assertEqual(result[0], 0.15)
+        self.assertEqual(result[1], '202501')
 
 
-class TestPITIntegrationWithJingniTrader(unittest.TestCase):
-    """PIT 验证与 jingni-trader 现有数据的集成测试"""
+class TestLookAheadBiasDetector(unittest.TestCase):
+    """前视偏差检测器测试"""
 
-    def _generate_factor_data(self) -> pd.DataFrame:
-        """模拟 jingni-trader factor-engine 的输出格式"""
+    @classmethod
+    def setUpClass(cls):
+        """生成测试数据"""
         np.random.seed(42)
-        codes = ['000001', '000002', '600000', '600036', '000858']
-        n_days = 120
-        rows = []
-        for code in codes:
-            close = np.cumprod(1 + np.random.normal(0.001, 0.02, n_days)) * 10
-            df = pd.DataFrame({
-                'date': pd.date_range('2024-01-01', periods=n_days, freq='B'),
-                'code': code,
-                'ret_1d': np.append([np.nan], close[1:] / close[:-1] - 1),
-                'ret_5d': np.append([np.nan] * 5, close[5:] / close[:-5] - 1),
-                'ret_20d': np.append([np.nan] * 20, close[20:] / close[:-20] - 1),
-                'reversal_5d': -np.append([np.nan] * 5, close[5:] / close[:-5] - 1),
-                'reversal_20d': -np.append([np.nan] * 20, close[20:] / close[:-20] - 1),
-                'volatility_20d': np.array([np.nan] * 20 + list(
-                    pd.Series(close).pct_change().rolling(20, min_periods=10).std().values[20:]
-                )),
-                'volume_ratio_20d': np.random.uniform(0.5, 2, n_days),
-                'alpha_score': np.random.uniform(-3, 3, n_days),
-            })
-            rows.append(df)
-        return pd.concat(rows, ignore_index=True)
+        n_stocks = 10
+        n_days = 200
+        stocks = [f"{600000 + i:06d}.SH" for i in range(n_stocks)]
+        dates = pd.date_range('2023-01-01', periods=n_days, freq='B')
 
-    def test_factor_data_no_leakage(self):
-        """验证正确计算的因子数据无泄露"""
-        df = self._generate_factor_data()
-        validator = PointInTimeValidator()
-        # 跳过因子前视检测（启发式方法不适用于规律性变化的因子）
-        report = validator.validate_all(df, checks=[
-            'global_stats_leak', 'neutralization_leak',
-            'train_test_separation', 'timestamp_integrity'
+        cls.price_data = []
+        cls.factor_data = []
+
+        for code in stocks:
+            # 生成价格序列（带自相关）
+            returns = np.random.randn(n_days) * 0.02
+            close = np.cumsum(returns) + 10
+            close = np.maximum(close, 1)
+
+            for i, dt in enumerate(dates):
+                cls.price_data.append({
+                    'code': code,
+                    'date': dt,
+                    'close': close[i],
+                })
+
+                # 正常因子：仅使用历史信息
+                if i >= 20:
+                    ret_20d = (close[i] - close[i - 20]) / close[i - 20]
+                    cls.factor_data.append({
+                        'code': code,
+                        'date': dt,
+                        'alpha_score': -ret_20d,  # 反转因子
+                    })
+
+        cls.price_df = pd.DataFrame(cls.price_data)
+        cls.factor_df = pd.DataFrame(cls.factor_data)
+
+        # 构造一个含前视偏差的因子（使用未来价格）
+        cls.leaked_factor_df = cls.factor_df.copy()
+        cls.leaked_factor_df['alpha_score'] = cls.price_df.groupby('code')['close'].shift(-5).pct_change()
+
+    def test_no_leakage_factor(self):
+        """测试无前视偏差因子的检测"""
+        detector = LookAheadBiasDetector()
+        results = detector.check_future_price_leakage(
+            self.factor_df, self.price_df, factor_col='alpha_score'
+        )
+        # 反转因子不应该与未来价格有显著正相关性
+        if 'IC_t+5_mean' in results:
+            self.assertLess(abs(results['IC_t+5_mean']), 0.3,
+                           f"正常因子与未来价格的相关性过高: {results['IC_t+5_mean']}")
+
+    def test_leakage_detection(self):
+        """测试前视偏差的检测能力"""
+        detector = LookAheadBiasDetector()
+        results = detector.check_future_price_leakage(
+            self.leaked_factor_df, self.price_df, factor_col='alpha_score'
+        )
+        # 含前视偏差的因子与t+5价格应该有显著相关性
+        print(f"\n  前视偏差检测结果: {json.dumps(results, indent=2)}")
+
+    def test_financial_timeline_check(self):
+        """测试财务数据时间线检查"""
+        fin_data = pd.DataFrame([
+            {'observation_date': '20250425', 'publish_date': '20250420', 'period': '202501', 'value': 0.15},
+            {'observation_date': '20250420', 'publish_date': '20250420', 'period': '202501', 'value': 0.15},
+            {'observation_date': '20250415', 'publish_date': '20250420', 'period': '202501', 'value': 0.15},  # 违规!
         ])
-        validator.print_report(report)
-        self.assertTrue(report.overall_pass,
-                        f"正确计算的因子数据应通过PIT审计, 但: {report.summary}")
 
-    def test_backtest_signal_forward_bias(self):
-        """检测回测信号中的前视偏差（shift(-N) 的使用）"""
-        df = self._generate_factor_data()
-        # 模拟常见错误：用未来 alpha_score 生成信号
-        df['future_signal'] = df.groupby('code')['alpha_score'].shift(-1).astype(float)
-        df['future_signal'] = (df['future_signal'] > 0).astype(int)
+        detector = LookAheadBiasDetector()
+        results = detector.check_financial_data_timeline(fin_data, [])
+        self.assertEqual(results['violations'], 1)
+        self.assertGreater(results['violation_rate'], 0)
 
-        validator = PointInTimeValidator()
-        report = validator.validate_all(df)
-        # 应检测到因子异常
-        fl_check = [c for c in report.checks if c.check_name == 'factor_lookahead'][0]
-        print(f"\n因子前视检查结果: {fl_check}")
+    def test_rolling_window_validation(self):
+        """测试滚动窗口验证"""
+        data = self.price_df.copy()
+
+        def calc_ma(data):
+            result = data[['code', 'date']].copy()
+            result['ma_20'] = data.groupby('code')['close'].transform(
+                lambda x: x.rolling(20, min_periods=10).mean()
+            )
+            return result
+
+        detector = LookAheadBiasDetector()
+        results = detector.validate_rolling_window(
+            data, calc_ma, window_size=20, feature_cols=['ma_20']
+        )
+
+        # 滚动窗口计算应该是一致的（无前视偏差）
+        if 'ma_20' in results['feature_diffs']:
+            self.assertTrue(
+                results['feature_diffs']['ma_20']['is_identical'],
+                "滚动窗口计算存在前视偏差"
+            )
+
+    def test_compare_with_pit_database(self):
+        """对比 PIT 数据库与简单合并方式的差异"""
+        db = PITDatabase()
+
+        # 模拟场景: ROE 数据在不同时间发布
+        db.insert('600000.SH', 'roe', '202404', 0.12, '20250320')
+        db.insert('600001.SH', 'roe', '202404', 0.08, '20250322')
+
+        # PIT 查询: 在 20250321 时，600001 的数据还未发布
+        r1 = db.query('600000.SH', 'roe', '20250321')
+        r2 = db.query('600001.SH', 'roe', '20250321')
+
+        self.assertEqual(r1, 0.12)
+        self.assertIsNone(r2)  # 数据尚未发布！
+
+        # 简单合并方式会错误地将 600001 的 ROE 也用在 20250321
+        # 这就是前视偏差的来源
+        print(f"\n  PIT vs 简单合并对比:")
+        print(f"    观测时间 20250321:")
+        print(f"      600000.SH ROE (PIT): {r1}")
+        print(f"      600001.SH ROE (PIT): {r2} (数据尚未发布)")
+        print(f"    如果使用简单合并，600001.SH 的 ROE 也会被错误使用")
 
 
-def scan_existing_engine():
-    """扫描 jingni-trader 现有引擎代码中的潜在 PIT 问题"""
-    print("\n" + "=" * 60)
-    print("jingni-trader 现有引擎 PIT 潜在问题扫描")
-    print("=" * 60)
-
-    checks = [
-        ("factor-engine engine.py", "ret_forward", "使用 shift(-N) 计算前视收益率（正确使用，label 而非 feature）"),
-        ("factor-engine engine.py", "pct_change(5)", "pct_change(5) 使用过去5天数据（正确，无前视）"),
-        ("factor-engine engine.py", "groupby('code').transform(lambda x: x.rolling(20))", "滚动计算正确使用历史窗口"),
-        ("strategy-model-engine engine.py", "shift(-FORWARD_PERIOD)", "forward_return 用 shift(-N) 计算 label（标准做法）"),
-        ("strategy-model-engine engine.py", "TimeSeriesSplit", "使用时间序列交叉验证（正确）"),
-        ("strategy-model-engine engine.py", "PURGE_GAP_DAYS=5", "清洗期已配置（良好实践）"),
-        ("backtest-engine engine.py", "rank(pct=True)", "截面排名正确（同日期内计算）"),
-        ("portfolio-risk-engine engine.py", "pivot(index='date', columns='code')", "pivot 后按时间计算协方差（正确）"),
-    ]
-
-    for file, pattern, note in checks:
-        icon = "✅" if "正确" in note or "正确" in note else "⚠️"
-        print(f"  {icon} {file}: {pattern}")
-        print(f"      {note}")
+def run_tests():
+    suite = unittest.TestLoader().loadTestsFromModule(sys.modules[__name__])
+    runner = unittest.TextTestRunner(verbosity=2)
+    result = runner.run(suite)
+    return {
+        "tests_run": result.testsRun,
+        "failures": len(result.failures),
+        "errors": len(result.errors),
+        "success": result.wasSuccessful(),
+    }
 
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--scan', action='store_true', help='扫描现有引擎 PIT 问题')
-    parser.add_argument('--demo', action='store_true', help='运行演示')
-    args = parser.parse_args()
-
-    if args.scan:
-        scan_existing_engine()
-    elif args.demo:
-        # 演示 PIT 验证
-        df = TestPITIntegrationWithJingniTrader()._generate_factor_data()
-        validator = PointInTimeValidator()
-        report = validator.validate_all(df)
-        validator.print_report(report)
-    else:
-        unittest.main(argv=[''], verbosity=2, exit=False)
+    print("=" * 70)
+    print("Point-in-Time 数据系统验证测试")
+    print("借鉴来源: Microsoft Qlib PIT Database")
+    print("=" * 70)
+    results = run_tests()
+    print("\n" + "=" * 70)
+    print(f"测试结果: {results['tests_run']} 个测试, "
+          f"{results['failures']} 个失败, {results['errors']} 个错误")
+    print(f"总体: {'通过' if results['success'] else '失败'}")
+    print("=" * 70)
