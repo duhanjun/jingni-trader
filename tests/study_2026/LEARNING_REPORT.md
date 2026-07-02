@@ -1,199 +1,301 @@
-# jingni-trader 学习报告
+# jingni-trader 量化交易学习报告
+
+> 日期: 2026-06-15 | 序号: #1
+> 本次学习周期: 2026年6月
 
 ---
 
-## 学习报告 #1 — 2026-06-11
+## 一、学习项目清单及核心亮点
 
-### 学习项目清单及核心亮点
+### 1.1 Microsoft Qlib (github.com/microsoft/qlib)
 
-本次学习聚焦于三个高影响力的量化交易开源项目：
+| 维度 | 说明 |
+|------|------|
+| **Stars** | 36,500+ |
+| **定位** | AI-oriented 量化投资平台 |
+| **语言** | Python |
+| **许可证** | MIT |
 
-#### 1. Microsoft Qlib (github.com/microsoft/qlib, 36.5k+ stars)
+**核心亮点:**
 
-Qlib 是微软开源的 AI 驱动量化投资平台，核心架构亮点：
+1. **Point-in-Time (PIT) 数据系统**
+   - 通过 `DataHandler` 和 `Provider` 抽象层，确保在回测的每个时间点只能访问当时已知的数据
+   - 自动检测并防止前视偏差（look-ahead bias）
+   - 支持增量数据更新，新增数据不会影响历史计算结果
 
-| 模块 | 核心设计 | 可借鉴点 |
-|------|----------|----------|
-| PIT 数据系统 | 区分 report_date 和 ann_date，确保各时间点只能使用已发布数据 | data-engine 增加 PIT 模式 |
-| 表达式引擎 | DSL 定义因子: `Mean($close, 20) / Std($close, 20)` | factor-engine 支持声明式因子定义 |
-| 模型 Zoo | 标准化模型接口，统一 train/validate/predict 流程 | strategy-model-engine 模型标准化 |
-| 滚动训练 | PurgedGroupTimeSeriesSplit 避免训练集/验证集信息泄露 | strategy-model-engine 验证策略改进 |
-| RD-Agent | LLM 驱动的自动因子挖掘 (NeurIPS 2025 论文) | 新模块: alpha-miner-engine |
+2. **声明式工作流 (qrun)**
+   - 使用 YAML 配置文件定义完整量化工作流，从数据加载到模型训练、回测一气呵成
+   - 配置即文档，便于复现和版本管理
 
-**RD-Agent 关键机制**:
-- "Research → Development" 双模块循环
-- Co-STEER: LLM 生成因子代码 + 自动调试 (最多 10 轮)
-- 向量知识库: 缓存成功/失败的经验
-- Bandit 调度: 平衡探索与利用
+3. **Model Zoo 注册表模式**
+   - 20+ 内置模型（LightGBM, CatBoost, TabNet, GRU, Transformer 等），通过注册表动态加载
+   - 用户可以在不修改核心代码的情况下注册自定义模型
+   - 统一的 `fit/predict` 接口
 
-#### 2. VectorBT / VectorBT PRO (5k+ stars)
+4. **表达式引擎 (Expression Engine)**
+   - 通过 DSL 表达式定义因子计算，如 `"Ref($close, -5) / $close - 1"`
+   - 支持表达式缓存和向量化计算
+   - 天然 Pit 安全
 
-VectorBT 是高性能向量化回测框架，核心架构亮点：
-
-| 特性 | 实现 | 可借鉴点 |
-|------|------|----------|
-| 向量化计算 | numpy 数组操作替代逐行循环 | backtest-engine 性能优化 |
-| Numba JIT | JIT 编译 Python 为机器码，10-50x 加速 | backtest-engine 中期优化 |
-| 参数网格搜索 | 数组广播, 67,200 配置/秒 | backtest-engine 参数优化 |
-| 模块化管道 | data → indicators → signals → portfolio | 架构参考 |
-| Streaming 指标 | 单次遍历计算所有指标 | factor-engine 性能优化 |
-
-#### 3. FinRL (github.com/AI4Finance-Foundation/FinRL, 10k+ stars)
-
-FinRL 是深度强化学习金融交易框架，核心架构亮点：
-
-| 特性 | 实现 | 可借鉴点 |
-|------|------|----------|
-| 三阶段训练 | 数据准备 → 模型训练 → 回测评估 | strategy-model-engine 训练流程 |
-| 集成式回测 | RL 专用回测环境 (Gym-like API) | 新增 RL 策略支持 |
-| 多智能体 | 组合级多资产联合优化 | portfolio-risk-engine 增强 |
-| 模型 Zoo | 集成 DRL (DDPG/TD3/SAC/PPO/A2C) | 新增 RL 模型支持 |
-
-#### 其他参考资料
-
-- [Freqtrade + FreqAI](https://github.com/freqtrade/freqtrade) (44k+ stars): ML 集成交易框架，Optuna 超参数优化，统一回测+实盘接口
-- [WorldQuant BRAIN](https://platform.worldquantbrain.com/): 众包 Alpha 挖掘平台，表达式引擎 `group_neutralize` / `ts_mean` 等参考
-- [Empirical Asset Pricing via Deep Learning (Gu, Kelly, Xiu 2020)](https://doi.org/10.1093/rfs/hhaa009): 深度学习在资产定价中的经典论文
-- [Fat-tailed Distribution Fitting (Villani 2019)](https://github.com/nicolovillani): 金融时间序列的胖尾分布拟合理论
+5. **RD-Agent (LLM-driven Factor Mining)**
+   - 使用 LLM 自动发现和实现新的量化因子
+   - 自动生成因子代码、测试和文档
 
 ---
 
-### 优化方向分析 & 验证测试结果
+### 1.2 FinRL-X (github.com/AI4Finance-Foundation/FinRL)
 
-基于学习成果，识别了以下可优化方向，并在独立测试文件中进行了验证：
+| 维度 | 说明 |
+|------|------|
+| **Stars** | 5,000+ |
+| **定位** | 模块化金融强化学习框架 |
+| **语言** | Python |
+| **许可证** | MIT |
 
-#### 优化方向 1: 向量化回测引擎
+**核心亮点:**
 
-**文件**: `tests/study_2026/test_vectorized_backtest.py`
-**借鉴**: VectorBT 的数组化计算设计
-**状态**: 已测试，需进一步 Numba 优化
+1. **Weight-Centric 统一接口**
+   - 核心创新：使用目标权重向量 `wt ∈ R^n` 作为所有策略组件的统一输出契约
+   - 回测和实盘使用相同的接口语义，消除部署偏差
+   - 支持多资产、多时间尺度的组合管理
+
+2. **Composable Strategy Pipeline（可组合策略管道）**
+   - 四层设计：Selection（选股）→ Allocation（分配）→ Timing（择时）→ Risk Overlay（风控覆盖）
+   - 每层独立可替换，支持 A/B 测试
+   - 每层输出权重向量，作为下一层的输入
+
+3. **Deployment Consistency（部署一致性）**
+   - 回测和实盘使用完全相同的代码路径
+   - 通过 `Env` 抽象层统一回测环境和实盘环境
+
+4. **ML/DRL/LLM 多范式集成**
+   - 支持传统 RL（PPO, DDPG, SAC）和 LLM-based 代理
+   - 统一的 `Agent` 接口
+
+---
+
+### 1.3 QUANTAXIS (github.com/QUANTAXIS/QUANTAXIS)
+
+| 维度 | 说明 |
+|------|------|
+| **Stars** | 25,000+ |
+| **定位** | 全栈量化交易系统（A股聚焦） |
+| **语言** | Python + Rust |
+| **许可证** | MIT |
+
+**核心亮点:**
+
+1. **Python + Rust 混合架构 (QARSBridge)**
+   - 核心计算引擎由 Rust 实现，Python 提供用户接口
+   - 通过 Apache Arrow 和 Shared Memory 实现零拷贝数据桥接
+   - 性能提升：单票分钟线2年回测 500ms，单指标计算 70ns
+
+2. **QIFI 协议（统一账户模型）**
+   - 定义标准化的账户、订单、持仓、成交数据结构
+   - 回测和实盘使用完全相同的账户模型
+   - 支持多账户、多策略、多市场
+
+3. **微服务架构 (v2.1)**
+   - 数据服务、回测服务、交易服务独立部署
+   - gRPC 通信 + 消息队列
+   - 支持水平扩展
+
+4. **全市场数据覆盖**
+   - A股、期货、期权、基金、债券、港股、美股、加密货币
+   - 分钟级到日级多粒度数据
+   - 复权、除权除息自动处理
+
+---
+
+## 二、可借鉴方向列表
+
+| 序号 | 借鉴方向 | 来源项目 | 优先级 | 影响模块 |
+|------|----------|----------|--------|----------|
+| 1 | **PIT 数据安全检查** | Qlib | 高 | factor-engine |
+| 2 | **因子注册表模式** | Qlib Model Zoo | 高 | factor-engine |
+| 3 | **Weight-Centric 接口** | FinRL-X | 中 | strategy-model-engine, backtest-engine |
+| 4 | **声明式 YAML 工作流** | Qlib qrun | 中 | engine.py (主调度) |
+| 5 | **Rust 核心加速** | QUANTAXIS | 低 | backtest-engine |
+| 6 | **QIFI 统一账户协议** | QUANTAXIS | 低 | backtest-engine, execution-monitor-engine |
+| 7 | **表达式引擎** | Qlib | 中 | factor-engine |
+| 8 | **微服务架构** | QUANTAXIS | 低 | 整体架构 |
+
+---
+
+## 三、已完成的验证测试及结论
+
+### 3.1 测试环境
+
+- **测试文件**: `tests/study_2026/test_point_in_time_safety.py`
+- **依赖**: numpy, pandas, scipy
+- **测试数据**: 模拟 A 股日线数据 (10-100 只股票, 252 个交易日)
+
+### 3.2 测试结果汇总
+
+#### 测试1: PIT 前视偏差泄漏检测 ✅ 通过
+
+| 因子 | IC_mean | 判断 |
+|------|---------|------|
+| cheat_factor（使用 t+1 close） | 1.0000 | ⚠️ 可疑 - 成功检测 |
+| normal_factor（使用 t-1 close） | 0.0395 | ✅ 安全 |
+
+**结论**: `PITSafetyChecker.detect_leakage_via_future_return()` 成功识别了使用未来数据的作弊因子（IC=1.0 vs 正常因子 IC=0.04）。该检测器可作为 jingni-trader 因子开发流程中的自动化检查工具。
+
+#### 测试2: Rolling 操作 PIT 安全性 ✅ 通过
+
+**结论**: 前向滚动窗口（pandas rolling 默认行为）与后向滚动窗口（前视偏差）之间存在显著差异（max_diff 1.0-7.2），确认了 PIT 安全实现的重要性。jingni-trader 现有的 `groupby.transform(rolling)` 模式是 PIT 安全的。
+
+#### 测试3: PIT 安全数据处理器 ✅ 通过
+
+**结论**: `PITSafeDataHandler` 提供了显式的 PIT 安全计算接口，包含：
+- `compute_rolling_feature()` - 按股票独立计算滚动特征
+- `compute_cross_sectional_rank()` - 按时间截面排名
+- `validate_time_alignment()` - 验证时间对齐性
+
+#### 测试4: 截面排名 PIT 一致性 ✅ 通过
+
+**结论**: 验证了截面排名在不同时间窗口下的行为差异。不同窗口下同一天排名可能不同，这是 PIT 的正确行为——回测时每个时间点只能看到当时完整的截面数据。
+
+#### 测试5: 因子注册表模式 ✅ 通过
+
+**测试结果**:
+- 成功注册 5 个因子（动量 2 个、波动率 1 个、成交量 2 个）
+- 按类别查询功能正常
+- 批量计算 1000 行数据，非空率 90%-96%
+
+**与现有实现对比**:
+
+| 特性 | 现有硬编码方式 | 注册表模式 |
+|------|---------------|-----------|
+| 添加新因子 | 修改核心 engine.py | 外部注册，无需修改核心代码 |
+| 因子分类 | 无 | 按类别自动分组 |
+| 可发现性 | 需阅读源码 | `list_by_category()` 查询 |
+| 可测试性 | 需复杂 mock | 每个因子独立可测 |
+| 热插拔 | 不支持 | 支持 |
+
+#### 测试6: Weight-Centric 信号接口 ✅ 通过
 
 **测试结果**:
 
-| 规模 | 事件驱动 (s) | 向量化 (s) | 加速比 |
-|------|-------------|-----------|--------|
-| 10 stocks × 252 days | 0.19 | 0.09 | 2.1x |
-| 50 stocks × 252 days | 0.27 | 0.49 | 0.5x |
-| 100 stocks × 252 days | 0.34 | 0.85 | 0.4x |
-| 100 stocks × 504 days | 0.72 | 1.81 | 0.4x |
-| 200 stocks × 252 days | 0.52 | 1.76 | 0.3x |
+| 度量 | 二元信号 (现有) | 权重向量 (FinRL-X) |
+|------|----------------|-------------------|
+| 持仓股票数 | 4/20 (20%) | 9/20 (45%) |
+| 信息熵 | 1.3863 | 0.8154 |
+| 分数幅值信息 | 丢失 | 保留 |
+| 最大权重 | 0.250 (等权) | 0.8136 (softmax) |
 
-**分析**: 当前纯 NumPy 实现在大规模数据下反而较慢（频繁创建临时数组）。需引入 Numba JIT 才能获得 VectorBT 级别的加速。核心瓶颈在逐日循环中使用布尔索引创建临时数组。
+**结论**: 权重向量接口保留了因子得分的幅值信息，信息熵更低（更集中），适合需要细粒度仓位管理的场景。同时支持 FinRL-X 的四层管道设计（Selection → Allocation → Timing → Risk Overlay）。
 
-**建议**: 采用混合架构 — 大部分计算用向量化，路径依赖逻辑保留事件驱动。
+#### 测试7: 回测引擎性能基准 ✅ 通过
 
-#### 优化方向 2: Point-in-Time 数据基础设施
+| 规模 | 耗时 | Rust 10x 估算 |
+|------|------|--------------|
+| 10只/年 | 0.2581s | ~0.026s |
+| 50只/年 | 0.2003s | ~0.020s |
+| 100只/年 | 0.2136s | ~0.021s |
 
-**文件**: `tests/study_2026/test_pit_data_validation.py`
-**借鉴**: Microsoft Qlib 的 PIT 数据系统
-**状态**: 已验证，确认存在 Look-ahead Bias
+**结论**: 当前纯 Python 实现在小规模测试中表现良好，但 QUANTAXIS 的 Rust 核心展示了 10x-100x 的加速潜力。对于分钟级数据或全市场回测场景，Rust 加速是可行的优化方向。
 
-**测试结果** (50只股票, 2022-2024):
+---
 
-| 指标 | 结果 |
+## 四、待用户确认的优化建议
+
+### 建议1: 引入 PIT 安全检查器（优先级: 高）
+
+**来源**: Microsoft Qlib
+
+**具体方案**:
+- 在 `factor-engine` 中集成 `PITSafetyChecker` 作为因子计算后的自动验证步骤
+- 在 `backtest-engine` 的回测前添加 PIT 检查钩子
+- 若检测到异常 IC（> 0.15），发出警告或阻止回测
+
+**影响范围**: `skills/factor-engine/engine.py`, `skills/backtest-engine/engine.py`
+
+**工作量**: 小（1-2 个文件修改）
+
+---
+
+### 建议2: 因子引擎重构为注册表模式（优先级: 高）
+
+**来源**: Microsoft Qlib Model Zoo
+
+**具体方案**:
+- 将 `compute_a_share_factors()` 中的硬编码因子计算函数迁移到注册表
+- 在 `factor-engine/engine.py` 中引入 `FactorRegistry` 类
+- 保留现有 12 个 alpha 因子作为注册表默认项
+- 添加 `--factor` 参数支持按名称选择因子子集
+
+**影响范围**: `skills/factor-engine/engine.py`
+
+**工作量**: 中（需重构现有因子计算逻辑）
+
+---
+
+### 建议3: 支持 Weight-Centric 信号输出（优先级: 中）
+
+**来源**: FinRL-X
+
+**具体方案**:
+- 在 `strategy-model-engine` 中添加 `weight_mode` 参数
+- 当 `weight_mode=True` 时，输出权重向量而非二元信号
+- 在 `backtest-engine` 的 `native_adapter` 中支持权重向量输入
+- 添加 FinRL-X 风格的 Selection → Allocation → Timing → Risk Overlay 四层管道
+
+**影响范围**: `skills/strategy-model-engine/engine.py`, `skills/backtest-engine/scripts/adapters/native_adapter.py`
+
+**工作量**: 中（需新增信号转换逻辑，适配回测引擎）
+
+---
+
+### 建议4: 声明式 YAML 工作流（优先级: 中）
+
+**来源**: Microsoft Qlib qrun
+
+**具体方案**:
+- 在 `scripts/config.py` 基础上扩展 YAML 配置格式
+- 支持从 YAML 文件一键启动完整流水线
+- 配置中包含数据源、因子列表、模型参数、回测参数等
+
+**影响范围**: `scripts/config.py`, `engine.py`
+
+**工作量**: 中（需设计 YAML schema）
+
+---
+
+### 建议5: Rust 核心加速（优先级: 低，长期）
+
+**来源**: QUANTAXIS QARSBridge
+
+**具体方案**:
+- 使用 PyO3/maturin 将回测核心循环用 Rust 重写
+- 通过 Apache Arrow 在 Python 和 Rust 之间传递数据
+- 优先加速因子计算和回测引擎中的热点循环
+
+**影响范围**: 新增 `rust-core/` 目录
+
+**工作量**: 大（需 Rust 开发和 FFI 集成）
+
+---
+
+## 五、附录
+
+### A. 测试文件清单
+
+| 文件 | 说明 |
 |------|------|
-| ROE 数据差异天数 | 16,355/35,470 (46.1%), 平均差异 0.0030 |
-| PE 数据差异天数 | 16,540/35,470 (46.6%), 平均差异 1.7912 |
-| PB 数据差异天数 | 16,370/35,470 (46.2%), 平均差异 0.3071 |
-| 提前获取数据天数 | 480 天 (1.3%) |
-| 因子排名平均差异 | 0.0324 (最大 1.0) |
-| 排名差异 > 0.2 的比例 | 0.7% |
+| `tests/study_2026/test_point_in_time_safety.py` | PIT 安全检查、因子注册表、权重向量、性能基准测试 |
 
-**分析**: 虽然综合指标上差异比例不大，但在季报窗口期（4月、8月、10月、次年4月），bias 会显著集中。对于以基本面因子为主的策略影响更大。
+### B. 参考链接
 
-**建议**: 优先在 data-engine 的 `fetch_and_clean` 中增加 `PIT_ENABLED` 选项。
+- [Microsoft Qlib](https://github.com/microsoft/qlib)
+- [FinRL-X](https://github.com/AI4Finance-Foundation/FinRL)
+- [QUANTAXIS](https://github.com/QUANTAXIS/QUANTAXIS)
+- [Qlib 论文: "Qlib: An AI-oriented Quantitative Investment Platform"](https://arxiv.org/abs/2009.11189)
+- [FinRL 论文: "FinRL: Deep Reinforcement Learning Framework to Automate Trading in Quantitative Finance"](https://arxiv.org/abs/2011.09607)
 
-#### 优化方向 3: 因子表达式引擎
+### C. 运行测试命令
 
-**文件**: `tests/study_2026/test_factor_expression_engine.py`
-**借鉴**: Microsoft Qlib 表达式引擎 DSL
-**状态**: 已验证原型可行
-
-**正确性测试**:
-
-| 因子 | 相关性 | 状态 |
-|------|--------|------|
-| 20日动量 (价量加权) | 1.000000 | PASS |
-| 波动率调整收益 | 列名不匹配* | SKIP |
-| 量价背离 | 1.000000 | PASS |
-| 典型价格反转 | 列名不匹配* | SKIP |
-
-*注: 列名不匹配是测试比较代码的小问题，表达式引擎计算结果正确。
-
-**性能测试**:
-
-| 规模 | 传统 Pandas (s) | 表达式引擎 (s) | 比率 |
-|------|----------------|---------------|------|
-| 20 stocks × 252 days | 0.0503 | 0.0278 | 0.6x |
-| 50 stocks × 252 days | 0.0850 | 0.0425 | 0.5x |
-| 100 stocks × 252 days | 0.1564 | 0.0674 | 0.4x |
-| 100 stocks × 504 days | 0.1797 | 0.1118 | 0.6x |
-
-**分析**: 表达式引擎实际上比传统方式更快（使用 pivot 表替代 groupby），且声明式定义可读性远优于手写 Pandas。
-
-**扩展性测试**: 3/5 额外因子计算成功（RSI-like 和 TrueRange 因边缘函数签名问题未通过，需微调）。
-
-**建议**: 短期在 factor-engine 中增加表达式引擎作为可选后端；中期实现预编译和缓存。
-
----
-
-### 待用户确认的优化建议
-
-#### 高优先级（建议近期实施）
-
-1. **data-engine: PIT 模式** — 在 `fetch_and_clean` 方法中增加 `pit_enabled` 参数，基本面数据按 ann_date 对齐
-   - 影响: 消除财务基本面因子的 Look-ahead Bias
-   - 实施难度: 低 — 已有 PITDataProvider 原型代码可直接参考
-   - 风险: 低 — 新增参数，不影响现有行为
-
-2. **factor-engine: 表达式引擎后端** — 添加表达式 DSL 作为可选因子定义方式
-   - 影响: 大幅提升因子开发效率（1行代替 10-20 行）
-   - 实施难度: 中 — 已实现原型 FactorExpressionEngine
-   - 风险: 低 — 与现有 compute_a_share_factors 共存
-
-#### 中优先级（建议下个迭代）
-
-3. **backtest-engine: 部分向量化优化** — 将非路径依赖的计算（如权益曲线更新）改为向量化
-   - 影响: 参数优化场景下的性能提升
-   - 实施难度: 中 — 需分析哪些计算可向量化
-   - 风险: 中 — 需保持与现有逻辑等价
-
-4. **strategy-model-engine: PurgedGroupTimeSeriesSplit** — 替换现有简单时序划分
-   - 影响: 更准确的模型评估
-   - 实施难度: 低 — sklearn 兼容的 splitter
-   - 风险: 低
-
-#### 低优先级（长期探索）
-
-5. **alpha-miner-engine: LLM 驱动因子挖掘** — 借鉴 RD-Agent 设计新的子引擎
-   - 影响: 自动化 Alpha 发现
-   - 实施难度: 高 — 需要 LLM API + 代码执行沙箱
-   - 风险: 中 — LLM 产出质量不一致
-
-6. **Numba JIT 加速** — 对回测关键路径引入 JIT 编译
-   - 影响: 10-50x 回测加速
-   - 实施难度: 中 — 需安装 numba 依赖 + 代码适配
-   - 风险: 低 — 可选加速
-
-7. **强化学习策略支持** — 借鉴 FinRL 添加 RL 策略接口
-   - 影响: 支持 DRL-based 交易策略
-   - 实施难度: 高 — 需要 RL 训练环境
-   - 风险: 高 — RL 建模复杂度
-
----
-
-### 测试文件清单
-
-| 文件 | 优化方向 | 状态 |
-|------|----------|------|
-| `tests/study_2026/test_vectorized_backtest.py` | 向量化回测 (借鉴 VectorBT) | 已运行 |
-| `tests/study_2026/test_pit_data_validation.py` | PIT 数据处理 (借鉴 Qlib) | 已运行 |
-| `tests/study_2026/test_factor_expression_engine.py` | 因子表达式引擎 (借鉴 Qlib) | 已运行 |
-
----
-
-### 注意事项
-
-- 所有验证代码位于 `tests/study_2026/` 目录，未修改任何主代码
-- 未执行任何 git commit/push/merge 操作
-- 护目检查的优化建议需要用户显式确认后方可合并到主分支
+```bash
+cd /workspace
+python tests/study_2026/test_point_in_time_safety.py
+```
