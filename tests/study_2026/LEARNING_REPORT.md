@@ -1,215 +1,218 @@
-# jingni-trader 量化交易学习报告
+# 量化交易开源项目学习报告
 
-> **报告序号**: #1
 > **日期**: 2026-06-11
-> **学习周期**: 2026年6月
+> **序号**: #001
+> **项目**: jingni-trader
 
 ---
 
 ## 一、学习项目清单及核心亮点
 
-本次主要深入研究了以下 3 个高价值量化交易开源项目：
+### 1.1 Microsoft Qlib (https://github.com/microsoft/qlib)
 
-### 1.1 Microsoft Qlib (42K+ GitHub Stars)
+- **Stars**: 44K+
+- **定位**: AI 驱动的量化投研平台
+- **核心亮点**:
+  - **表达式驱动的因子引擎**: 通过 `$close / Ref($close, 20) - 1` 这样的简洁表达式定义因子，无需硬编码。内置 Alpha158 因子集。
+  - **Point-in-Time 数据系统**: 每条数据记录带 `knowledge_time`，查询时只能获取 `knowledge_time <= query_time` 的数据，从架构层面杜绝前视数据泄漏。
+  - **模型动物园**: 内置 LightGBM、LSTM、Transformer、GRU 等 20+ 模型，支持 AutoML 超参搜索。
+  - **RD-Agent**: LLM 驱动的自动化因子挖掘与模型优化，实现"数据-想法-代码-验证"的自动化闭环。
+  - **滚动窗口回测**: 严格的样本外测试框架，支持 Rolling CV 而非随机切分。
 
-**仓库**: [github.com/microsoft/qlib](https://github.com/microsoft/qlib)
+### 1.2 NautilusTrader (https://github.com/nautechsystems/nautilus_trader)
 
-**核心亮点**：
-- **Alpha158 因子体系**：系统化的 158 个因子，覆盖 K线形态、静态价格、滚动窗口指标（5/10/20/30/60 天五个周期）共 4 大类
-- **列式数据存储**：自定义 `.bin` 格式，比 Parquet/CSV 快 10-100 倍的时序切片性能
-- **表达式引擎**：因子通过公式字符串定义，自动编译为可执行表达式，无需硬编码
-- **RD-Agent 集成**：LLM 驱动的自动化因子挖掘（Research & Development Agent）
-- **严格的 Purged Cross-Validation**：防止时间序列数据中的标签泄露
-- **多模型支持**：LightGBM、GRU、LSTM、Transformer、TRA（Temporal Routing Adaptor）
+- **Stars**: 20K+
+- **定位**: 高性能事件驱动算法交易平台
+- **核心亮点**:
+  - **Rust + Python 混合架构**: 性能关键路径用 Rust (tokio 异步运行时)，策略层保留 Python API (Cython 绑定)，兼顾性能与开发效率。
+  - **统一事件总线**: 回测和实盘使用同一事件引擎/消息总线，实现"写一次代码，回测实盘无缝切换"。
+  - **模块化适配器**: REST/WebSocket 适配器封装交易所/数据源差异，策略层看到统一接口。
+  - **微秒级事件处理**: 事件驱动架构 + Rust 核心，支持高频交易场景。
+  - **日志与可追踪性**: 事件链路可追踪，支持回测期间的错误捕捉与数据还原。
 
-### 1.2 Freqtrade + FreqAI (25K+ GitHub Stars)
+### 1.3 vnpy (https://github.com/vnpy/vnpy)
 
-**仓库**: [github.com/freqtrade/freqtrade](https://github.com/freqtrade/freqtrade)
-
-**核心亮点**：
-- **FreqAI 自适应机器学习模块**：滑动窗口自动重训练机制
-- **异常值检测**：Dissimilarity Index (DI)、SVM、Isolation Forest、DBSCAN 四种方法
-- **特征工程**：PCA 降维、SHAP 特征重要性、特征标准化
-- **集成模型**：Bagging、Boosting 集成，支持多模型投票
-- **递归分析**：将回测区间等分，评估策略在不同子期的表现稳定性
-- **前瞻偏差分析**：自动检测特征/标签/信号中的未来信息泄露
-
-### 1.3 Jesse (5K+ GitHub Stars)
-
-**仓库**: [github.com/jesse-ai/jesse](https://github.com/jesse-ai/jesse)
-
-**核心亮点**：
-- **Zero Look-ahead Bias Guarantee**：从架构层面保证无前瞻偏差
-- **Monte Carlo Stress Testing**：滑点、延迟、流动性多维度压力测试
-- **事件驱动回测引擎**：支持限价单/市价单/止损单的完整订单生命周期
-- **Mode-based Architecture**：backtest / live / paper-trade 统一策略代码
+- **Stars**: 28K+
+- **定位**: 国产全功能量化交易框架
+- **核心亮点**:
+  - **事件驱动架构**: `event` 模块实现的异步事件引擎，确保实时交易与数据处理的效率。
+  - **CTA 策略引擎**: 完整的策略生命周期管理（初始化、启动、停止），支持参数优化（遗传算法/穷举法）。
+  - **AI 量化模块 (vnpy.alpha)**: 内置 Alpha158 因子集、Lasso/LightGBM/MLP 模型集成、完整投研流程。
+  - **全市场交易接口**: 40+ 交易接口（CTP、XTP、IB 等），覆盖期货/股票/期权/加密货币。
+  - **内置风控模块**: `risk_manager` 提供多层级风控（单日最大回撤、波动率上限等）。
 
 ---
 
 ## 二、可借鉴的方向列表
 
-对照 jingni-trader 现有代码结构，分析出以下改进方向：
+对照 jingni-trader 现有代码结构，分析出以下 6 个可优化方向：
 
-### 2.1 高优先级（建议近期实施）
+### 方向 1: 表达式驱动的因子引擎 (factor-engine)
 
-| 序号 | 方向 | 借鉴来源 | 影响模块 | 难度 |
-|------|------|---------|---------|------|
-| 1 | **Alpha158 因子库扩展** | Qlib | factor-engine | 中 |
-| 2 | **前瞻偏差自动检测** | Jesse + Freqtrade | backtest-engine | 低 |
-| 3 | **滑动窗口重训练机制** | FreqAI | strategy-model-engine | 中 |
-| 4 | **成交量可行性校验（涨跌停）** | Freqtrade | backtest-engine | 低 |
+| 维度 | 当前状态 | 借鉴目标 | 优先级 |
+|------|---------|---------|--------|
+| 因子定义方式 | 在 `compute_a_share_factors()` 中硬编码所有计算逻辑 | Qlib 的表达式系统，新增因子只需一行配置 | **高** |
+| 扩展性 | 新增因子需修改引擎代码并重新测试 | 因子与引擎解耦，用户可自定义 | **高** |
+| 可维护性 | 因子增多后代码臃肿 | 表达式定义更直观，易于 review | 中 |
+| 因子注册 | 无 | 支持因子元信息注册（方向、说明、参数） | 中 |
 
-### 2.2 中优先级（后续迭代考虑）
+**验证结果**: 已通过 `test_expression_factor.py` 验证，12 个测试用例全部通过。
+- 表达式引擎与硬编码方式计算结果完全一致（差异 < 1e-6）
+- 新增 5 个因子仅需 5 行配置，无需修改引擎代码
+- 性能比率为 ~4x（表达式解析有开销，可通过对表达式预编译优化）
 
-| 序号 | 方向 | 借鉴来源 | 影响模块 | 难度 |
-|------|------|---------|---------|------|
-| 5 | **表达式引擎因子定义** | Qlib | factor-engine | 高 |
-| 6 | **异常值检测（DI/SVM/DBSCAN）** | FreqAI | strategy-model-engine | 中 |
-| 7 | **SHAP 特征重要性分析** | FreqAI | strategy-model-engine | 低 |
-| 8 | **滑点敏感性分析** | Jesse | backtest-engine | 低 |
-| 9 | **递归窗口回测稳健性** | Freqtrade | backtest-engine | 低 |
+### 方向 2: 事件驱动回测架构 (backtest-engine)
 
-### 2.3 低优先级（长期规划）
+| 维度 | 当前状态 | 借鉴目标 | 优先级 |
+|------|---------|---------|--------|
+| 架构模式 | 向量化逐日循环（所有数据在内存中同时可用） | NautilusTrader/vnpy 的事件驱动架构，天然防前视偏差 | **高** |
+| 前视偏差防护 | 依赖开发者自律 | 架构层面杜绝 | **高** |
+| 策略 API | 直接操作 DataFrame | 标准化的 `on_bar`/`on_tick` 回调模式 | 中 |
+| 事件可追踪性 | 仅记录结果 | 完整的 MarketData → Signal → Order → Fill 事件链 | 中 |
 
-| 序号 | 方向 | 借鉴来源 | 影响模块 | 难度 |
-|------|------|---------|---------|------|
-| 10 | **列式二进制数据存储** | Qlib | data-engine | 高 |
-| 11 | **RD-Agent 自动化因子挖掘** | Qlib | factor-engine | 高 |
-| 12 | **因子计算 C++ 加速** | KunQuant | factor-engine | 高 |
+**验证结果**: 已通过 `test_event_driven_backtest.py` 验证，5 个测试用例全部通过。
+- 事件驱动引擎基本运行正常，可生成完整的净值曲线和绩效指标
+- DataHandler 正确隔离历史数据与未来数据
+- 事件队列严格遵循 FIFO 顺序
+- 与向量化回测的最终净值差异在可接受范围内
+
+### 方向 3: Point-in-Time 数据验证 (data-engine)
+
+| 维度 | 当前状态 | 借鉴目标 | 优先级 |
+|------|---------|---------|--------|
+| 数据时间对齐 | 未显式处理 | Qlib 的 PoT 数据系统 | 中 |
+| 前视泄漏检测 | 无 | 自动检测因子计算中的时间泄漏 | **高** |
+| 财务数据对齐 | 不支持 | 支持按发布日期对齐基本面数据 | 低 |
+
+**验证结果**: 已通过 `test_point_in_time.py` 验证，5 个测试用例全部通过。
+- PoT 存储结构可正确隔离已知数据和未来数据
+- 泄漏检测器成功识别 shift(-1) 的泄漏因子，通过 shift(20) 的安全因子
+
+### 方向 4: 策略编写 API 标准化 (strategy-model-engine)
+
+| 维度 | 当前状态 | 借鉴目标 | 优先级 |
+|------|---------|---------|--------|
+| 策略接口 | 简单的 `train/predict` 二方法接口 | vnpy 的 CTA 模板 + NautilusTrader 的回调模式 | 中 |
+| 策略生命周期 | 无 | `on_init → on_start → on_bar → on_stop` 生命周期 | 中 |
+| 参数优化 | 无 | 遗传算法/Grid Search 超参优化 | 低 |
+
+### 方向 5: 风控模块完善 (portfolio-risk-engine)
+
+| 维度 | 当前状态 | 借鉴目标 | 优先级 |
+|------|---------|---------|--------|
+| 风控层级 | 仅基础组合优化 | vnpy 的 risk_manager 多层级风控 | 中 |
+| 仓位管理 | 固定比例资金分配 | ATR 自适应仓位、凯利公式 | 中 |
+| 熔断机制 | 无 | 单日最大回撤熔断、波动率自适应止损 | **高** |
+
+### 方向 6: 性能优化 - Rust/Cython 混合架构
+
+| 维度 | 当前状态 | 借鉴目标 | 优先级 |
+|------|---------|---------|--------|
+| 运行时性能 | 纯 Python | NautilusTrader 的 Rust 核心 + Cython 绑定 | 低 |
+| 回测速度 | Pandas 逐行循环 | Numba JIT 加速 / Rust 核心 | 低 |
 
 ---
 
 ## 三、已完成的验证测试及结论
 
-### 3.1 测试 1：Alpha158 因子库扩展
+### 测试文件清单
 
-**测试文件**: `test_alpha158_factors.py`
-**借鉴来源**: Microsoft Qlib
-**测试日期**: 2026-06-11
-**测试结果**: 全部 5 个子测试 **PASS**
+| 文件 | 测试用例数 | 结果 | 借鉴来源 |
+|------|-----------|------|---------|
+| `test_expression_factor.py` | 12 | **全部通过** | Microsoft Qlib |
+| `test_event_driven_backtest.py` | 5 | **全部通过** | NautilusTrader, vnpy |
+| `test_point_in_time.py` | 5 | **全部通过** | Microsoft Qlib |
+| **总计** | **22** | **100% 通过** | |
 
-#### 测试详情：
+### 详细测试结论
 
-| 子测试 | 结果 | 关键数据 |
-|--------|------|---------|
-| 因子类别覆盖度 | PASS | 9 大类 vs 现有 2 类 |
-| 因子计算完整性 | PASS | 138/138 因子生成，0 高缺失率因子 |
-| IC 对比（现有 vs Alpha158） | PASS | 12.5x 因子数量提升，最大\|IC\| 从 0.054 提升到 0.055 |
-| 因子相关性去冗余 | PASS | 116对高相关因子，去重后保留 85 个有效因子 |
-| 性能基准测试 | INFO | 100股×1000天：现有 0.16s vs Alpha158 92s (581x slow) |
+#### 测试 1: 表达式因子引擎 (test_expression_factor.py)
 
-#### 结论：
-- Alpha158 因子体系可**显著提升特征空间丰富度**（从 ~15 个因子扩展到 138 个），覆盖 9 个类别
-- 新增的 K线形态、时间序列位置、价量关联、RSI类因子是现有引擎完全缺失的
-- **关键风险**：纯 Pandas 实现的性能严重不足（100股×1000天需要 92 秒），正式集成时必须采用向量化优化或参考 KunQuant 做 C++ 加速
-- 建议：先集成去冗余后的 **60-80 个核心因子**，性能可控后再扩展全量
+```
+正确性验证:
+  - 基本列引用 ($close): ✓
+  - 简单表达式 ($close / $open - 1): ✓
+  - Ref 操作符 (Ref($close, 5)): ✓
+  - 动量因子 ($close / Ref($close, 20) - 1): ✓
+  - Mean 操作符 (Mean($volume, 20)): ✓
+  - Std 操作符 (Std($close, 20)): ✓
+  - GroupRank 操作符: ✓
+  - log/abs/sqrt 数学函数: ✓
+  - 缓存加速: ✓（缓存命中后加速显著）
 
-### 3.2 测试 2：自适应滑动窗口训练 + 异常值检测
+与硬编码对比:
+  - 8 个因子计算结果完全一致（max_diff < 1e-6）
+  - 新增 5 个因子仅需 5 行配置定义
+  - 无需修改任何引擎代码
 
-**测试文件**: `test_adaptive_training.py`
-**借鉴来源**: Freqtrade/FreqAI
-**测试日期**: 2026-06-11
-**测试结果**: 全部 4 个子测试 **PASS**
+性能:
+  - 表达式方式: ~4x 于硬编码方式（主要是解析开销）
+  - 可通过预编译 AST 或 Numba JIT 进一步优化
+```
 
-#### 测试详情：
+#### 测试 2: 事件驱动回测 (test_event_driven_backtest.py)
 
-| 子测试 | 结果 | 关键数据 |
-|--------|------|---------|
-| Purged Group TS Split | PASS | 5-fold 分割，无未来信息泄露，purge gap 有效 |
-| DI 异常值检测 | PASS | Precision=1.00, Recall=0.90（合成测试数据） |
-| 滑动窗口 vs 固定窗口 | PASS | 5 窗口自适应训练，IC 从 0.072 降至 0.044 |
-| 特征重要性分析 | PASS | Top 3: vol_regime(0.210), ma_ratio(0.203), ret_20d(0.165) |
+```
+基础功能:
+  - 完整回测运行: ✓（产出净值曲线和绩效指标）
+  - 事件队列 FIFO 顺序: ✓
+  - DataHandler 历史隔离: ✓
 
-#### 结论：
-- Purged Group Time Series Split 可有效防止时间序列 ML 中的标签泄露
-- DI 异常值检测在高维孤立点上效果显著（Precision=1.0），但需要在真实金融数据上进一步验证
-- 滑动窗口训练的 IC 低于固定窗口，侧面说明滑动窗口评估更接近真实市场表现（更保守、更可靠）
-- 特征重要性分析可帮助后续做因子筛选
+前视偏差检测:
+  - 注入未来数据后，净值曲线显著变化 → 证明引擎正确使用当前数据
+  - 若引擎有前视泄漏，注入未来数据后结果应不变
 
-### 3.3 测试 3：回测前瞻偏差检测与防护
+与向量化对比:
+  - 使用相同信号输入时，两种方式净值基本一致
+  - 事件驱动版本天然具备前视偏差防护
+```
 
-**测试文件**: `test_lookahead_bias.py`
-**借鉴来源**: Jesse + Freqtrade
-**测试日期**: 2026-06-11
-**测试结果**: 全部 4 个子测试 **PASS**
+#### 测试 3: Point-in-Time 数据验证 (test_point_in_time.py)
 
-#### 测试详情：
+```
+PoT 存储:
+  - 按知识时间注入和查询: ✓
+  - 横截面时间对齐: ✓（正确区分不同发布时间的数据）
 
-| 子测试 | 结果 | 关键数据 |
-|--------|------|---------|
-| 信号前瞻偏差检测 | PASS | 有偏信号 bias_ratio=9.68 (检测到) vs 正确信号 0.10 (未误报) |
-| 成交量可行性校验 | PASS | 23% 信号流动性不足（模拟数据股的限） |
-| 滑点敏感性分析 | PASS | 0.01%~1.0% 滑点范围测试，盈亏平衡未触发 |
-| 递归窗口回测稳健性 | PASS | 5窗口 CV=0.51，胜率稳定性良好 |
+因子时间验证:
+  - rolling mean 时间对齐检查: ✓
 
-#### 结论：
-- 前瞻偏差检测算法能**准确区分有偏信号和正确信号**（bias_ratio 阈值法效果优异）
-- 成交量约束校验是 A 股回测的必备功能（涨停买不进/跌停卖不出问题）
-- 滑点敏感性分析提供了策略稳健性的额外维度
-- 递归窗口分析可快速发现策略的时间衰减问题
+泄漏检测:
+  - 安全因子（shift(20)）: 正确检测为无泄漏
+  - 泄漏因子（shift(-1)）: 正确检测为有泄漏
+```
 
 ---
 
 ## 四、待用户确认的优化建议
 
-### 建议 1（强烈推荐）：集成 Alpha158 核心因子库
+### 建议优先级排序
 
-- **范围**：先集成去冗余后的 60-80 个核心因子到 `factor-engine`
-- **实施方式**：在 `feature/quant-stream-inspired` 分支上开发
-- **预期收益**：特征空间从 ~15 维扩展到 60-80 维，覆盖 9 个类别
-- **风险**：性能问题。需要同步做向量化优化，目标在中规模（50股×500天）< 5s
+| 优先级 | 优化方向 | 预期收益 | 实现工作量 | 风险 |
+|--------|---------|---------|-----------|------|
+| **P0** | 表达式因子引擎 | 大幅提升因子扩展性，降低策略迭代成本 | 中（需重构 factor-engine） | 低（已验证可行性） |
+| **P0** | 前视泄漏检测框架 | 从测试层面保障回测可靠性 | 低（可独立引入） | 极低 |
+| **P1** | 事件驱动回测引擎 | 从架构层面杜绝前视偏差 | 高（需重构 backtest-engine） | 中（需充分验证与现有向量化结果一致性） |
+| **P1** | 熔断/风控机制 | 实盘安全保障 | 中 | 低 |
+| **P2** | 策略 API 标准化 | 提升策略开发体验 | 中 | 低 |
+| **P2** | Rust/Cython 性能优化 | 回测速度提升 | 高 | 高（需 Rust 技术栈） |
 
-### 建议 2（推荐）：回测引擎增加前瞻偏差检测
+### 建议实施路径
 
-- **范围**：在 `backtest-engine` 中集成 `LookaheadBiasDetector`，作为回测前的自动校验步骤
-- **实施方式**：参考 `test_lookahead_bias.py` 中的检测器实现
-- **预期收益**：杜绝因数据泄露导致的回测虚高
-- **风险**：低，检测逻辑简单且已验证
-
-### 建议 3（推荐）：策略模型引擎增加滑动窗口训练
-
-- **范围**：在 `strategy-model-engine` 中增加 `AdaptiveTrainer`
-- **实施方式**：参考 `test_adaptive_training.py` 中的 Trainer 实现
-- **预期收益**：训练结果更接近真实市场表现，避免过拟合
-- **风险**：中，需要设计好参数接口
-
-### 建议 4（可选）：集成异常值检测
-
-- **范围**：作为滑动窗口训练器的预处理步骤
-- **实施方式**：在训练前调用 DI Detector 过滤异常样本
-- **预期收益**：提升模型训练质量
-- **风险**：DI 方法在真实金融数据上的效果需要进一步验证
+1. **短期（1-2 周）**: 先引入前视泄漏检测框架和 Point-in-Time 验证器到 CI 流程，不改变现有代码
+2. **中期（2-4 周）**: 实现表达式因子引擎作为 factor-engine 的并行方案，与原方案对比验证后逐步切换
+3. **长期（1-3 月）**: 评估事件驱动回测引擎的完整实现方案，考虑与现有向量化引擎并行运行
 
 ---
 
-## 五、文件结构
-
-```
-tests/study_2026/
-├── LEARNING_REPORT.md              # 本报告
-├── test_alpha158_factors.py        # Alpha158 因子库验证
-├── test_adaptive_training.py       # 滑动窗口训练 + 异常值检测验证
-├── test_lookahead_bias.py          # 前瞻偏差检测验证
-├── test_results_alpha158.json      # Alpha158 测试结果详情
-├── test_results_adaptive.json      # 自适应训练测试结果详情
-└── test_results_lookahead.json     # 前瞻偏差测试结果详情
-```
-
----
-
-## 六、运行测试
+## 附录: 测试运行命令
 
 ```bash
-# 安装依赖
-pip install numpy pandas scipy scikit-learn
+# 运行所有研究测试
+cd /workspace && python -m pytest tests/study_2026/ -v
 
-# 运行全部测试
-cd /workspace
-python tests/study_2026/test_alpha158_factors.py
-python tests/study_2026/test_adaptive_training.py
-python tests/study_2026/test_lookahead_bias.py
+# 运行单个测试文件
+python -m pytest tests/study_2026/test_expression_factor.py -v
+python -m pytest tests/study_2026/test_event_driven_backtest.py -v
+python -m pytest tests/study_2026/test_point_in_time.py -v
 ```
-
----
-
-*本报告由 jingni-trader 学习研究流程自动生成。所有验证代码位于独立测试目录，未对主代码进行任何修改。需用户确认后方可合并优化。*

@@ -1,650 +1,494 @@
 """
-验证测试：表达式因子引擎
-借鉴来源：Qlib (https://github.com/microsoft/qlib) - 表达式引擎设计
-        Qlib 的 Expression Engine 允许用户用类似 $close/Ref($close, 20)-1 的
-        字符串公式定义因子，自动向量化计算。
+借鉴来源: Microsoft Qlib (https://github.com/microsoft/qlib)
+优化方向: 表达式驱动的因子引擎（Expression-Based Factor Engine）
 
-优化方向：为 jingni-trader 的 factor-engine 引入基于表达式的因子定义方式，
-        支持算子组合、自动向量化、惰性计算，提升因子库的可扩展性。
+Qlib 的核心创新之一是它的表达式因子系统，允许用户通过简洁的字符串表达式
+（如 `$close / Ref($close, 20) - 1`）来定义因子，而不需要硬编码每个因子。
 
-设计思路：
-  - Qlib 的表达式引擎支持: Ref, Mean, Std, Max, Min, Rank, Log, Abs, Sign 等算子
-  - 通过 AST 解析表达式，自动生成向量化计算图
-  - 支持批量计算和缓存
-  - 本测试验证表达式引擎在功能正确性、性能、可扩展性方面的表现
+当前 jingni-trader 的 factor-engine 在 compute_a_share_factors() 中
+硬编码了所有因子计算逻辑，扩展性差。
+
+本测试验证表达式因子引擎的可行性，对比硬编码方式和表达式方式。
 """
+
 import sys
 import os
-import unittest
 import re
 import time
-from typing import List, Dict, Any, Optional, Callable, Union
-from dataclasses import dataclass
+import json
+import unittest
 
 import numpy as np
 import pandas as pd
 
+# ---- 表达式因子引擎实现 (原型) ----
 
-# ============================================================
-# 表达式因子引擎核心实现
-# ============================================================
+class ExpressionFactorEngine:
+    """
+    表达式驱动的因子计算引擎
 
-class FactorExpression:
+    支持的操作符:
+      - 列引用: $close, $open, $volume 等
+      - 数学运算: +, -, *, /, **, abs(), log(), sqrt()
+      - 时间序列: Ref(expr, N), Mean(expr, N), Std(expr, N)
+      - 分组操作: GroupRank(expr)
+      - 复合: Ts_Rank(expr, N)
     """
-    因子表达式引擎 - 借鉴 Qlib 的 Expression Engine 设计
-    
-    支持的语法:
-      - 基础字段: $open, $high, $low, $close, $volume, $amount, $turnover
-      - 算子函数:
-        - Ref(expr, N): N日前值 (N>0 表示滞后)
-        - Mean(expr, N): N日滚动均值
-        - Std(expr, N): N日滚动标准差  
-        - Max(expr, N): N日滚动最大值
-        - Min(expr, N): N日滚动最小值
-        - Sum(expr, N): N日滚动求和
-        - PctChange(expr, N): N日涨跌幅
-        - Rank(expr): 横截面排名 (0-1, 按日期分组)
-        - Log(expr): 自然对数
-        - Abs(expr): 绝对值
-        - Sign(expr): 符号
-        - Delay(expr, N): 延迟N日 (同 Ref)
-        - Delta(expr, N): N日差值
-        - Corr(expr1, expr2, N): N日滚动相关系数
-        - If(cond, true_val, false_val): 条件表达式
-      - 运算符: +, -, *, /, >, <, >=, <=, ==, !=, &, |
-    """
-    
-    # 支持的字段映射
-    FIELD_MAP = {
-        'open': 'open', 'high': 'high', 'low': 'low', 'close': 'close',
-        'volume': 'volume', 'amount': 'amount', 'turnover': 'turnover_rate',
-        'vwap': 'vwap', 'change_pct': 'change_pct',
+
+    # 支持的列别名
+    COLUMN_ALIASES = {
+        "close": "close", "c": "close",
+        "open": "open", "o": "open",
+        "high": "high", "h": "high",
+        "low": "low", "l": "low",
+        "volume": "volume", "v": "volume",
+        "amount": "amount", "a": "amount",
+        "turnover": "turnover_rate", "turn": "turnover_rate",
+        "change_pct": "change_pct",
     }
-    
-    def __init__(self, expression: str):
-        self.expression = expression
-        self._compiled = self._compile(expression)
-    
-    def _compile(self, expr: str) -> Callable:
-        """编译表达式为可调用函数"""
-        def _eval(data: pd.DataFrame) -> pd.Series:
-            return self._evaluate(data, self.expression)
-        return _eval
-    
-    def evaluate(self, data: pd.DataFrame) -> pd.Series:
-        """对数据进行求值"""
-        return self._compiled(data)
-    
-    def _evaluate(self, data: pd.DataFrame, expr: str) -> pd.Series:
-        """递归求值表达式"""
-        expr = expr.strip()
-        
-        # 处理括号包裹的表达式
-        if expr.startswith('(') and expr.endswith(')'):
-            depth = 0
-            for i, c in enumerate(expr):
-                if c == '(': depth += 1
-                elif c == ')': depth -= 1
-                if depth == 0 and i == len(expr) - 1:
-                    return self._evaluate(data, expr[1:-1])
-        
-        # 处理一元负号: -expr
-        if expr.startswith('-'):
-            inner = self._evaluate(data, expr[1:])
-            return -inner
-        
-        # 处理算术/逻辑运算符（最低优先级，从右向左找最外层）
-        ops = [
-            ('&', lambda a, b: (a.astype(bool) & b.astype(bool)).astype(float)),
-            ('|', lambda a, b: (a.astype(bool) | b.astype(bool)).astype(float)),
-            ('>=', lambda a, b: (a >= b).astype(float)),
-            ('<=', lambda a, b: (a <= b).astype(float)),
-            ('!=', lambda a, b: (a != b).astype(float)),
-            ('==', lambda a, b: (a == b).astype(float)),
-            ('>', lambda a, b: (a > b).astype(float)),
-            ('<', lambda a, b: (a < b).astype(float)),
-            ('+', lambda a, b: a + b),
-            ('-', lambda a, b: a - b),
-            ('*', lambda a, b: a * b),
-            ('/', lambda a, b: a / b),
-        ]
-        
-        for op, func in ops:
-            pos = self._find_top_level_op(expr, op)
-            if pos > 0:
-                left = self._evaluate(data, expr[:pos])
-                right = self._evaluate(data, expr[pos + len(op):])
-                return func(left, right)
-        
-        # 处理函数调用
-        func_ma = re.match(r'^(\w+)\((.*)\)$', expr, re.DOTALL)
-        if func_ma:
-            func_name = func_ma.group(1)
-            args_str = func_ma.group(2)
-            args = self._split_args(args_str)
-            
-            return self._call_function(data, func_name, args)
-        
-        # 处理字段引用 $field
-        if expr.startswith('$'):
-            field_name = expr[1:]
-            if field_name in self.FIELD_MAP:
-                col_name = self.FIELD_MAP[field_name]
-                if col_name in data.columns:
-                    return data[col_name]
-                raise ValueError(f"数据中不存在字段: {col_name}")
-            raise ValueError(f"未知字段: ${field_name}")
-        
-        # 处理数字字面量
-        try:
-            val = float(expr)
-            return pd.Series(val, index=data.index)
-        except ValueError:
-            pass
-        
-        raise ValueError(f"无法解析表达式: {expr}")
-    
-    def _find_top_level_op(self, expr: str, op: str) -> int:
-        """找到最外层的运算符位置"""
-        depth = 0
-        i = len(expr) - len(op)
-        while i >= 0:
-            c = expr[i]
-            if c == ')':
-                depth += 1
-            elif c == '(':
-                depth -= 1
-            elif depth == 0 and expr[i:i + len(op)] == op:
-                return i
-            i -= 1
-        return -1
-    
-    def _split_args(self, args_str: str) -> List[str]:
-        """按逗号分割函数参数"""
-        args = []
-        current = ''
-        depth = 0
-        
-        for c in args_str:
-            if c == ',' and depth == 0:
-                args.append(current.strip())
-                current = ''
-            else:
-                if c == '(': depth += 1
-                elif c == ')': depth -= 1
-                current += c
-        
-        if current.strip():
-            args.append(current.strip())
-        
-        return args
-    
-    def _call_function(self, data: pd.DataFrame, func_name: str, args: List[str]) -> pd.Series:
-        """调用因子函数"""
-        
-        if func_name == 'Ref' or func_name == 'Delay':
-            inner = self._evaluate(data, args[0])
-            n = self._parse_int_arg(args[1], data) if len(args) > 1 else 1
-            return inner.groupby(data['code']).shift(n)
-        
-        elif func_name == 'Mean':
-            inner = self._evaluate(data, args[0])
-            n = self._parse_int_arg(args[1], data) if len(args) > 1 else 5
-            return inner.groupby(data['code']).transform(
-                lambda x: x.rolling(n, min_periods=max(1, n // 2)).mean()
-            )
-        
-        elif func_name == 'Std':
-            inner = self._evaluate(data, args[0])
-            n = self._parse_int_arg(args[1], data) if len(args) > 1 else 20
-            return inner.groupby(data['code']).transform(
-                lambda x: x.rolling(n, min_periods=max(1, n // 2)).std()
-            )
-        
-        elif func_name == 'Max':
-            inner = self._evaluate(data, args[0])
-            n = self._parse_int_arg(args[1], data) if len(args) > 1 else 20
-            return inner.groupby(data['code']).transform(
-                lambda x: x.rolling(n, min_periods=max(1, n // 2)).max()
-            )
-        
-        elif func_name == 'Min':
-            inner = self._evaluate(data, args[0])
-            n = self._parse_int_arg(args[1], data) if len(args) > 1 else 20
-            return inner.groupby(data['code']).transform(
-                lambda x: x.rolling(n, min_periods=max(1, n // 2)).min()
-            )
-        
-        elif func_name == 'Sum':
-            inner = self._evaluate(data, args[0])
-            n = self._parse_int_arg(args[1], data) if len(args) > 1 else 5
-            return inner.groupby(data['code']).transform(
-                lambda x: x.rolling(n, min_periods=1).sum()
-            )
-        
-        elif func_name == 'PctChange':
-            inner = self._evaluate(data, args[0])
-            n = self._parse_int_arg(args[1], data) if len(args) > 1 else 1
-            return inner.groupby(data['code']).pct_change(n)
-        
-        elif func_name == 'Rank':
-            inner = self._evaluate(data, args[0])
-            result = pd.Series(index=data.index, dtype=float)
-            for dt, group in data.groupby('date'):
-                idx = group.index
-                vals = inner.loc[idx]
-                if len(vals.dropna()) > 0:
-                    result.loc[idx] = vals.rank(pct=True)
-            return result
-        
-        elif func_name == 'Log':
-            inner = self._evaluate(data, args[0])
-            return np.log(inner.replace(0, np.nan))
-        
-        elif func_name == 'Abs':
-            inner = self._evaluate(data, args[0])
-            return inner.abs()
-        
-        elif func_name == 'Sign':
-            inner = self._evaluate(data, args[0])
-            return np.sign(inner)
-        
-        elif func_name == 'Delta':
-            inner = self._evaluate(data, args[0])
-            n = self._parse_int_arg(args[1], data) if len(args) > 1 else 1
-            return inner.groupby(data['code']).diff(n)
-        
-        elif func_name == 'Corr':
-            inner1 = self._evaluate(data, args[0])
-            inner2 = self._evaluate(data, args[1])
-            n = self._parse_int_arg(args[2], data) if len(args) > 2 else 20
-            result = pd.Series(index=data.index, dtype=float)
-            for code, group in data.groupby('code'):
-                idx = group.index
-                if len(group) >= n:
-                    result.loc[idx] = inner1.loc[idx].rolling(n).corr(inner2.loc[idx])
-            return result
-        
-        elif func_name == 'If':
-            # If(condition, true_value, false_value)
-            cond = self._evaluate(data, args[0])
-            true_val = self._evaluate(data, args[1])
-            false_val = self._evaluate(data, args[2])
-            return pd.Series(
-                np.where(cond.values > 0, true_val.values, false_val.values),
-                index=data.index
-            )
-        
-        else:
-            raise ValueError(f"未知函数: {func_name}")
-    
-    def _parse_int_arg(self, arg: str, data: pd.DataFrame) -> int:
-        """解析整数参数"""
-        arg = arg.strip()
-        if arg.startswith('$'):
-            # 如果是字段引用，取第一行值
-            field = arg[1:]
-            if field in self.FIELD_MAP:
-                col = self.FIELD_MAP[field]
-                return int(data[col].iloc[0]) if col in data.columns else 1
-        return int(float(arg))
 
-
-# ============================================================
-# 因子注册表 - 借鉴 Qlib 的 Alpha158/Alpha360 预定义因子集
-# ============================================================
-
-class FactorRegistry:
-    """因子注册表 - 管理预定义因子表达式"""
-    
-    def __init__(self):
-        self._factors: Dict[str, str] = {}
-        self._register_defaults()
-    
-    def _register_defaults(self):
-        """注册常用因子"""
-        # 价量类因子（借鉴 Qlib Alpha158 中的价量因子）
-        defaults = {
-            # 收益类
-            'ret_1d': 'PctChange($close, 1)',
-            'ret_5d': 'PctChange($close, 5)',
-            'ret_20d': 'PctChange($close, 20)',
-            'ret_60d': 'PctChange($close, 60)',
-            
-            # 均线偏离
-            'ma5_bias': '$close / Mean($close, 5) - 1',
-            'ma20_bias': '$close / Mean($close, 20) - 1',
-            'ma60_bias': '$close / Mean($close, 60) - 1',
-            
-            # 波动率
-            'volatility_5d': 'Std(PctChange($close, 1), 5)',
-            'volatility_20d': 'Std(PctChange($close, 1), 20)',
-            'volatility_60d': 'Std(PctChange($close, 1), 60)',
-            
-            # 量比
-            'volume_ratio_5': '$volume / Mean($volume, 5)',
-            'volume_ratio_20': '$volume / Mean($volume, 20)',
-            
-            # 价格位置
-            'price_position_20': '($close - Min($close, 20)) / (Max($close, 20) - Min($close, 20) + 1e-8)',
-            'price_position_60': '($close - Min($close, 60)) / (Max($close, 60) - Min($close, 60) + 1e-8)',
-            
-            # 动量因子
-            'momentum_5_20': 'PctChange($close, 5) - PctChange($close, 20)',
-            'momentum_20_60': 'PctChange($close, 20) - PctChange($close, 60)',
-            
-            # 换手率相关
-            'turnover_5d': 'Mean($turnover, 5)',
-            'turnover_20d': 'Mean($turnover, 20)',
-            'turnover_variation': 'Std($turnover, 20)',
-            
-            # 振幅
-            'amplitude_20d': 'Mean(($high - $low) / Ref($close, 1), 20)',
-            
-            # 资金流
-            'money_flow_5d': 'Sum($amount, 5)',
-            'money_flow_20d': 'Sum($amount, 20)',
-            
-            # RSV (未成熟随机值)
-            'rsv_9': '($close - Min($low, 9)) / (Max($high, 9) - Min($low, 9) + 1e-8)',
-            
-            # 量价相关性
-            'corr_price_volume_20': 'Corr($close, $volume, 20)',
-        }
-        
-        for name, expr in defaults.items():
-            self.register(name, expr)
-    
-    def register(self, name: str, expression: str):
-        """注册因子"""
-        self._factors[name] = expression
-    
-    def get(self, name: str) -> Optional[str]:
-        """获取因子表达式"""
-        return self._factors.get(name)
-    
-    def list_all(self) -> List[str]:
-        """列出所有因子"""
-        return list(self._factors.keys())
-    
-    def compute(self, data: pd.DataFrame, factor_names: List[str]) -> pd.DataFrame:
+    def __init__(self, data: pd.DataFrame):
         """
-        批量计算因子
-        
         参数:
-            data: 包含 OHLCV 等原始数据的 DataFrame
-            factor_names: 需要计算的因子名称列表
-        
-        返回:
-            DataFrame with columns: code, date, [factor columns]
+            data: 包含 code, date 和 OHLCV 列的 DataFrame
         """
-        if data.empty:
-            return pd.DataFrame()
-        
-        result = data[['code', 'date']].copy()
-        
-        for name in factor_names:
-            expr = self._factors.get(name)
-            if expr is None:
-                result[name] = np.nan
-                continue
-            
-            try:
-                fe = FactorExpression(expr)
-                result[name] = fe.evaluate(data)
-            except Exception as e:
-                print(f"  因子 [{name}] 计算失败: {e}")
-                result[name] = np.nan
-        
+        self.data = data.sort_values(["code", "date"]).reset_index(drop=True)
+        self._factor_cache = {}
+
+    def evaluate(self, expression: str) -> pd.Series:
+        """
+        计算因子表达式
+
+        参数:
+            expression: 因子表达式，如 "$close / Ref($close, 20) - 1"
+
+        返回:
+            与输入 data 等长的 Series
+        """
+        if expression in self._factor_cache:
+            return self._factor_cache[expression]
+
+        result = self._parse_and_eval(expression)
+        self._factor_cache[expression] = result
         return result
 
+    def _parse_and_eval(self, expr: str) -> pd.Series:
+        """递归下降解析器"""
+        expr = expr.strip()
 
-# ============================================================
-# 测试用例
-# ============================================================
+        # 处理分组排名
+        m = re.match(r'^GroupRank\((.+)\)$', expr)
+        if m:
+            inner = self._parse_and_eval(m.group(1))
+            return inner.groupby(self.data['code']).rank(pct=True)
 
-class TestExpressionFactor(unittest.TestCase):
+        # 处理 Ts_Rank
+        m = re.match(r'^Ts_Rank\((.+),\s*(\d+)\)$', expr)
+        if m:
+            inner = self._parse_and_eval(m.group(1))
+            window = int(m.group(2))
+            return inner.groupby(self.data['code']).transform(
+                lambda x: x.rolling(window, min_periods=1).apply(
+                    lambda y: (y.iloc[-1] > y[:-1]).mean() if len(y) > 1 else 0.5, raw=False
+                )
+            )
+
+        # 处理 Mean(expr, N)
+        m = re.match(r'^Mean\((.+),\s*(\d+)\)$', expr)
+        if m:
+            inner = self._parse_and_eval(m.group(1))
+            window = int(m.group(2))
+            return inner.groupby(self.data['code']).transform(
+                lambda x: x.rolling(window, min_periods=1).mean()
+            )
+
+        # 处理 Std(expr, N)
+        m = re.match(r'^Std\((.+),\s*(\d+)\)$', expr)
+        if m:
+            inner = self._parse_and_eval(m.group(1))
+            window = int(m.group(2))
+            return inner.groupby(self.data['code']).transform(
+                lambda x: x.rolling(window, min_periods=1).std()
+            )
+
+        # 处理 Ref(expr, N)
+        m = re.match(r'^Ref\((.+),\s*(\d+)\)$', expr)
+        if m:
+            inner = self._parse_and_eval(m.group(1))
+            n = int(m.group(2))
+            return inner.groupby(self.data['code']).shift(n)
+
+        # 处理 -expr (一元负号)
+        # 只在非二元运算的情况下处理一元负号
+        m = re.match(r'^-(.+)$', expr)
+        if m:
+            inner = m.group(1)
+            # 检查是否只有一对匹配的括号包裹整个表达式
+            if inner.startswith('(') and inner.endswith(')'):
+                # 验证括号匹配
+                depth = 0
+                matched = True
+                for i, ch in enumerate(inner):
+                    if ch == '(':
+                        depth += 1
+                    elif ch == ')':
+                        depth -= 1
+                    if depth == 0 and i < len(inner) - 1:
+                        matched = False
+                        break
+                if matched:
+                    return -self._parse_and_eval(inner[1:-1])
+            # 单纯的列引用或函数调用
+            return -self._parse_and_eval(inner)
+
+        # 处理 log(expr)
+        m = re.match(r'^log\((.+)\)$', expr)
+        if m:
+            inner = self._parse_and_eval(m.group(1))
+            return np.log(inner.replace(0, np.nan))
+
+        # 处理 abs(expr)
+        m = re.match(r'^abs\((.+)\)$', expr)
+        if m:
+            inner = self._parse_and_eval(m.group(1))
+            return np.abs(inner)
+
+        # 处理 sqrt(expr)
+        m = re.match(r'^sqrt\((.+)\)$', expr)
+        if m:
+            inner = self._parse_and_eval(m.group(1))
+            return np.sqrt(np.maximum(inner, 0))
+
+        # 处理二元运算: expr1 OP expr2
+        # 从低优先级到高优先级（先匹配外层操作符）
+        ops = [
+            (r'^(.*)\s*\+\s*(.*)$', lambda a, b: a + b),
+            (r'^(.*)\s*-\s*(.*)$', lambda a, b: a - b),
+            (r'^(.*)\s*\*\s*(.*)$', lambda a, b: a * b),
+            (r'^(.*)\s*/\s*(.*)$', lambda a, b: a / b.replace(0, np.nan)),
+            (r'^(.*)\s*\*\*\s*(.*)$', lambda a, b: a ** b),
+        ]
+        for pattern, op in ops:
+            m = re.match(pattern, expr)
+            if m:
+                left = self._parse_and_eval(m.group(1))
+                right = self._parse_and_eval(m.group(2))
+                return op(left, right)
+
+        # 处理列引用: $colname 或 $colname_N (带参数)
+        m = re.match(r'^\$(\w+)$', expr)
+        if m:
+            col_alias = m.group(1).lower()
+            col_name = self.COLUMN_ALIASES.get(col_alias, col_alias)
+            if col_name in self.data.columns:
+                return self.data[col_name].copy()
+            raise ValueError(f"列 {col_alias} 不存在于数据中，可用列: {list(self.data.columns)}")
+
+        # 处理数值字面量
+        try:
+            val = float(expr)
+            return pd.Series(val, index=self.data.index)
+        except ValueError:
+            pass
+
+        raise ValueError(f"无法解析表达式: {expr}")
+
+    def cache_clear(self):
+        """清除缓存"""
+        self._factor_cache.clear()
+
+
+# ---- 硬编码因子实现（当前 jingni-trader 方式） ----
+
+def compute_factors_hardcoded(data: pd.DataFrame) -> pd.DataFrame:
+    """与 jingni-trader 的 FactorEngine.compute_a_share_factors 逻辑一致"""
+    df = data.sort_values(["code", "date"]).copy()
+    result = df[["code", "date"]].copy()
+
+    result["ret_1d"] = df.groupby("code")["close"].pct_change()
+    result["ret_5d"] = df.groupby("code")["close"].pct_change(5)
+    result["ret_20d"] = df.groupby("code")["close"].pct_change(20)
+    result["ret_60d"] = df.groupby("code")["close"].pct_change(60)
+
+    result["reversal_5d"] = -result["ret_5d"]
+    result["reversal_20d"] = -result["ret_20d"]
+
+    volatility_col = df.groupby("code")["close"].transform(
+        lambda x: x.pct_change().rolling(20, min_periods=10).std()
+    )
+    result["volatility_20d"] = volatility_col
+
+    volume_20d = df.groupby("code")["volume"].transform(
+        lambda x: x.rolling(20, min_periods=5).mean()
+    )
+    result["volume_ratio"] = df["volume"] / volume_20d.replace(0, np.nan)
+
+    return result
+
+
+def compute_factors_expression(data: pd.DataFrame, factor_defs: dict) -> pd.DataFrame:
+    """使用表达式引擎计算因子"""
+    engine = ExpressionFactorEngine(data)
+    result = data[["code", "date"]].copy()
+
+    for name, expr in factor_defs.items():
+        result[name] = engine.evaluate(expr)
+
+    return result
+
+
+# ---- 测试用例 ----
+
+class TestExpressionFactorEngine(unittest.TestCase):
     """表达式因子引擎测试"""
-    
+
     @classmethod
     def setUpClass(cls):
-        """生成模拟测试数据"""
+        """生成测试数据"""
         np.random.seed(42)
-        dates = pd.date_range('2024-01-01', '2024-03-31', freq='B')
-        codes = [f'{i:06d}.SH' for i in range(600001, 600011)]  # 10 stocks
-        
+        codes = [f"{i:06d}.SH" for i in range(600000, 600020)]  # 20 只股票
+        dates = pd.date_range("2023-01-01", "2024-12-31", freq="B")
+
         rows = []
-        for date in dates:
-            for code in codes:
-                code_idx = codes.index(code)
-                price = 10 + code_idx * 2 + np.sin(date.dayofyear * 0.1 + code_idx) * 3
-                price += np.random.randn() * 0.3
-                
-                rows.append({
-                    'code': code,
-                    'date': date,
-                    'open': price + np.random.randn() * 0.05,
-                    'high': price + abs(np.random.randn() * 0.03),
-                    'low': price - abs(np.random.randn() * 0.03),
-                    'close': price,
-                    'volume': np.random.randint(10000, 100000),
-                    'amount': np.random.randint(100000, 1000000),
-                    'turnover_rate': np.random.uniform(0.01, 0.05),
-                    'change_pct': np.random.randn() * 0.02,
-                })
-        
-        cls.test_data = pd.DataFrame(rows)
-    
-    def test_basic_expression(self):
-        """测试基础表达式求值"""
-        fe = FactorExpression('$close')
-        result = fe.evaluate(self.test_data)
-        
-        self.assertEqual(len(result), len(self.test_data))
-        pd.testing.assert_series_equal(result, self.test_data['close'], check_names=False)
-        print("\n[基础表达式] $close 求值正确")
-    
-    def test_arithmetic_operations(self):
-        """测试算术运算"""
-        # 测试 HL 差
-        fe = FactorExpression('$high - $low')
-        result = fe.evaluate(self.test_data)
-        expected = self.test_data['high'] - self.test_data['low']
-        pd.testing.assert_series_equal(result, expected, check_names=False)
-        
-        # 测试复合运算
-        fe2 = FactorExpression('($high + $low) / 2')
-        result2 = fe2.evaluate(self.test_data)
-        expected2 = (self.test_data['high'] + self.test_data['low']) / 2
-        pd.testing.assert_series_equal(result2, expected2, check_names=False)
-        print("[算术运算] 加减乘除和括号优先级正确")
-    
-    def test_ref_shift(self):
-        """测试 Ref/Delay 延迟算子"""
-        fe = FactorExpression('Ref($close, 1)')
-        result = fe.evaluate(self.test_data)
-        
-        # 验证：前一日收盘价
-        for code in self.test_data['code'].unique():
-            mask = self.test_data['code'] == code
-            code_data = self.test_data.loc[mask, 'close']
-            result_subset = result.loc[mask]
-            
-            # 第一个值应为 NaN (无前一日数据)
-            self.assertTrue(np.isnan(result_subset.iloc[0]))
-            
-            # 后续值应等于前一日 close
-            for i in range(1, min(5, len(code_data))):
-                self.assertAlmostEqual(result_subset.iloc[i], code_data.iloc[i - 1], delta=1e-8)
-        
-        print("[Ref延迟] Ref($close, 1) 正确实现了滞后")
-    
-    def test_rolling_functions(self):
-        """测试滚动函数: Mean, Std, Max, Min, Sum"""
-        test_cases = [
-            ('Mean($close, 5)', 'mean'),
-            ('Std($close, 20)', 'std'),
-            ('Max($close, 20)', 'max'),
-            ('Min($close, 20)', 'min'),
-            ('Sum($volume, 5)', 'sum'),
-        ]
-        
-        for expr, stat in test_cases:
-            fe = FactorExpression(expr)
-            result = fe.evaluate(self.test_data)
-            self.assertEqual(len(result), len(self.test_data))
-            self.assertFalse(result.isna().all(), f"{expr} 结果不应全为 NaN")
-        
-        print(f"[滚动函数] Mean/Std/Max/Min/Sum 均正确计算")
-    
-    def test_pct_change(self):
-        """测试涨跌幅计算"""
-        fe = FactorExpression('PctChange($close, 5)')
-        result = fe.evaluate(self.test_data)
-        
-        for code in self.test_data['code'].unique():
-            mask = self.test_data['code'] == code
-            code_data = self.test_data.loc[mask, 'close']
-            result_subset = result.loc[mask]
-            
-            for i in range(5, len(code_data)):
-                expected = code_data.iloc[i] / code_data.iloc[i - 5] - 1
-                self.assertAlmostEqual(result_subset.iloc[i], expected, delta=1e-8)
-        
-        print("[涨跌幅] PctChange 5日涨跌幅计算正确")
-    
-    def test_rank_cross_sectional(self):
-        """测试截面排名"""
-        fe = FactorExpression('Rank($close)')
-        result = fe.evaluate(self.test_data)
-        
-        # 验证每个日期的排名和为 (0, 1) 且均值为 0.5
-        for date in self.test_data['date'].unique()[:5]:
-            mask = self.test_data['date'] == date
-            daily_rank = result.loc[mask].dropna()
-            
-            if len(daily_rank) > 0:
-                self.assertAlmostEqual(daily_rank.mean(), 0.5, delta=0.1)
-                self.assertGreaterEqual(daily_rank.min(), 0)
-                self.assertLessEqual(daily_rank.max(), 1)
-        
-        print("[截面排名] Rank 正确实现了每日截面排名")
-    
-    def test_logical_operations(self):
-        """测试逻辑运算和条件表达式"""
-        # 测试比较运算: 收盘价 > 开盘价 (阳线)
-        fe = FactorExpression('$close > $open')
-        result = fe.evaluate(self.test_data)
-        expected = (self.test_data['close'] > self.test_data['open']).astype(float)
-        pd.testing.assert_series_equal(result, expected, check_names=False)
-        
-        # 测试条件表达式
-        fe2 = FactorExpression('If($close > $open, 1, -1)')
-        result2 = fe2.evaluate(self.test_data)
-        for i in range(len(result2)):
-            expected_val = 1.0 if self.test_data['close'].iloc[i] > self.test_data['open'].iloc[i] else -1.0
-            self.assertAlmostEqual(result2.iloc[i], expected_val, delta=1e-8)
-        
-        print("[逻辑运算] 比较运算和 If 条件表达式正确")
-    
-    def test_factor_registry(self):
-        """测试因子注册表"""
-        registry = FactorRegistry()
-        
-        # 验证预注册的因子
-        all_factors = registry.list_all()
-        self.assertGreater(len(all_factors), 10)
-        self.assertIn('ret_5d', all_factors)
-        self.assertIn('volatility_20d', all_factors)
-        self.assertIn('ma20_bias', all_factors)
-        
-        # 测试自定义因子注册
-        registry.register('my_custom', 'Mean($close, 10) / Std($close, 10)')
-        self.assertIn('my_custom', registry.list_all())
-        
-        # 批量计算
-        selected = ['ret_5d', 'ret_20d', 'volatility_20d', 'ma20_bias', 'volume_ratio_20']
-        result = registry.compute(self.test_data, selected)
-        
-        self.assertEqual(len(result), len(self.test_data))
-        for factor_name in selected:
-            self.assertIn(factor_name, result.columns)
-            self.assertFalse(result[factor_name].isna().all(),
-                          f"{factor_name} 不应全为 NaN")
-        
-        print(f"[因子注册表] 已注册 {len(all_factors)} 个因子")
-        print(f"  预注册示例: {all_factors[:5]}")
-        print(f"  批量计算 {len(selected)} 个因子完成, shape={result.shape}")
-    
-    def test_corr_function(self):
-        """测试滚动相关性"""
-        fe = FactorExpression('Corr($close, $volume, 20)')
-        result = fe.evaluate(self.test_data)
-        
-        # 验证相关系数范围
-        valid = result.dropna()
-        if len(valid) > 0:
-            self.assertGreaterEqual(valid.min(), -1.01)
-            self.assertLessEqual(valid.max(), 1.01)
-        
-        print(f"[相关系数] Corr 结果数: {len(valid)}, 范围: [{valid.min():.3f}, {valid.max():.3f}]")
-    
-    def test_expression_performance(self):
-        """性能测试：对比硬编码和表达式计算"""
-        registry = FactorRegistry()
-        factors = ['ret_5d', 'ret_20d', 'volatility_20d', 'ma20_bias', 'volume_ratio_20',
-                    'price_position_20', 'momentum_5_20', 'turnover_20d', 'rsv_9',
-                    'corr_price_volume_20']
-        
-        # 表达式方式
-        t0 = time.time()
-        result_expr = registry.compute(self.test_data, factors)
-        t_expr = time.time() - t0
-        
-        # 硬编码方式 (模拟 jingni-trader 当前做法)
-        t0 = time.time()
-        df = self.test_data.copy()
-        hard_coded = df[['code', 'date']].copy()
-        hard_coded['ret_5d'] = df.groupby('code')['close'].pct_change(5)
-        hard_coded['ret_20d'] = df.groupby('code')['close'].pct_change(20)
-        hard_coded['volatility_20d'] = df.groupby('code')['close'].transform(
-            lambda x: x.pct_change().rolling(20, min_periods=10).std()
+        for code in codes:
+            n = len(dates)
+            start_price = np.random.uniform(5, 50)
+            returns = np.random.normal(0.0005, 0.015, n)
+            prices = start_price * np.cumprod(1 + returns)
+            volumes = np.random.lognormal(12, 1, n).astype(int)
+
+            df_code = pd.DataFrame({
+                "code": code,
+                "date": dates,
+                "open": prices * (1 + np.random.normal(0, 0.003, n)),
+                "high": prices * (1 + np.abs(np.random.normal(0, 0.01, n))),
+                "low": prices * (1 - np.abs(np.random.normal(0, 0.01, n))),
+                "close": prices,
+                "volume": volumes,
+                "amount": prices * volumes,
+                "turnover_rate": np.random.uniform(0.01, 0.05, n),
+                "change_pct": np.concatenate([[0], np.diff(prices) / prices[:-1] * 100]),
+            })
+            rows.append(df_code)
+
+        cls.test_data = pd.concat(rows, ignore_index=True).sort_values(["code", "date"])
+
+    def test_basic_column_reference(self):
+        """测试基本列引用"""
+        engine = ExpressionFactorEngine(self.test_data)
+        result = engine.evaluate("$close")
+        pd.testing.assert_series_equal(
+            result.reset_index(drop=True),
+            self.test_data["close"].reset_index(drop=True),
         )
-        hard_coded['ma20_bias'] = df['close'] / df.groupby('code')['close'].transform(
-            lambda x: x.rolling(20, min_periods=10).mean()
-        ) - 1
-        hard_coded['volume_ratio_20'] = df['volume'] / df.groupby('code')['volume'].transform(
-            lambda x: x.rolling(20, min_periods=10).mean()
+
+    def test_simple_expression(self):
+        """测试简单表达式: $close / $open - 1"""
+        engine = ExpressionFactorEngine(self.test_data)
+        result = engine.evaluate("$close / $open - 1")
+        expected = self.test_data["close"] / self.test_data["open"] - 1
+        pd.testing.assert_series_equal(
+            result.round(6).reset_index(drop=True),
+            expected.round(6).reset_index(drop=True),
         )
-        t_hard = time.time() - t0
-        
-        print(f"\n[性能对比] 数据量: {len(self.test_data)} 条, 因子数: {len(factors)}")
-        print(f"  表达式方式: {t_expr*1000:.1f} ms")
-        print(f"  硬编码方式: {t_hard*1000:.1f} ms")
-        print(f"  表达式/硬编码: {t_expr/t_hard:.2f}x")
-        print(f"  注意: 当前表达式引擎为纯 Python 实现，后续可用 numba/jit 优化")
-    
-    def test_complex_alpha_expression(self):
-        """测试复杂 Alpha 因子表达式"""
-        # 借鉴 Qlib 的 Alpha 因子定义方式
-        # Alpha: 20日反转因子（标准化）
-        alpha_expr = 'Rank(-PctChange($close, 20))'
-        fe = FactorExpression(alpha_expr)
-        result = fe.evaluate(self.test_data)
-        
-        self.assertEqual(len(result), len(self.test_data))
-        self.assertFalse(result.isna().all())
-        
-        # Alpha: 波动率调整动量
-        alpha2_expr = 'Rank(PctChange($close, 5)) / (1 + Std(PctChange($close, 1), 20))'
-        fe2 = FactorExpression(alpha2_expr)
-        result2 = fe2.evaluate(self.test_data)
-        
-        self.assertEqual(len(result2), len(self.test_data))
-        
-        print(f"[复杂Alpha] 表达式: {alpha_expr}, 值范围: [{result.min():.3f}, {result.max():.3f}]")
-        print(f"[复杂Alpha] 表达式: {alpha2_expr}, 值范围: [{result2.min():.3f}, {result2.max():.3f}]")
+
+    def test_ref_operator(self):
+        """测试 Ref 操作符: Ref($close, 5)"""
+        engine = ExpressionFactorEngine(self.test_data)
+        result = engine.evaluate("Ref($close, 5)")
+        expected = self.test_data.groupby("code")["close"].shift(5)
+        self.assertTrue(result.notna().sum() < len(result))  # 前5天为NaN
+
+    def test_momentum_factor(self):
+        """测试动量因子: $close / Ref($close, 20) - 1"""
+        engine = ExpressionFactorEngine(self.test_data)
+        result = engine.evaluate("$close / Ref($close, 20) - 1")
+        # 手动计算
+        shifted = self.test_data.groupby("code")["close"].shift(20)
+        expected = self.test_data["close"] / shifted - 1
+        # 忽略 Series name 差异（引擎返回的无名 Series）
+        result_vals = result.round(6).reset_index(drop=True)
+        expected_vals = expected.round(6).reset_index(drop=True)
+        result_vals.name = None
+        expected_vals.name = None
+        pd.testing.assert_series_equal(result_vals, expected_vals)
+
+    def test_mean_operator(self):
+        """测试 Mean 操作符: Mean($volume, 20)"""
+        engine = ExpressionFactorEngine(self.test_data)
+        result = engine.evaluate("Mean($volume, 20)")
+        expected = self.test_data.groupby("code")["volume"].transform(
+            lambda x: x.rolling(20, min_periods=1).mean()
+        )
+        pd.testing.assert_series_equal(
+            result.round(0).reset_index(drop=True),
+            expected.round(0).reset_index(drop=True),
+        )
+
+    def test_std_operator(self):
+        """测试 Std 操作符"""
+        engine = ExpressionFactorEngine(self.test_data)
+        result = engine.evaluate("Std($close, 20)")
+        expected = self.test_data.groupby("code")["close"].transform(
+            lambda x: x.rolling(20, min_periods=1).std()
+        )
+        pd.testing.assert_series_equal(
+            result.round(6).reset_index(drop=True),
+            expected.round(6).reset_index(drop=True),
+        )
+
+    def test_grouprank(self):
+        """测试 GroupRank 操作符"""
+        engine = ExpressionFactorEngine(self.test_data)
+        result = engine.evaluate("GroupRank($close)")
+        expected = self.test_data.groupby("code")["close"].rank(pct=True)
+        pd.testing.assert_series_equal(
+            result.round(6).reset_index(drop=True),
+            expected.round(6).reset_index(drop=True),
+        )
+
+    def test_log_expression(self):
+        """测试 log 函数"""
+        engine = ExpressionFactorEngine(self.test_data)
+        result = engine.evaluate("log($close)")
+        expected = np.log(self.test_data["close"].replace(0, np.nan))
+        pd.testing.assert_series_equal(
+            result.round(6).reset_index(drop=True),
+            expected.round(6).reset_index(drop=True),
+        )
+
+    def test_caching(self):
+        """测试缓存机制"""
+        engine = ExpressionFactorEngine(self.test_data)
+        t1 = time.perf_counter()
+        result1 = engine.evaluate("$close / Ref($close, 20) - 1")
+        t2 = time.perf_counter()
+        result2 = engine.evaluate("$close / Ref($close, 20) - 1")
+        t3 = time.perf_counter()
+
+        first_call = t2 - t1
+        cached_call = t3 - t2
+
+        pd.testing.assert_series_equal(
+            result1.reset_index(drop=True),
+            result2.reset_index(drop=True),
+        )
+        self.assertLess(cached_call, first_call * 0.5,
+                        f"缓存未加速: 首次={first_call:.6f}s, 缓存={cached_call:.6f}s")
 
 
-if __name__ == '__main__':
+class TestExpressionVsHardcoded(unittest.TestCase):
+    """对比：表达式引擎 vs 硬编码"""
+
+    FACTOR_DEFINITIONS = {
+        "ret_1d": "$close / Ref($close, 1) - 1",
+        "ret_5d": "$close / Ref($close, 5) - 1",
+        "ret_20d": "$close / Ref($close, 20) - 1",
+        "ret_60d": "$close / Ref($close, 60) - 1",
+        "reversal_5d": "-($close / Ref($close, 5) - 1)",
+        "reversal_20d": "-($close / Ref($close, 20) - 1)",
+        "volatility_20d": "Std($close / Ref($close, 1) - 1, 20)",
+        "volume_ratio": "$volume / Mean($volume, 20)",
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        np.random.seed(42)
+        codes = [f"{i:06d}.SH" for i in range(600000, 600020)]
+        dates = pd.date_range("2023-01-01", "2024-12-31", freq="B")
+
+        rows = []
+        for code in codes:
+            n = len(dates)
+            start_price = np.random.uniform(5, 50)
+            returns = np.random.normal(0.0005, 0.015, n)
+            prices = start_price * np.cumprod(1 + returns)
+            volumes = np.random.lognormal(12, 1, n).astype(int)
+
+            df_code = pd.DataFrame({
+                "code": code,
+                "date": dates,
+                "open": prices * (1 + np.random.normal(0, 0.003, n)),
+                "high": prices * (1 + np.abs(np.random.normal(0, 0.01, n))),
+                "low": prices * (1 - np.abs(np.random.normal(0, 0.01, n))),
+                "close": prices,
+                "volume": volumes,
+                "amount": prices * volumes,
+                "turnover_rate": np.random.uniform(0.01, 0.05, n),
+            })
+            rows.append(df_code)
+
+        cls.test_data = pd.concat(rows, ignore_index=True)
+
+    def test_correctness_comparison(self):
+        """验证表达式引擎与硬编码的结果一致性"""
+        hw_result = compute_factors_hardcoded(self.test_data)
+        expr_result = compute_factors_expression(self.test_data, self.FACTOR_DEFINITIONS)
+
+        for col in ["ret_1d", "ret_5d", "ret_20d", "ret_60d",
+                     "reversal_5d", "reversal_20d", "volatility_20d", "volume_ratio"]:
+            hw = hw_result[col].dropna()
+            ex = expr_result[col].dropna()
+            common_idx = hw.index.intersection(ex.index)
+            diff = (hw.loc[common_idx] - ex.loc[common_idx]).abs()
+            max_diff = diff.max() if len(diff) > 0 else 0
+            self.assertLess(max_diff, 1e-6,
+                            f"列 {col} 差异过大: max_diff={max_diff:.10f}")
+
+    def test_performance_comparison(self):
+        """性能对比"""
+        n_runs = 5
+
+        # 硬编码方式
+        hw_times = []
+        for _ in range(n_runs):
+            t1 = time.perf_counter()
+            compute_factors_hardcoded(self.test_data)
+            t2 = time.perf_counter()
+            hw_times.append(t2 - t1)
+
+        # 表达式方式（含缓存清除）
+        expr_times = []
+        for _ in range(n_runs):
+            t1 = time.perf_counter()
+            compute_factors_expression(self.test_data, self.FACTOR_DEFINITIONS)
+            t2 = time.perf_counter()
+            expr_times.append(t2 - t1)
+
+        avg_hw = np.mean(hw_times)
+        avg_expr = np.mean(expr_times)
+
+        print(f"\n性能对比 ({len(self.test_data)} 行, {n_runs} 次平均):")
+        print(f"  硬编码方式: {avg_hw:.4f}s")
+        print(f"  表达式方式: {avg_expr:.4f}s")
+        print(f"  比率: {avg_expr / avg_hw:.2f}x")
+
+    def test_extensibility_demo(self):
+        """演示表达式引擎的扩展性优势"""
+        # 硬编码方式: 新增因子需修改代码
+        # 表达式方式: 只需添加一行配置
+        new_factors = {
+            **self.FACTOR_DEFINITIONS,
+            # 新增两个因子，无需修改引擎代码
+            "momentum_10d": "$close / Ref($close, 10) - 1",
+            "turnover_5d": "Mean($turnover, 5)",
+            "vol_rank_20d": "GroupRank(Std($close / Ref($close, 1) - 1, 20))",
+            "volume_breakout": "$volume / Mean($volume, 20) - 1",
+            "price_ma_ratio": "$close / Mean($close, 20)",
+        }
+
+        result = compute_factors_expression(self.test_data, new_factors)
+        self.assertIn("momentum_10d", result.columns)
+        self.assertIn("turnover_5d", result.columns)
+        self.assertIn("vol_rank_20d", result.columns)
+        self.assertIn("volume_breakout", result.columns)
+        self.assertIn("price_ma_ratio", result.columns)
+
+        # 验证可扩展性：因子数可以轻松从 8 扩展到 13
+        self.assertEqual(len(new_factors), 13)
+        print("\n✓ 表达式引擎成功计算所有 {0} 个因子".format(len(new_factors)))
+        print(f"  新增因子: momentum_10d, turnover_5d, vol_rank_20d, volume_breakout, price_ma_ratio")
+
+
+if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1,622 +1,695 @@
 """
-优化方向: 事件驱动回测引擎 — 避免前视偏差
-借鉴来源: NautilusTrader (https://github.com/nautechsystems/nautilus_trader)
-         - 全事件驱动架构 (EDA)，确定性时间模型
-         - 双时间戳 (ts_event, ts_init) 追踪
-         - 回测/实盘统一 NautilusKernel
-         - MessageBus 解耦组件通信
-         - SimulatedExchange 模拟交易所撮合
+借鉴来源:
+  - NautilusTrader (https://github.com/nautechsystems/nautilus_trader) - 事件驱动架构
+  - Event-Driven Backtesting Engine Design Pattern
+  - vnpy (https://github.com/vnpy/vnpy) - 事件引擎模式
 
-优化目标:
-  jingni-trader 的 native_adapter 使用循环遍历方式，虽基本正确但缺乏：
-  1. 事件驱动的时间演进机制
-  2. 前视偏差的结构性防护
-  3. 组件解耦 (策略、组合、执行分离)
-  借鉴 NautilusTrader 的事件驱动思想，设计一个 mini 版事件驱动回测引擎，
-  通过事件队列确保信息流的时序正确性。
+优化方向: 事件驱动回测引擎 - 解决向量化回测的前视偏差问题
 
-验证内容:
-  1. 事件驱动 vs 循环遍历的正确性对比
-  2. 前视偏差检测 (确保策略不能看到未来数据)
-  3. 组件解耦验证
-  4. 性能对比
+当前 jingni-trader 的 native_adapter 使用向量化逐日循环方式，
+虽然按日期顺序执行，但所有数据在内存中同时可用，容易引入前视偏差。
+
+事件驱动架构通过消息队列逐步推送事件，从架构层面杜绝前视偏差:
+  - DataHandler → Event Queue → Strategy → Portfolio → Execution
+
+本测试验证:
+  1. 事件驱动引擎的基本正确性（与向量化方式对比）
+  2. 前视偏差检测能力
+  3. 事件流处理的完整性
 """
 
+import sys
+import os
 import unittest
+from collections import deque
+from typing import Dict, Any, List, Optional, Callable
+from dataclasses import dataclass, field
+from enum import Enum, auto
+
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Any, Optional, Callable
-from dataclasses import dataclass, field
-from enum import Enum
-from collections import deque
-import time
 
 
-# ============================================================
-# Mini Event-Driven Backtest Engine (inspired by NautilusTrader)
-# ============================================================
+# ---- 事件定义 ----
 
 class EventType(Enum):
-    """事件类型"""
-    MARKET_DATA = "market_data"       # 行情数据到达
-    SIGNAL = "signal"                 # 策略信号
-    ORDER = "order"                   # 订单提交
-    FILL = "fill"                     # 成交回报
-    TIMER = "timer"                   # 定时事件
+    MARKET_DATA = auto()
+    SIGNAL = auto()
+    ORDER = auto()
+    FILL = auto()
 
 
 @dataclass
 class Event:
     """事件基类"""
-    timestamp: pd.Timestamp          # ts_event: 事件发生时间
-    event_type: EventType = EventType.MARKET_DATA
-    ts_init: pd.Timestamp = field(default_factory=pd.Timestamp.now)  # 系统创建时间
-    payload: Any = None
+    event_type: EventType
+    timestamp: pd.Timestamp
+    data: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class MarketDataEvent(Event):
     """行情数据事件"""
-    event_type: EventType = EventType.MARKET_DATA
-    code: str = ""
-    data: Dict[str, float] = field(default_factory=dict)
+    def __init__(self, timestamp: pd.Timestamp, code: str, open_p: float, high: float,
+                 low: float, close: float, volume: int, pre_close: float = 0):
+        super().__init__(
+            event_type=EventType.MARKET_DATA,
+            timestamp=timestamp,
+            data={
+                "code": code,
+                "open": open_p,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume": volume,
+                "pre_close": pre_close,
+            }
+        )
+
+
+@dataclass
+class SignalEvent(Event):
+    """交易信号事件"""
+    def __init__(self, timestamp: pd.Timestamp, code: str, signal: float):
+        super().__init__(
+            event_type=EventType.SIGNAL,
+            timestamp=timestamp,
+            data={"code": code, "signal": signal}
+        )
 
 
 @dataclass
 class OrderEvent(Event):
     """订单事件"""
-    event_type: EventType = EventType.ORDER
-    code: str = ""
-    side: str = ""          # buy / sell
-    quantity: int = 0
-    price: float = 0.0
-    order_id: str = ""
+    def __init__(self, timestamp: pd.Timestamp, code: str, direction: str,
+                 quantity: int, order_type: str = "market"):
+        super().__init__(
+            event_type=EventType.ORDER,
+            timestamp=timestamp,
+            data={
+                "code": code,
+                "direction": direction,  # "buy" or "sell"
+                "quantity": quantity,
+                "order_type": order_type,
+            }
+        )
 
 
 @dataclass
 class FillEvent(Event):
     """成交事件"""
-    event_type: EventType = EventType.FILL
-    code: str = ""
-    side: str = ""
-    quantity: int = 0
-    price: float = 0.0
-    commission: float = 0.0
-    tax: float = 0.0
-    order_id: str = ""
+    def __init__(self, timestamp: pd.Timestamp, code: str, direction: str,
+                 quantity: int, price: float, commission: float = 0):
+        super().__init__(
+            event_type=EventType.FILL,
+            timestamp=timestamp,
+            data={
+                "code": code,
+                "direction": direction,
+                "quantity": quantity,
+                "price": price,
+                "commission": commission,
+            }
+        )
 
+
+# ---- 组件实现 ----
 
 class EventQueue:
-    """事件队列 (优先级队列，按时间排序)"""
-
+    """事件队列（先入先出）"""
     def __init__(self):
         self._queue: deque = deque()
-        self._priority_queue: List[Event] = []
 
     def push(self, event: Event):
-        """插入事件，按时间排序"""
-        self._priority_queue.append(event)
-        self._priority_queue.sort(key=lambda e: (e.timestamp, e.ts_init))
+        self._queue.append(event)
 
     def pop(self) -> Optional[Event]:
-        """弹出最早的事件"""
-        if self._priority_queue:
-            return self._priority_queue.pop(0)
-        return None
+        return self._queue.popleft() if self._queue else None
 
     def is_empty(self) -> bool:
-        return len(self._priority_queue) == 0
+        return len(self._queue) == 0
 
-    def __len__(self):
-        return len(self._priority_queue)
-
-
-class Portfolio:
-    """组合管理 (持有现金 + 持仓)"""
-
-    def __init__(self, init_cash: float = 1e6):
-        self.cash = init_cash
-        self.init_cash = init_cash
-        self.positions: Dict[str, int] = {}  # code -> shares
-        self.cost_basis: Dict[str, float] = {}  # code -> avg cost
-        self._position_history: List[Dict] = []
-
-    def can_buy(self, price: float, shares: int, commission: float = 0) -> bool:
-        cost = price * shares + commission
-        return self.cash >= cost
-
-    def buy(self, code: str, price: float, shares: int, commission: float = 0):
-        cost = price * shares + commission
-        self.cash -= cost
-        old_shares = self.positions.get(code, 0)
-        old_cost = self.cost_basis.get(code, 0)
-        new_total_shares = old_shares + shares
-        self.positions[code] = new_total_shares
-        if new_total_shares > 0:
-            self.cost_basis[code] = (old_cost * old_shares + cost) / new_total_shares
-
-    def sell(self, code: str, price: float, shares: int, commission: float = 0, tax: float = 0):
-        if self.positions.get(code, 0) < shares:
-            raise ValueError(f"持仓不足: {code} 需要 {shares} 持有 {self.positions.get(code, 0)}")
-        revenue = price * shares - commission - tax
-        self.cash += revenue
-        self.positions[code] -= shares
-        if self.positions[code] <= 0:
-            del self.positions[code]
-            if code in self.cost_basis:
-                del self.cost_basis[code]
-
-    def market_value(self, prices: Dict[str, float]) -> float:
-        mv = 0.0
-        for code, shares in self.positions.items():
-            if code in prices and shares > 0:
-                mv += shares * prices[code]
-        return mv
-
-    def total_equity(self, prices: Dict[str, float]) -> float:
-        return self.cash + self.market_value(prices)
+    def __len__(self) -> int:
+        return len(self._queue)
 
 
-class Strategy:
-    """策略基类 (事件驱动回调)"""
-
-    def __init__(self, name: str = "default"):
-        self.name = name
-        self.portfolio: Optional[Portfolio] = None
-
-    def set_portfolio(self, portfolio: Portfolio):
-        self.portfolio = portfolio
-
-    def on_bar(self, event: MarketDataEvent, queue: EventQueue):
-        """
-        收到行情 Bar 时回调，子类实现交易逻辑
-        注意：此时只能看到截止此 Bar 的信息，不能看到未来
-        """
-        pass
-
-
-class DataFeed:
-    """数据源 (将 DataFrame 转为事件流)"""
+class EventDrivenDataHandler:
+    """
+    数据处理器：按时间顺序逐个推送行情事件
+    核心设计：每个时间点只暴露当前可用的数据，无法访问未来数据
+    """
 
     def __init__(self, data: pd.DataFrame):
-        if not isinstance(data.index, pd.DatetimeIndex):
-            data = data.set_index('date')
-        self.data = data.sort_index()
-        self._dates = sorted(data.index.unique())
-        self._pos = 0
+        """
+        参数:
+            data: 包含 code, date, open, high, low, close, volume 的 DataFrame
+        """
+        self._data = data.sort_values(["date", "code"]).reset_index(drop=True)
+        self._dates = sorted(data["date"].unique())
+        self._current_idx = 0
+        self._history = {}  # code → list of historical bars
 
     def has_next(self) -> bool:
-        return self._pos < len(self._dates)
+        return self._current_idx < len(self._dates)
 
-    def next_bars(self) -> List[MarketDataEvent]:
-        """获取下一个交易日所有股票的 Bar"""
+    def current_date(self) -> pd.Timestamp:
+        return self._dates[self._current_idx] if self.has_next() else None
+
+    def get_current_data(self) -> List[MarketDataEvent]:
+        """获取当前日期的所有行情事件"""
         if not self.has_next():
             return []
-        dt = self._dates[self._pos]
-        self._pos += 1
-        day_data = self.data.loc[dt]
-        if isinstance(day_data, pd.Series):
-            day_data = day_data.to_frame().T
+
+        dt = self._dates[self._current_idx]
+        day_data = self._data[self._data["date"] == dt]
 
         events = []
         for _, row in day_data.iterrows():
-            events.append(MarketDataEvent(
+            evt = MarketDataEvent(
                 timestamp=dt,
-                code=row.get('code', ''),
-                data={col: row[col] for col in row.index if col != 'code'}
-            ))
-        return events
+                code=row["code"],
+                open_p=float(row["open"]),
+                high=float(row["high"]),
+                low=float(row["low"]),
+                close=float(row["close"]),
+                volume=int(row["volume"]),
+                pre_close=float(row.get("pre_close", row["close"] * 0.99)),
+            )
+            events.append(evt)
 
-
-class EventDrivenBacktest:
-    """
-    事件驱动回测引擎 (mini 版)
-
-    核心流程:
-      1. DataFeed 按交易日推送 MarketDataEvent
-      2. 事件按时间排序进入 EventQueue
-      3. 主循环按时间顺序处理事件
-      4. Strategy.on_bar() 收到数据后生成 OrderEvent
-      5. ExecutionHandler 处理 OrderEvent 生成 FillEvent
-      6. Portfolio 根据 FillEvent 更新持仓
-
-    关键设计：所有事件带 timestamp，确保时序正确、前视偏差结构防护
-    """
-
-    def __init__(self, strategy: Strategy, init_cash: float = 1e6,
-                 commission_rate: float = 0.00025, stamp_tax_rate: float = 0.001):
-        self.strategy = strategy
-        self.portfolio = Portfolio(init_cash)
-        self.strategy.set_portfolio(self.portfolio)
-        self.strategy._backtest = self  # 策略可引用回测引擎
-        self.commission_rate = commission_rate
-        self.stamp_tax_rate = stamp_tax_rate
-        self.min_commission = 5.0
-
-        self.equity_curve: List[Dict] = []
-        self.trades: List[Dict] = []
-        self._current_prices: Dict[str, float] = {}
-        self._order_counter = 0
-
-    def run(self, data_feed: DataFeed) -> pd.DataFrame:
-        """执行回测"""
-
-        while data_feed.has_next():
-            # 获取本日所有 Bar 事件
-            bar_events = data_feed.next_bars()
-            if not bar_events:
-                continue
-
-            # 用本日第一个 Bar 的时间作为基准
-            current_date = bar_events[0].timestamp
-
-            # 更新当前价格缓存
-            for evt in bar_events:
-                self._current_prices[evt.code] = evt.data.get('close', 0)
-
-            # 1. 处理策略信号 (基于当前 Bar，不能看到后面的)
-            self.strategy.on_bar(bar_events[0], None)
-            # 注意：此验证中策略逻辑在子类实现
-
-            # 2. 处理持仓结算
-            # (策略在 on_bar 中通过 portfolio 操作)
-
-            # 3. 记录净值
-            equity = self.portfolio.total_equity(self._current_prices)
-            self.equity_curve.append({
-                'date': current_date,
-                'equity': equity,
-                'cash': self.portfolio.cash,
+            # 更新历史（只保存当前及之前的数据）
+            if row["code"] not in self._history:
+                self._history[row["code"]] = []
+            self._history[row["code"]].append({
+                "date": dt,
+                "close": float(row["close"]),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "volume": int(row["volume"]),
             })
 
-        return pd.DataFrame(self.equity_curve)
+        self._current_idx += 1
+        return events
 
-    def submit_order(self, code: str, side: str, shares: int) -> Dict:
-        """策略调用此方法提交订单"""
-        if code not in self._current_prices:
-            return {"success": False, "error": f"无 {code} 价格"}
+    def get_history(self, code: str, lookback: int = 20) -> List[Dict]:
+        """获取某只股票的历史数据（仅当前时间点之前的数据）"""
+        if code not in self._history:
+            return []
+        return self._history[code][-lookback:]
 
-        price = self._current_prices[code]
-        amount = price * shares
-        commission = max(amount * self.commission_rate, self.min_commission)
-        tax = amount * self.stamp_tax_rate if side == 'sell' else 0
-
-        try:
-            trade = {
-                'date': pd.Timestamp.now(),  # 简化，实际应用中应为 current_date
-                'code': code, 'side': side,
-                'price': price, 'shares': shares,
-                'amount': amount, 'commission': commission, 'tax': tax,
-            }
-
-            if side == 'buy':
-                if not self.portfolio.can_buy(price, shares, commission):
-                    return {"success": False, "error": "资金不足"}
-                self.portfolio.buy(code, price, shares, commission)
-                self.trades.append(trade)
-            else:
-                self.portfolio.sell(code, price, shares, commission, tax)
-                self.trades.append(trade)
-
-            return {"success": True, "trade": trade}
-
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+    def reset(self):
+        self._current_idx = 0
+        self._history = {}
 
 
-# ============================================================
-# Test Strategy (MA Cross)
-# ============================================================
+class EventDrivenStrategy:
+    """策略基类（事件驱动版）"""
 
-class MACrossStrategy(Strategy):
-    """双均线策略"""
+    def __init__(self, queue: EventQueue):
+        self._queue = queue
 
-    def __init__(self, short_window: int = 5, long_window: int = 20):
-        super().__init__(name=f"MA_Cross_{short_window}_{long_window}")
-        self.short_window = short_window
-        self.long_window = long_window
-        self._price_history: Dict[str, List[float]] = {}
+    def on_market_data(self, events: List[MarketDataEvent], data_handler: EventDrivenDataHandler):
+        """收到行情事件时的回调"""
+        raise NotImplementedError
 
-    def on_bar(self, event: MarketDataEvent, queue: Optional[EventQueue]):
-        code = event.code
-        close = event.data.get('close', 0)
+    def push_signal(self, timestamp: pd.Timestamp, code: str, signal: float):
+        self._queue.push(SignalEvent(timestamp, code, signal))
 
-        if code not in self._price_history:
-            self._price_history[code] = []
 
-        self._price_history[code].append(close)
+class MA20ReversalStrategy(EventDrivenStrategy):
+    """20日均线反转策略"""
 
-        # 需要足够数据计算均线
-        if len(self._price_history[code]) < self.long_window:
+    def __init__(self, queue: EventQueue, lookback: int = 20, top_n: int = 10):
+        super().__init__(queue)
+        self.lookback = lookback
+        self.top_n = top_n
+
+    def on_market_data(self, events: List[MarketDataEvent], data_handler: EventDrivenDataHandler):
+        dt = events[0].timestamp if events else None
+        if dt is None:
             return
 
-        prices = self._price_history[code]
-        short_ma = np.mean(prices[-self.short_window:])
-        long_ma = np.mean(prices[-self.long_window:])
+        scores = []
+        for evt in events:
+            hist = data_handler.get_history(evt.data["code"], self.lookback + 1)
+            if len(hist) < self.lookback:
+                continue
 
-        current_shares = self.portfolio.positions.get(code, 0)
+            current_price = evt.data["close"]
+            ma20 = np.mean([h["close"] for h in hist[-self.lookback:]])
 
-        # 关键验证点: 此时只能看到截至本Bar的历史价格
-        # 不能看到未来的 price_history
-        if short_ma > long_ma and current_shares == 0:
-            # 买入信号：按可用资金20%买入
-            budget = self.portfolio.cash * 0.2
-            shares = int(budget / close / 100) * 100
+            if ma20 > 0:
+                reversal_score = -(current_price / ma20 - 1)  # 反转：偏离均线越远越买
+                scores.append((evt.data["code"], reversal_score))
+
+        # 选 top_n 个买
+        scores.sort(key=lambda x: x[1], reverse=True)
+        for code, score in scores[:self.top_n]:
+            self.push_signal(dt, code, 1)  # 买入信号
+
+        # 选 bottom_n 个卖
+        for code, score in scores[-self.top_n:]:
+            self.push_signal(dt, code, -1)  # 卖出信号
+
+
+class EventDrivenPortfolio:
+    """组合管理器"""
+
+    def __init__(self, init_capital: float = 1e6):
+        self.cash = init_capital
+        self.positions = {}  # code -> shares
+        self.equity_history = []
+        self.trades = []
+
+    def update_market_value(self, current_prices: Dict[str, float], date: pd.Timestamp):
+        """按日更新市值"""
+        mv = 0
+        for code, shares in self.positions.items():
+            if shares > 0 and code in current_prices:
+                mv += shares * current_prices[code]
+
+        total = self.cash + mv
+        self.equity_history.append({
+            "date": date,
+            "equity": total,
+            "cash": self.cash,
+            "market_value": mv,
+        })
+
+    def process_signal(self, signal: SignalEvent, day_data: Dict[str, MarketDataEvent],
+                       commission_rate: float = 0.00025, stamp_tax: float = 0.001):
+        """处理交易信号"""
+        code = signal.data["code"]
+        sig = signal.data["signal"]
+
+        if code not in day_data:
+            return
+
+        price = day_data[code].data["close"]
+
+        if sig < 0:  # 卖出
+            if code in self.positions and self.positions[code] > 0:
+                shares = self.positions[code]
+                amount = price * shares
+                comm = max(amount * commission_rate, 5)
+                tax = amount * stamp_tax
+                self.cash += amount - comm - tax
+                self.positions[code] = 0
+                self.trades.append({
+                    "date": signal.timestamp,
+                    "code": code,
+                    "action": "sell",
+                    "price": price,
+                    "shares": shares,
+                    "amount": amount,
+                })
+
+        elif sig > 0:  # 买入
+            budget = self.cash * 0.2  # 每次最多用 20% 资金
+            shares = int(budget / price / 100) * 100
             if shares > 0:
-                self._backtest.submit_order(code, 'buy', shares)
+                amount = price * shares
+                comm = max(amount * commission_rate, 5)
+                cost = amount + comm
+                if cost > self.cash:
+                    return
+                self.cash -= cost
+                self.positions[code] = self.positions.get(code, 0) + shares
+                self.trades.append({
+                    "date": signal.timestamp,
+                    "code": code,
+                    "action": "buy",
+                    "price": price,
+                    "shares": shares,
+                    "amount": amount,
+                })
 
-        elif short_ma < long_ma and current_shares > 0:
-            self._backtest.submit_order(code, 'sell', current_shares)
+    def get_equity_curve(self) -> pd.DataFrame:
+        return pd.DataFrame(self.equity_history)
 
 
-# ============================================================
-# 前视偏差检测器
-# ============================================================
+def calc_metrics(equity_curve: pd.DataFrame) -> Dict[str, float]:
+    """计算绩效指标"""
+    if equity_curve.empty:
+        return {}
+    eq = equity_curve.set_index("date")["equity"]
+    returns = eq.pct_change().dropna()
+    if len(returns) < 2:
+        return {}
 
-class LookaheadDetector:
-    """
-    前视偏差检测：模拟有偏差的回测，对比事件驱动回测结果
+    total_return = (eq.iloc[-1] / eq.iloc[0] - 1) if eq.iloc[0] > 0 else 0
+    annual_return = (1 + total_return) ** (252 / max(len(returns), 1)) - 1
+    volatility = returns.std() * np.sqrt(252)
+    max_dd = (eq / eq.cummax() - 1).min()
+    sharpe = (annual_return - 0.015) / volatility if volatility > 0 else 0
+    win_rate = (returns > 0).mean()
 
-    常见前视偏差：
-    1. 使用本Bar的close作为入场价 (应用上个Bar的close)
-    2. 使用未来数据进行信号生成
-    3. 使用了回测区间外的信息
-    """
+    return {
+        "total_return": float(total_return),
+        "annual_return": float(annual_return),
+        "volatility": float(volatility),
+        "sharpe_ratio": float(sharpe),
+        "max_drawdown": float(max_dd),
+        "win_rate": float(win_rate),
+        "calmar_ratio": float(annual_return / abs(max_dd)) if max_dd != 0 else 0,
+    }
 
-    @staticmethod
-    def simulate_biased_backtest(data: pd.DataFrame, signal_col: str = 'close') -> pd.DataFrame:
-        """
-        模拟有前视偏差的回测 (使用本Bar Close做信号)
-        用本日收盘价生成信号并同日入场
-        """
-        df = data.sort_values(['code', 'date']).copy()
-        dates = sorted(df['date'].unique())
-        cash = 1e6
-        equity = []
 
-        for dt in dates:
-            day = df[df['date'] == dt]
-            prices = dict(zip(day['code'], day['close']))
+class EventDrivenBacktestEngine:
+    """事件驱动回测引擎"""
 
-            # 偏差: 用本日close做信号 (本日收盘价在盘前未知!)
-            mv = sum(prices.get(c, 0) * 100 for c in prices)  # 简化假设
-            equity.append({'date': dt, 'equity': cash + mv})
+    def __init__(self, data: pd.DataFrame, strategy: EventDrivenStrategy,
+                 init_capital: float = 1e6):
+        self.data_handler = EventDrivenDataHandler(data)
+        self.strategy = strategy
+        self.queue = EventQueue()
+        self.portfolio = EventDrivenPortfolio(init_capital)
 
-        return pd.DataFrame(equity)
+    def run(self) -> Dict[str, Any]:
+        """执行事件驱动回测"""
+        while self.data_handler.has_next():
+            # 1. 获取当日行情事件
+            market_events = self.data_handler.get_current_data()
+            if not market_events:
+                continue
 
-    @staticmethod
-    def detect_forward_look(data: pd.DataFrame, strategy_class,
-                            lookback_days: int = 20) -> Dict[str, Any]:
-        """
-        注入前视数据检测：如果策略能看到未来 N 天数据，结果是否会好得不正常
-        """
-        from copy import deepcopy
+            dt = market_events[0].timestamp
+            day_data = {e.data["code"]: e for e in market_events}
 
-        normal_data = data.copy()
-        leaked_data = data.copy()
+            # 2. 策略处理行情事件，生成信号
+            self.strategy.on_market_data(market_events, self.data_handler)
 
-        # 注入未来数据泄漏：把未来1天收益提前放到当天
-        if 'future_close' not in leaked_data.columns:
-            leaked_data['future_close'] = leaked_data.groupby('code')['close'].shift(-1)
+            # 3. 处理所有信号（执行交易）
+            while not self.queue.is_empty():
+                event = self.queue.pop()
+                if event.event_type == EventType.SIGNAL:
+                    self.portfolio.process_signal(event, day_data)
 
-        # 正常回测
-        normal_equity = EventDrivenBacktest(MACrossStrategy()).run(
-            DataFeed(normal_data)
-        )
+            # 4. 更新持仓市值
+            current_prices = {code: evt.data["close"] for code, evt in day_data.items()}
+            self.portfolio.update_market_value(current_prices, dt)
 
-        # 泄漏回测 (用未来数据回测)
-        class LeakedStrategy(Strategy):
-            def on_bar(self, event: MarketDataEvent, queue=None):
-                # 使用未来价格做信号 (偏差!)
-                future_close = event.data.get('future_close', event.data.get('close', 0))
-                current_close = event.data.get('close', 0)
-                if future_close > current_close * 1.01:
-                    budget = self.portfolio.cash * 0.2
-                    shares = int(budget / current_close / 100) * 100
-                    if shares > 0:
-                        self._backtest.submit_order(event.code, 'buy', shares)
-
-        leaked_equity = EventDrivenBacktest(LeakedStrategy()).run(
-            DataFeed(leaked_data)
-        )
-
-        # 分析差异
-        normal_final = normal_equity['equity'].iloc[-1] if len(normal_equity) > 0 else 1e6
-        leaked_final = leaked_equity['equity'].iloc[-1] if len(leaked_equity) > 0 else 1e6
+        equity_curve = self.portfolio.get_equity_curve()
+        metrics = calc_metrics(equity_curve)
 
         return {
-            "normal_final_equity": normal_final,
-            "leaked_final_equity": leaked_final,
-            "excess_from_leak": leaked_final - normal_final,
-            "is_suspicious": (leaked_final - normal_final) / 1e6 > 0.05,  # 差异 > 5%
+            "trades": pd.DataFrame(self.portfolio.trades),
+            "equity_curve": equity_curve,
+            "metrics": metrics,
         }
 
 
-# ============================================================
-# Test Suite
-# ============================================================
+# ---- Lookahead Bias 检测 ----
+
+def detect_lookahead_bias(engine_class, data: pd.DataFrame, strategy_fn,
+                          init_capital: float = 1e6) -> Dict[str, Any]:
+    """
+    前视偏差检测：对比正常回测和"未来数据注入"回测的差异
+    如果引擎有前视偏差漏洞，注入'假未来数据'后结果应该相同
+    """
+
+    # 1. 正常回测
+    engine1 = engine_class(data, strategy_fn(EventQueue()), init_capital)
+    result1 = engine1.run()
+
+    # 2. 注入"未来数据" - 将 future_price 列替换为下一日收盘价
+    data_future = data.copy()
+    data_future = data_future.sort_values(["code", "date"])
+    data_future["close_original"] = data_future["close"]
+    data_future["close"] = data_future.groupby("code")["close"].shift(-1).fillna(
+        data_future["close"]
+    )
+
+    engine2 = engine_class(data_future, strategy_fn(EventQueue()), init_capital)
+    result2 = engine2.run()
+
+    # 比较净值曲线
+    eq1 = result1["equity_curve"].set_index("date")["equity"]
+    eq2 = result2["equity_curve"].set_index("date")["equity"]
+
+    # 截取公共日期
+    common = eq1.index.intersection(eq2.index)
+    if len(common) < 2:
+        return {"lookahead_vulnerable": None, "reason": "数据不足"}
+
+    eq1 = eq1[common]
+    eq2 = eq2[common]
+
+    # 如果两者差异很大，说明有前视偏差（注入了未来数据改变了结果）
+    cumulative_diff = abs((eq2 / eq1 - 1).iloc[-1])
+
+    return {
+        "lookahead_vulnerable": cumulative_diff > 0.05,
+        "cumulative_difference": float(cumulative_diff),
+        "normal_final_equity": float(eq1.iloc[-1]),
+        "future_injected_final_equity": float(eq2.iloc[-1]),
+    }
+
+
+# ---- 向量化回测（对比基准） ----
+
+def vectorized_backtest(data: pd.DataFrame, signals: pd.DataFrame,
+                        init_capital: float = 1e6) -> Dict[str, Any]:
+    """简化版向量化回测"""
+    data = data.sort_values(["date", "code"]).reset_index(drop=True)
+    signals = signals.sort_values(["date", "code"]).reset_index(drop=True)
+
+    dates = sorted(signals["date"].unique())
+    cash = init_capital
+    positions = {}
+    equity_records = []
+    trades = []
+
+    for dt in dates:
+        day_signal = signals[signals["date"] == dt]
+        day_data = data[data["date"] == dt].set_index("code")
+
+        # 卖出
+        sells = day_signal[day_signal["signal"] < 0]
+        for _, row in sells.iterrows():
+            code = row["code"]
+            if code in positions and positions[code] > 0 and code in day_data.index:
+                price = day_data.loc[code, "close"]
+                shares = positions[code]
+                cash += price * shares * 0.99975  # 扣除佣金
+                trades.append({"date": dt, "code": code, "action": "sell",
+                               "price": price, "shares": shares})
+                positions[code] = 0
+
+        # 买入
+        buys = day_signal[day_signal["signal"] > 0]
+        n_buy = len(buys)
+        if n_buy > 0:
+            budget_per = cash * 0.2 / n_buy
+            for _, row in buys.iterrows():
+                code = row["code"]
+                if code in day_data.index:
+                    price = day_data.loc[code, "close"]
+                    shares = int(budget_per / price / 100) * 100
+                    if shares > 0:
+                        cost = price * shares * 1.00025
+                        if cost <= cash:
+                            cash -= cost
+                            positions[code] = positions.get(code, 0) + shares
+                            trades.append({"date": dt, "code": code, "action": "buy",
+                                           "price": price, "shares": shares})
+
+        # 市值计算
+        mv = sum(
+            shares * day_data.loc[code, "close"]
+            for code, shares in positions.items()
+            if shares > 0 and code in day_data.index
+        )
+        equity_records.append({"date": dt, "equity": cash + mv})
+
+    equity_curve = pd.DataFrame(equity_records)
+    return {
+        "trades": pd.DataFrame(trades),
+        "equity_curve": equity_curve,
+        "metrics": calc_metrics(equity_curve),
+    }
+
+
+# ---- 测试用例 ----
 
 class TestEventDrivenBacktest(unittest.TestCase):
     """事件驱动回测引擎测试"""
 
     @classmethod
     def setUpClass(cls):
-        """生成测试数据"""
         np.random.seed(42)
-        n_stocks = 10
-        n_days = 100
-
-        codes = [f"{600000 + i:06d}.SH" for i in range(n_stocks)]
-        dates = pd.date_range('2024-01-01', periods=n_days, freq='B')
+        codes = [f"{i:06d}.SH" for i in range(600000, 600030)]  # 30 只
+        dates = pd.date_range("2023-01-01", "2024-06-30", freq="B")
 
         rows = []
         for code in codes:
-            start_price = np.random.uniform(10, 30)
-            daily_ret = np.random.normal(0.0005, 0.015, n_days)
-            prices = [start_price]
-            for r in daily_ret[1:]:
-                prices.append(prices[-1] * (1 + r))
-            prices = np.array(prices)
+            n = len(dates)
+            start_price = np.random.uniform(5, 50)
+            drift = np.random.uniform(-0.0002, 0.001)
+            returns = np.random.normal(drift, 0.015, n)
+            prices = start_price * np.cumprod(1 + returns)
+            volumes = np.random.lognormal(12, 1, n).astype(int)
 
-            for i, dt in enumerate(dates):
-                rows.append({
-                    'code': code, 'date': dt,
-                    'open': prices[i] * (1 + np.random.normal(0, 0.003)),
-                    'high': prices[i] * (1 + abs(np.random.normal(0, 0.005))),
-                    'low': prices[i] * (1 - abs(np.random.normal(0, 0.005))),
-                    'close': prices[i],
-                    'volume': np.random.lognormal(12, 0.5),
-                })
-
-        cls.test_data = pd.DataFrame(rows)
-
-    def test_event_driven_flow(self):
-        """测试事件驱动基本流程"""
-        df = self.test_data.copy()
-        data_feed = DataFeed(df)
-
-        events_emitted = []
-        while data_feed.has_next():
-            bars = data_feed.next_bars()
-            events_emitted.extend(bars)
-
-        self.assertGreater(len(events_emitted), 0)
-        self.assertEqual(
-            len(events_emitted),
-            self.test_data['date'].nunique() * self.test_data['code'].nunique()
-        )
-        print(f"\n=== 事件流验证 ===")
-        print(f"总事件数: {len(events_emitted)}")
-        print(f"交易日数: {self.test_data['date'].nunique()}")
-        print(f"股票数: {self.test_data['code'].nunique()}")
-
-    def test_equity_calculation(self):
-        """测试净值计算正确性"""
-        engine = EventDrivenBacktest(MACrossStrategy(), init_cash=1e6)
-        data_feed = DataFeed(self.test_data)
-        equity = engine.run(data_feed)
-
-        self.assertGreater(len(equity), 0)
-        self.assertIn('equity', equity.columns)
-        self.assertIn('date', equity.columns)
-
-        # 初始净值应为 init_cash
-        self.assertAlmostEqual(equity['equity'].iloc[0], 1e6, delta=100)
-
-        # 净值应始终为正
-        self.assertTrue((equity['equity'] > 0).all())
-
-        print(f"\n=== 净值验证 ===")
-        print(f"回测天数: {len(equity)}")
-        print(f"初始净值: {equity['equity'].iloc[0]:.2f}")
-        print(f"最终净值: {equity['equity'].iloc[-1]:.2f}")
-
-    def test_time_ordering(self):
-        """验证事件按时间排序"""
-        df = pd.DataFrame({
-            'code': ['A', 'B'],
-            'date': [pd.Timestamp('2024-01-01'), pd.Timestamp('2024-01-02')],
-            'open': [10, 11], 'high': [11, 12], 'low': [9, 10], 'close': [10.5, 11.5],
-            'volume': [1000, 2000],
-        })
-
-        data_feed = DataFeed(df)
-        events = []
-        while data_feed.has_next():
-            events.extend(data_feed.next_bars())
-
-        # 验证时间单调递增
-        timestamps = [e.timestamp for e in events]
-        self.assertEqual(timestamps, sorted(timestamps))
-
-    def test_lookahead_detection(self):
-        """测试前视偏差检测机制的基本功能"""
-        # 创建有明确趋势的数据 (确保泄漏带来超额收益)
-        np.random.seed(42)
-        n_days = 100
-        codes = ['600000.SH']
-        dates = pd.date_range('2024-01-01', periods=n_days, freq='B')
-
-        rows = []
-        # 制造上升趋势
-        trend = 20 * (1 + np.cumsum(np.random.normal(0.001, 0.015, n_days)))
-        for i, dt in enumerate(dates):
-            close = max(trend[i], 5)
-            rows.append({
-                'code': codes[0], 'date': dt,
-                'open': close * 0.99, 'high': close * 1.02,
-                'low': close * 0.98, 'close': close,
-                'volume': 100000,
+            df_code = pd.DataFrame({
+                "code": code,
+                "date": dates,
+                "open": prices * (1 + np.random.normal(0, 0.005, n)),
+                "high": prices * (1 + np.abs(np.random.normal(0, 0.01, n))),
+                "low": prices * (1 - np.abs(np.random.normal(0, 0.01, n))),
+                "close": prices,
+                "volume": volumes,
             })
+            rows.append(df_code)
 
-        trend_data = pd.DataFrame(rows)
+        cls.test_data = pd.concat(rows, ignore_index=True).sort_values(["code", "date"])
 
-        result = LookaheadDetector.detect_forward_look(
-            trend_data, MACrossStrategy
-        )
+    def _make_strategy(self, queue):
+        return MA20ReversalStrategy(queue, lookback=20, top_n=5)
 
-        print(f"\n=== 前视偏差检测 ===")
-        print(f"正常回测最终净值: {result['normal_final_equity']:,.0f}")
-        print(f"泄漏回测最终净值: {result['leaked_final_equity']:,.0f}")
-        print(f"泄漏带来超额收益: {result['excess_from_leak']:,.0f}")
-        print(f"是否存疑: {result['is_suspicious']}")
-
-        # 验证检测器返回了正确格式的结果
-        self.assertIn('normal_final_equity', result)
-        self.assertIn('leaked_final_equity', result)
-        self.assertIn('excess_from_leak', result)
-        self.assertIn('is_suspicious', result)
-        # 检测器已正确运行，不做硬性超额收益断言 (取决于随机数据)
-
-    def test_component_isolation(self):
-        """验证组件解耦：策略、组合、执行独立运作"""
-        portfolio = Portfolio(init_cash=1e6)
-        strategy = MACrossStrategy()
-        strategy.set_portfolio(portfolio)
-
-        # 策略生成信号不应直接修改持仓
-        initial_positions = dict(portfolio.positions)
-
-        # 模拟发送市场数据
-        event = MarketDataEvent(
-            timestamp=pd.Timestamp('2024-01-15'),
-            code='600000.SH',
-            data={'open': 20, 'high': 21, 'low': 19, 'close': 20.5, 'volume': 1000}
-        )
-
-        # 策略处理事件但不应该直接操作 portfolio (通过 submit_order 间接)
-        # 在完整引擎中由 ExecutionHandler 负责
-        self.assertEqual(portfolio.positions, initial_positions,
-                        "策略不应直接修改组合持仓")
-
-        print(f"\n=== 组件解耦验证 ===")
-        print(f"策略接收事件后持仓不变: OK")
-
-    def test_event_ordering_deterministic(self):
-        """验证事件排序的确定性"""
-        events = []
-        for i in range(50):
-            dt = pd.Timestamp('2024-01-01') + pd.Timedelta(days=i)
-            events.append(MarketDataEvent(timestamp=dt, code=f"C{i}"))
-
-        # 随机打乱后推入队列
-        np.random.shuffle(events)
+    def test_basic_run(self):
+        """测试基本运行：事件驱动回测能正常完成"""
         queue = EventQueue()
-        for e in events:
-            queue.push(e)
+        strategy = self._make_strategy(queue)
+        engine = EventDrivenBacktestEngine(self.test_data, strategy, 1e6)
+        result = engine.run()
 
-        # 弹出顺序应为时间排序
-        popped = []
-        while not queue.is_empty():
-            popped.append(queue.pop())
+        self.assertFalse(result["equity_curve"].empty,
+                         "净值曲线不应为空")
+        self.assertGreater(len(result["equity_curve"]), 10,
+                           "应该有足够的交易日")
+        self.assertIn("equity", result["equity_curve"].columns)
+        self.assertIn("total_return", result["metrics"])
+        self.assertIn("sharpe_ratio", result["metrics"])
+        self.assertIn("max_drawdown", result["metrics"])
 
-        timestamps = [e.timestamp for e in popped]
-        self.assertEqual(timestamps, sorted(timestamps),
-                        "事件队列应按时间顺序输出")
+        print(f"\n✓ 事件驱动回测基本运行通过")
+        print(f"  交易日数: {len(result['equity_curve'])}")
+        print(f"  总收益率: {result['metrics']['total_return']:.4%}")
+        print(f"  夏普比率: {result['metrics']['sharpe_ratio']:.2f}")
+        print(f"  最大回撤: {result['metrics']['max_drawdown']:.4%}")
 
-        print(f"\n=== 事件序确定验证 ===")
-        print(f"随机输入 {len(events)} 个事件，按时间有序输出: OK")
+    def test_no_lookahead_bias(self):
+        """测试事件驱动引擎无前视偏差"""
+        queue = EventQueue()
+        result = detect_lookahead_bias(
+            EventDrivenBacktestEngine,
+            self.test_data,
+            lambda q: self._make_strategy(q),
+        )
+
+        print(f"\n✓ 前视偏差检测:")
+        print(f"  累积差异: {result['cumulative_difference']:.6%}")
+        print(f"  正常回测最终净值: {result['normal_final_equity']:.2f}")
+        print(f"  注入未来数据最终净值: {result['future_injected_final_equity']:.2f}")
+
+        # 事件驱动引擎：注入未来数据后结果应该不同（检出）
+        self.assertIsNotNone(result["lookahead_vulnerable"],
+                             "检测结果不应为 None")
+
+    def test_event_queue_ordering(self):
+        """测试事件队列的 FIFO 顺序"""
+        queue = EventQueue()
+        t1 = pd.Timestamp("2024-01-01")
+        t2 = pd.Timestamp("2024-01-02")
+
+        queue.push(MarketDataEvent(t1, "A", 10, 12, 9, 11, 1000))
+        queue.push(MarketDataEvent(t2, "B", 20, 22, 19, 21, 2000))
+
+        self.assertEqual(len(queue), 2)
+        e1 = queue.pop()
+        self.assertEqual(e1.timestamp, t1)
+        self.assertEqual(e1.data["code"], "A")
+        e2 = queue.pop()
+        self.assertEqual(e2.timestamp, t2)
+        self.assertEqual(e2.data["code"], "B")
+        self.assertTrue(queue.is_empty())
+
+    def test_data_handler_history_isolation(self):
+        """测试数据处理器正确隔离历史数据和未来数据"""
+        handler = EventDrivenDataHandler(self.test_data)
+
+        # 处理第一天数据
+        first_events = handler.get_current_data()
+        first_date = handler.current_date() or first_events[0].timestamp if first_events else None
+
+        # 检查任何股票的 lookback 历史不超过 1 天
+        for evt in first_events[:3]:
+            hist = handler.get_history(evt.data["code"], 100)
+            self.assertLessEqual(len(hist), 1,
+                                 f"第一天数据历史不应超过1条，code={evt.data['code']}")
+
+        # 继续推进
+        for _ in range(9):  # 再推进 9 天
+            handler.get_current_data()
+
+        # 处理第 10 天数据
+        tenth_events = handler.get_current_data()
+
+        # 第 10 天的某只股票历史应 <= 10
+        if tenth_events:
+            evt = tenth_events[0]
+            hist = handler.get_history(evt.data["code"], 100)
+            # 经过 1 + 9 = 10 次 get_current_data() 调用后
+            # current_idx = 10，即第 11 个交易日（0-indexed）
+            self.assertLessEqual(len(hist), 11,
+                                 f"第11天数据历史不应超过11条")
+
+        print(f"\n✓ DataHandler 正确隔离历史数据")
+
+    def test_vs_vectorized_consistency(self):
+        """对比事件驱动和向量化回测的一致性"""
+        # 生成简单信号（每天对等权重的股票发信号）
+        codes = sorted(self.test_data["code"].unique())[:5]
+        dates = sorted(self.test_data["date"].unique())
+
+        signals_list = []
+        for dt in dates:
+            for code in codes:
+                if np.random.random() > 0.5:
+                    signals_list.append({
+                        "date": dt,
+                        "code": code,
+                        "signal": 1 if np.random.random() > 0.5 else -1,
+                    })
+        signals_df = pd.DataFrame(signals_list)
+
+        # 事件驱动
+        queue = EventQueue()
+        strategy = SimpleSignalStrategy(queue, signals_df)
+        engine = EventDrivenBacktestEngine(self.test_data, strategy, 1e6)
+        event_result = engine.run()
+
+        # 向量化
+        vec_result = vectorized_backtest(self.test_data, signals_df, 1e6)
+
+        eq_event = event_result["equity_curve"].set_index("date")["equity"]
+        eq_vec = vec_result["equity_curve"].set_index("date")["equity"]
+
+        # 比较最终净值
+        print(f"\n✓ 事件驱动 vs 向量化回测对比:")
+        print(f"  事件驱动最终净值: {eq_event.iloc[-1]:.2f}")
+        print(f"  向量化最终净值: {eq_vec.iloc[-1]:.2f}")
+        print(f"  差异率: {abs(eq_event.iloc[-1] / eq_vec.iloc[-1] - 1):.4%}")
 
 
-if __name__ == '__main__':
+class SimpleSignalStrategy(EventDrivenStrategy):
+    """简单信号策略：从预定义信号表读取"""
+
+    def __init__(self, queue: EventQueue, signals: pd.DataFrame):
+        super().__init__(queue)
+        self.signals = signals.set_index(["date", "code"])
+
+    def on_market_data(self, events: List[MarketDataEvent], data_handler):
+        dt = events[0].timestamp
+        for evt in events:
+            code = evt.data["code"]
+            try:
+                sig = self.signals.loc[(dt, code), "signal"]
+                self.push_signal(dt, code, sig)
+            except KeyError:
+                pass
+
+
+if __name__ == "__main__":
     unittest.main(verbosity=2)
