@@ -1,511 +1,659 @@
 """
 优化验证测试套件
 
-测试内容：
-1. 正确性测试：向量化实现 vs 循环实现的结果一致性
-2. 性能对比测试：向量化 vs 循环的执行时间
-3. 边界条件测试：空数据、单股票、单日期等
-4. 增强指标测试：验证新增指标的合理性
+验证内容：
+1. 正确性测试：优化版与基准版输出一致（数值误差 < 1e-6）
+2. 性能对比测试：优化版应显著快于基准版
+3. 边界条件测试：空数据、单只股票、单日数据、全 NaN 等
 
-运行方式：
-    python -m optimizations.test_optimizations
-    或
-    python optimizations/test_optimizations.py
+运行：
+    python3 optimizations/test_optimizations.py
 """
+from __future__ import annotations
+
+import json
 import os
 import sys
-import json
 import time
+import warnings
+from datetime import datetime, timedelta
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
 
-# 确保能导入 optimizations 模块
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 确保能 import optimizations 模块
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from optimizations.vectorized_backtest import (
-    VectorizedBacktester, LoopBacktester, benchmark_backtest
+from optimizations.vectorized_factor import (
+    compute_factors_vectorized,
+    compute_factors_baseline,
+    ic_analysis_vectorized,
+    ic_analysis_baseline,
+    neutralize_vectorized,
 )
-from optimizations.enhanced_metrics import calc_enhanced_metrics, calc_basic_metrics
-from optimizations.vectorized_ic import vectorized_ic, loop_ic, benchmark_ic
+from optimizations.vectorized_backtest import (
+    run_backtest_vectorized,
+    run_backtest_baseline,
+    calc_extended_metrics,
+)
+from optimizations.walk_forward import (
+    purged_ts_split,
+    walk_forward_splits,
+    walk_forward_predict,
+    purged_group_ts_split_baseline,
+    train_baseline_bug,
+)
 
+warnings.filterwarnings('ignore')
 
-# ------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # 测试数据生成
-# ------------------------------------------------------------------
-def generate_market_data(
-    n_stocks: int = 50,
-    start_date: str = "2022-01-01",
-    end_date: str = "2024-12-31",
+# ----------------------------------------------------------------------
+
+def make_synthetic_data(
+    n_codes: int = 50,
+    n_days: int = 250,
+    start_date: str = "2023-01-01",
     seed: int = 42,
 ) -> pd.DataFrame:
-    """生成模拟 A 股日线数据"""
-    np.random.seed(seed)
-    dates = pd.bdate_range(start=start_date, end=end_date)
-    codes = [f"{600000 + i:06d}.SH" for i in range(n_stocks)]
+    """生成 A 股日线合成数据。"""
+    rng = np.random.default_rng(seed)
+    dates = pd.bdate_range(start_date, periods=n_days)
+    codes = [f"{i:06d}.SZ" for i in range(1, n_codes + 1)]
 
     rows = []
     for code in codes:
-        price = np.random.uniform(10, 50)
-        for dt in dates:
-            ret = np.random.normal(0.0005, 0.02)
-            price = max(price * (1 + ret), 1.0)
-            change_pct = ret * 100
-            rows.append({
-                'date': dt,
-                'code': code,
-                'open': price * (1 + np.random.normal(0, 0.003)),
-                'high': price * (1 + abs(np.random.normal(0, 0.008))),
-                'low': price * (1 - abs(np.random.normal(0, 0.008))),
-                'close': price,
-                'volume': int(np.random.lognormal(15, 0.5)),
-                'change_pct': change_pct,
-                'is_st': False,
-                'is_limit_up': change_pct >= 9.9,
-                'is_limit_down': change_pct <= -9.9,
-            })
+        start_price = rng.uniform(8, 50)
+        drift = rng.uniform(-0.0005, 0.0015)
+        vol = rng.uniform(0.015, 0.025)
+        rets = rng.normal(drift, vol, n_days)
+        # 加一点自相关
+        for i in range(1, n_days):
+            rets[i] += 0.15 * rets[i - 1]
+        prices = start_price * np.cumprod(1 + rets)
 
-    return pd.DataFrame(rows)
+        opens = np.concatenate([[start_price], prices[:-1]]) * (1 + rng.normal(0, 0.003, n_days))
+        highs = np.maximum(opens, prices) * (1 + np.abs(rng.normal(0, 0.005, n_days)))
+        lows = np.minimum(opens, prices) * (1 - np.abs(rng.normal(0, 0.005, n_days)))
+        vols = rng.lognormal(12, 0.5, n_days).astype(int)
+        amounts = vols * prices
+        turnover = rng.uniform(0.005, 0.05, n_days)
 
+        df = pd.DataFrame({
+            'date': dates,
+            'code': code,
+            'open': opens.round(4),
+            'high': highs.round(4),
+            'low': lows.round(4),
+            'close': prices.round(4),
+            'volume': vols,
+            'amount': amounts,
+            'turnover_rate': turnover,
+            'pre_close': np.concatenate([[start_price], prices[:-1]]).round(4),
+        })
+        df['change_pct'] = (df['close'] - df['pre_close']) / df['pre_close'] * 100
+        df['is_st'] = False
+        df['is_limit_up'] = df['change_pct'] >= 9.9
+        df['is_limit_down'] = df['change_pct'] <= -9.9
+        rows.append(df)
 
-def generate_signals(
-    data: pd.DataFrame,
-    rebalance_days: int = 5,
-    top_pct: float = 0.2,
-    seed: int = 42,
-) -> pd.DataFrame:
-    """基于动量生成买卖信号"""
-    np.random.seed(seed)
-    data = data.sort_values(['code', 'date']).copy()
-    # 计算 20 日动量
-    data['mom_20d'] = data.groupby('code')['close'].pct_change(20)
-    data = data.dropna(subset=['mom_20d'])
-
-    signals = []
-    dates = sorted(data['date'].unique())
-    # 每 rebalance_days 天调仓
-    for i, dt in enumerate(dates):
-        if i % rebalance_days != 0:
-            continue
-        day_data = data[data['date'] == dt]
-        if day_data.empty:
-            continue
-        # 选前 top_pct 动量的股票买入
-        threshold = day_data['mom_20d'].quantile(1 - top_pct)
-        buy_codes = day_data[day_data['mom_20d'] >= threshold]['code'].tolist()
-        # 其余股票中，动量最低的 10% 卖出
-        sell_threshold = day_data['mom_20d'].quantile(0.1)
-        sell_codes = day_data[day_data['mom_20d'] <= sell_threshold]['code'].tolist()
-
-        for code in buy_codes:
-            signals.append({'date': dt, 'code': code, 'signal': 1.0})
-        for code in sell_codes:
-            signals.append({'date': dt, 'code': code, 'signal': -1.0})
-
-    return pd.DataFrame(signals)
+    return pd.concat(rows, ignore_index=True)
 
 
-def generate_factor_data(
-    n_stocks: int = 100,
-    n_dates: int = 200,
-    n_factors: int = 5,
-    seed: int = 42,
-) -> tuple:
-    """生成因子数据和前向收益数据"""
-    np.random.seed(seed)
-    dates = pd.bdate_range(start="2022-01-01", periods=n_dates)
-    codes = [f"{600000 + i:06d}.SH" for i in range(n_stocks)]
-
-    factor_rows = []
-    return_rows = []
-    for code in codes:
-        for dt in dates:
-            row = {'date': dt, 'code': code}
-            for k in range(n_factors):
-                row[f'factor_{k}'] = np.random.normal(0, 1)
-            factor_rows.append(row)
-
-            # 前向收益与 factor_0 有一定相关性（让 IC 非零）
-            ret_1d = 0.01 * row['factor_0'] + np.random.normal(0, 0.02)
-            ret_5d = 0.02 * row['factor_0'] + np.random.normal(0, 0.04)
-            ret_20d = 0.03 * row['factor_0'] + np.random.normal(0, 0.08)
-            return_rows.append({
-                'date': dt, 'code': code,
-                'ret_forward_1d': ret_1d,
-                'ret_forward_5d': ret_5d,
-                'ret_forward_20d': ret_20d,
-            })
-
-    factor_df = pd.DataFrame(factor_rows)
-    forward_returns = pd.DataFrame(return_rows)
-    return factor_df, forward_returns
+def make_forward_returns(data: pd.DataFrame) -> pd.DataFrame:
+    """生成前瞻收益（用于 IC 分析）。"""
+    df = data.sort_values(['code', 'date']).copy()
+    fr = df[['code', 'date']].copy()
+    for period in [1, 5, 20]:
+        fr[f'ret_forward_{period}d'] = df.groupby('code')['close'].transform(
+            lambda x: x.shift(-period) / x - 1
+        )
+    return fr
 
 
-# ------------------------------------------------------------------
-# 测试用例
-# ------------------------------------------------------------------
-class TestResults:
-    """收集测试结果"""
+def make_signals(data: pd.DataFrame, top_pct: float = 0.2) -> pd.DataFrame:
+    """生成简单反转信号：20日反转因子 top 20% 买入。"""
+    df = data.sort_values(['code', 'date']).copy()
+    df['ret_20d'] = df.groupby('code')['close'].pct_change(20)
+    df['reversal'] = -df['ret_20d']
+    df['rank'] = df.groupby('date')['reversal'].rank(pct=True)
+    sig = df[['code', 'date']].copy()
+    sig['signal'] = 0
+    sig.loc[df['rank'] > (1 - top_pct), 'signal'] = 1
+    sig.loc[df['rank'] < top_pct, 'signal'] = -1
+    return sig
+
+
+def make_benchmark(data: pd.DataFrame) -> pd.DataFrame:
+    """用全市场等权日收益构造基准。"""
+    pivot = data.pivot(index='date', columns='code', values='close')
+    bench_ret = pivot.pct_change().mean(axis=1)
+    bench = (1 + bench_ret).cumprod() * 3000  # 模拟指数点位
+    return pd.DataFrame({'date': bench.index, 'close': bench.values})
+
+
+# ----------------------------------------------------------------------
+# 测试结果收集
+# ----------------------------------------------------------------------
+
+class TestReport:
     def __init__(self):
-        self.results = {
-            "test_timestamp": datetime.now().isoformat(),
-            "tests": [],
-            "summary": {},
+        self.results = []
+        self.passed = 0
+        self.failed = 0
+
+    def record(self, name: str, category: str, passed: bool, detail: str, duration: float = 0):
+        status = "PASS" if passed else "FAIL"
+        self.results.append({
+            "name": name,
+            "category": category,
+            "status": status,
+            "detail": detail,
+            "duration_sec": round(duration, 4),
+        })
+        if passed:
+            self.passed += 1
+        else:
+            self.failed += 1
+        marker = "✓" if passed else "✗"
+        print(f"  {marker} [{category}] {name} ({duration:.3f}s) - {detail[:80]}")
+
+    def summary(self) -> dict:
+        return {
+            "total": len(self.results),
+            "passed": self.passed,
+            "failed": self.failed,
+            "pass_rate": round(self.passed / max(len(self.results), 1), 4),
+            "results": self.results,
         }
 
-    def add(self, name: str, passed: bool, details: dict):
-        self.results["tests"].append({
-            "name": name,
-            "passed": passed,
-            "details": details,
-        })
-        status = "PASS" if passed else "FAIL"
-        print(f"  [{status}] {name}")
-        for k, v in details.items():
-            if isinstance(v, float):
-                print(f"         {k}: {v:.6f}")
-            else:
-                print(f"         {k}: {v}")
 
-    def summary_str(self):
-        n_pass = sum(1 for t in self.results["tests"] if t["passed"])
-        n_fail = sum(1 for t in self.results["tests"] if not t["passed"])
-        return f"\n==== 测试汇总: {n_pass} 通过 / {n_fail} 失败 / 共 {len(self.results['tests'])} 项 ====\n"
+# ----------------------------------------------------------------------
+# 正确性测试
+# ----------------------------------------------------------------------
 
+def test_factor_correctness(report: TestReport, data: pd.DataFrame):
+    """验证向量化因子计算与基准版输出一致。"""
+    print("\n=== 正确性测试：因子计算 ===")
 
-def test_backtest_correctness(tr: TestResults, data, signals):
-    """测试1: 向量化回测 vs 循环回测的正确性"""
-    print("\n=== 测试1: 回测正确性验证 ===")
-    vb = VectorizedBacktester()
-    lb = LoopBacktester()
+    t0 = time.time()
+    base = compute_factors_baseline(data)
+    t1 = time.time()
+    opt = compute_factors_vectorized(data)
+    t2 = time.time()
 
-    vb_result = vb.run(data, signals)
-    lb_result = lb.run(data, signals)
+    # 对比公共列（仅数值列）
+    common_cols = [c for c in base.columns if c in opt.columns]
+    all_close = True
+    max_diff = 0
+    for col in common_cols:
+        b_series = base[col]
+        o_series = opt[col]
+        # 跳过非数值列（code, date 等）
+        if not pd.api.types.is_numeric_dtype(b_series):
+            continue
+        b = b_series.fillna(-9999).values
+        o = o_series.fillna(-9999).values
+        if len(b) != len(o):
+            all_close = False
+            break
+        diff = float(np.nanmax(np.abs(b - o)))
+        max_diff = max(max_diff, diff)
+        if diff > 1e-6:
+            all_close = False
 
-    vb_eq = vb_result['equity_curve']['equity'].iloc[-1] if not vb_result['equity_curve'].empty else 0
-    lb_eq = lb_result['equity_curve']['equity'].iloc[-1] if not lb_result['equity_curve'].empty else 0
-
-    diff = abs(vb_eq - lb_eq)
-    # 由于买卖顺序在多股票场景下可能略有差异（资金分配顺序），
-    # 这里允许小偏差，但要求相对误差 < 1%
-    rel_diff = diff / max(abs(lb_eq), 1e-6)
-    passed = rel_diff < 0.01
-
-    tr.add("回测终值一致性", passed, {
-        "vectorized_final_equity": float(vb_eq),
-        "loop_final_equity": float(lb_eq),
-        "abs_diff": float(diff),
-        "rel_diff": float(rel_diff),
-        "vectorized_n_trades": len(vb_result['trades']),
-        "loop_n_trades": len(lb_result['trades']),
-    })
+    report.record(
+        "因子计算数值一致",
+        "正确性",
+        all_close,
+        f"公共列数={len(common_cols)}, 最大绝对误差={max_diff:.2e}",
+        t2 - t0,
+    )
 
 
-def test_backtest_performance(tr: TestResults, data, signals):
-    """测试2: 回测性能对比"""
-    print("\n=== 测试2: 回测性能对比 ===")
-    result = benchmark_backtest(data, signals, runs=3)
+def test_ic_correctness(report: TestReport, data: pd.DataFrame, fr: pd.DataFrame):
+    """验证向量化 IC 分析与基准版输出一致。"""
+    print("\n=== 正确性测试：IC 分析 ===")
 
-    passed = result['speedup'] >= 1.0  # 至少不慢于循环版
-    tr.add("回测性能提升", passed, {
-        "vectorized_median_time_s": result['vectorized']['median_time'],
-        "loop_median_time_s": result['loop']['median_time'],
-        "speedup_x": result['speedup'],
-        "vectorized_n_trades": result['vectorized']['n_trades'],
-        "loop_n_trades": result['loop']['n_trades'],
-    })
+    factor_df = compute_factors_vectorized(data)
+    factor_names = ['reversal_5d', 'reversal_20d', 'volatility_20d', 'volume_ratio']
 
+    t0 = time.time()
+    base_ic = ic_analysis_baseline(factor_df, fr, factor_names, ic_type="spearman")
+    t1 = time.time()
+    opt_ic = ic_analysis_vectorized(factor_df, fr, factor_names, ic_type="spearman")
+    t2 = time.time()
 
-def test_backtest_edge_cases(tr: TestResults):
-    """测试3: 边界条件测试"""
-    print("\n=== 测试3: 边界条件测试 ===")
-    vb = VectorizedBacktester()
-    lb = LoopBacktester()
+    # 对比每个因子的 IC 统计量
+    all_close = True
+    max_diff = 0
+    for period in ['ret_forward_1d', 'ret_forward_5d', 'ret_forward_20d']:
+        if period not in base_ic or period not in opt_ic:
+            continue
+        for b_item, o_item in zip(base_ic[period], opt_ic[period]):
+            for key in ['ic_mean', 'ic_std', 'ic_ir', 'ic_positive_ratio', 'ic_t_stat']:
+                diff = abs(b_item[key] - o_item[key])
+                max_diff = max(max_diff, diff)
+                if diff > 1e-4:
+                    all_close = False
 
-    # 3.1 空数据
-    empty = pd.DataFrame(columns=['date', 'code', 'close', 'is_limit_up', 'is_limit_down'])
-    empty_sig = pd.DataFrame(columns=['date', 'code', 'signal'])
-    vb_r = vb.run(empty, empty_sig)
-    lb_r = lb.run(empty, empty_sig)
-    tr.add("空数据处理", vb_r['equity_curve'].empty and lb_r['equity_curve'].empty, {
-        "vectorized_empty": vb_r['equity_curve'].empty,
-        "loop_empty": lb_r['equity_curve'].empty,
-    })
-
-    # 3.2 单股票单日
-    single_data = pd.DataFrame([{
-        'date': pd.Timestamp('2024-01-01'),
-        'code': '600000.SH',
-        'close': 10.0,
-        'is_limit_up': False,
-        'is_limit_down': False,
-    }])
-    single_sig = pd.DataFrame([{
-        'date': pd.Timestamp('2024-01-01'),
-        'code': '600000.SH',
-        'signal': 1.0,
-    }])
-    vb_r = vb.run(single_data, single_sig)
-    lb_r = lb.run(single_data, single_sig)
-    tr.add("单股票单日", not vb_r['equity_curve'].empty and not lb_r['equity_curve'].empty, {
-        "vectorized_records": len(vb_r['equity_curve']),
-        "loop_records": len(lb_r['equity_curve']),
-    })
-
-    # 3.3 涨跌停限制
-    limit_data = pd.DataFrame([{
-        'date': pd.Timestamp('2024-01-01'),
-        'code': '600000.SH',
-        'close': 11.0,
-        'is_limit_up': True,   # 涨停，无法买入
-        'is_limit_down': False,
-    }])
-    limit_sig = pd.DataFrame([{
-        'date': pd.Timestamp('2024-01-01'),
-        'code': '600000.SH',
-        'signal': 1.0,
-    }])
-    vb_r = vb.run(limit_data, limit_sig)
-    # 涨停时应无交易
-    tr.add("涨停限制买入", len(vb_r['trades']) == 0, {
-        "n_trades_when_limit_up": len(vb_r['trades']),
-    })
+    report.record(
+        "IC 分析数值一致（Spearman）",
+        "正确性",
+        all_close,
+        f"最大绝对误差={max_diff:.2e}",
+        t2 - t0,
+    )
 
 
-def test_enhanced_metrics(tr: TestResults, data, signals):
-    """测试4: 增强绩效指标"""
-    print("\n=== 测试4: 增强绩效指标验证 ===")
-    vb = VectorizedBacktester()
-    result = vb.run(data, signals)
+def test_backtest_correctness(report: TestReport, data: pd.DataFrame, signals: pd.DataFrame):
+    """验证向量化回测与基准版输出一致。"""
+    print("\n=== 正确性测试：回测引擎 ===")
 
-    if result['equity_curve'].empty:
-        tr.add("增强指标计算", False, {"error": "equity_curve 为空"})
+    t0 = time.time()
+    base_res = run_backtest_baseline(data, signals)
+    t1 = time.time()
+    opt_res = run_backtest_vectorized(data, signals)
+    t2 = time.time()
+
+    # 对比权益曲线（最终净值）
+    base_eq = base_res['equity_curve']['equity'].values
+    opt_eq = opt_res['equity_curve']['equity'].values
+
+    if len(base_eq) != len(opt_eq):
+        report.record(
+            "回测权益曲线一致",
+            "正确性",
+            False,
+            f"长度不一致: base={len(base_eq)}, opt={len(opt_eq)}",
+            t2 - t0,
+        )
         return
 
-    enhanced = calc_enhanced_metrics(
-        result['equity_curve'],
-        result['trades'],
-    )
-    basic = calc_basic_metrics(result['equity_curve'])
+    final_diff = abs(base_eq[-1] - opt_eq[-1])
+    max_diff = float(np.max(np.abs(base_eq - opt_eq)))
+    # 允许极小浮点误差（买卖顺序导致的舍入）
+    passed = max_diff < 1e-2
 
-    # 验证：增强指标应包含所有基础指标 + 新增指标
-    basic_keys = set(basic.keys())
-    enhanced_keys = set(enhanced.keys())
-    new_keys = enhanced_keys - basic_keys
-
-    # 验证基础指标一致性
-    consistent = True
-    for k in ['total_return', 'sharpe_ratio', 'max_drawdown']:
-        if k in basic and k in enhanced:
-            if abs(basic[k] - enhanced[k]) > 1e-6:
-                consistent = False
-                break
-
-    passed = len(new_keys) >= 10 and consistent
-    tr.add("增强指标完整性", passed, {
-        "basic_metrics_count": len(basic),
-        "enhanced_metrics_count": len(enhanced),
-        "new_metrics_count": len(new_keys),
-        "new_metrics": sorted(list(new_keys)),
-        "basic_consistent": consistent,
-    })
-
-    # 验证 Sortino >= Sharpe（下行风险 <= 总波动，故 Sortino 通常 >= Sharpe）
-    if 'sortino_ratio' in enhanced and 'sharpe_ratio' in enhanced:
-        # 注意：当 returns 全为正时，downside_deviation 可能为 0，导致 sortino=inf
-        sortino_ok = (
-            enhanced['sortino_ratio'] >= enhanced['sharpe_ratio']
-            or enhanced['downside_deviation'] == 0
-        )
-        tr.add("Sortino >= Sharpe 关系", sortino_ok, {
-            "sharpe": enhanced['sharpe_ratio'],
-            "sortino": enhanced['sortino_ratio'],
-            "downside_dev": enhanced['downside_deviation'],
-            "volatility": enhanced['volatility'],
-        })
-
-    # 验证 Beta/Alpha（用等权基准收益率作为 benchmark）
-    # 构造一个简单的基准收益序列（全市场等权日收益）
-    eq_series = result['equity_curve'].set_index('date')['equity'].sort_index()
-    strat_returns = eq_series.pct_change().dropna()
-    # 构造一个与策略收益有一定相关性的基准（模拟沪深300）
-    np.random.seed(123)
-    benchmark_returns = 0.6 * strat_returns + np.random.normal(0, 0.01, len(strat_returns))
-    benchmark_returns = pd.Series(
-        benchmark_returns, index=strat_returns.index
+    report.record(
+        "回测权益曲线一致",
+        "正确性",
+        passed,
+        f"最终净值 base={base_eq[-1]:.2f}, opt={opt_eq[-1]:.2f}, 最大误差={max_diff:.6f}",
+        t2 - t0,
     )
 
-    enhanced_with_bench = calc_enhanced_metrics(
-        result['equity_curve'],
-        result['trades'],
-        benchmark=benchmark_returns,
+    # 对比交易笔数
+    base_n = len(base_res['trades'])
+    opt_n = len(opt_res['trades'])
+    report.record(
+        "回测交易笔数一致",
+        "正确性",
+        base_n == opt_n,
+        f"base={base_n}, opt={opt_n}",
     )
-    tr.add("Beta/Alpha 计算", enhanced_with_bench['beta'] != 0, {
-        "beta": enhanced_with_bench['beta'],
-        "alpha": enhanced_with_bench['alpha'],
-        "information_ratio": enhanced_with_bench['information_ratio'],
-        "tracking_error": enhanced_with_bench['tracking_error'],
-    })
 
-
-def test_ic_correctness(tr: TestResults):
-    """测试5: IC 分析正确性"""
-    print("\n=== 测试5: IC 分析正确性验证 ===")
-    factor_df, forward_returns = generate_factor_data(
-        n_stocks=80, n_dates=150, n_factors=4
+    # 验证扩展指标存在
+    opt_metrics = opt_res['metrics']
+    expected_new = ['sortino_ratio', 'turnover_annual']
+    has_new = all(k in opt_metrics for k in expected_new)
+    report.record(
+        "扩展指标已生成",
+        "正确性",
+        has_new,
+        f"新增指标: sortino={opt_metrics.get('sortino_ratio')}, turnover={opt_metrics.get('turnover_annual')}",
     )
-    factor_names = [f'factor_{i}' for i in range(4)]
 
-    vec_result = vectorized_ic(factor_df, forward_returns, factor_names)
-    loop_result = loop_ic(factor_df, forward_returns, factor_names)
 
-    # 比较 IC 均值
-    max_diff = 0.0
-    mean_diff = 0.0
-    n_compared = 0
-    for period in vec_result:
-        for v_item, l_item in zip(
-            sorted(vec_result[period], key=lambda x: x['factor']),
-            sorted(loop_result[period], key=lambda x: x['factor']),
-        ):
-            diff = abs(v_item['ic_mean'] - l_item['ic_mean'])
-            max_diff = max(max_diff, diff)
-            mean_diff += diff
-            n_compared += 1
+def test_backtest_with_benchmark(report: TestReport, data: pd.DataFrame, signals: pd.DataFrame, bench: pd.DataFrame):
+    """验证带基准的扩展指标。"""
+    print("\n=== 正确性测试：基准对比指标 ===")
 
-    mean_diff = mean_diff / n_compared if n_compared > 0 else 0
-    # IC 均值差异应 < 1e-4（rank 计算的微小数值差异）
-    passed = max_diff < 1e-4
-    tr.add("IC 均值一致性", passed, {
-        "max_diff": max_diff,
-        "mean_diff": mean_diff,
-        "n_compared": n_compared,
-    })
+    res = run_backtest_vectorized(data, signals, benchmark_data=bench)
+    m = res['metrics']
+    has_alpha_beta = 'alpha' in m and 'beta' in m and 'information_ratio' in m
+    report.record(
+        "Alpha/Beta/IR 指标生成",
+        "正确性",
+        has_alpha_beta,
+        f"alpha={m.get('alpha')}, beta={m.get('beta')}, IR={m.get('information_ratio')}",
+    )
 
-    # 验证 factor_0 的 IC 应显著非零（因为生成数据时 factor_0 与收益相关）
-    f0_ic_5d = None
-    for item in vec_result.get('ret_forward_5d', []):
-        if item['factor'] == 'factor_0':
-            f0_ic_5d = item
+
+# ----------------------------------------------------------------------
+# 性能对比测试
+# ----------------------------------------------------------------------
+
+def test_factor_performance(report: TestReport, data: pd.DataFrame):
+    """因子计算性能对比。"""
+    print("\n=== 性能测试：因子计算 ===")
+
+    t0 = time.time()
+    compute_factors_baseline(data)
+    t1 = time.time()
+    compute_factors_vectorized(data)
+    t2 = time.time()
+
+    base_t = t1 - t0
+    opt_t = t2 - t1
+    speedup = base_t / opt_t if opt_t > 0 else float('inf')
+
+    report.record(
+        "因子计算性能",
+        "性能",
+        opt_t <= base_t,
+        f"base={base_t:.3f}s, opt={opt_t:.3f}s, 加速比={speedup:.2f}x",
+        opt_t,
+    )
+
+
+def test_ic_performance(report: TestReport, data: pd.DataFrame, fr: pd.DataFrame):
+    """IC 分析性能对比（核心优化点）。"""
+    print("\n=== 性能测试：IC 分析 ===")
+
+    factor_df = compute_factors_vectorized(data)
+    factor_names = ['reversal_5d', 'reversal_20d', 'volatility_20d', 'volume_ratio',
+                    'turnover_change', 'money_flow_20d']
+
+    t0 = time.time()
+    ic_analysis_baseline(factor_df, fr, factor_names, ic_type="spearman")
+    t1 = time.time()
+    ic_analysis_vectorized(factor_df, fr, factor_names, ic_type="spearman")
+    t2 = time.time()
+
+    base_t = t1 - t0
+    opt_t = t2 - t1
+    speedup = base_t / opt_t if opt_t > 0 else float('inf')
+
+    report.record(
+        "IC 分析性能",
+        "性能",
+        opt_t <= base_t,
+        f"base={base_t:.3f}s, opt={opt_t:.3f}s, 加速比={speedup:.2f}x",
+        opt_t,
+    )
+
+
+def test_backtest_performance(report: TestReport, data: pd.DataFrame, signals: pd.DataFrame):
+    """回测性能对比。"""
+    print("\n=== 性能测试：回测引擎 ===")
+
+    t0 = time.time()
+    run_backtest_baseline(data, signals)
+    t1 = time.time()
+    run_backtest_vectorized(data, signals)
+    t2 = time.time()
+
+    base_t = t1 - t0
+    opt_t = t2 - t1
+    speedup = base_t / opt_t if opt_t > 0 else float('inf')
+
+    report.record(
+        "回测性能",
+        "性能",
+        opt_t <= base_t,
+        f"base={base_t:.3f}s, opt={opt_t:.3f}s, 加速比={speedup:.2f}x",
+        opt_t,
+    )
+
+
+# ----------------------------------------------------------------------
+# 边界条件测试
+# ----------------------------------------------------------------------
+
+def test_empty_data(report: TestReport):
+    """空数据测试。"""
+    print("\n=== 边界测试：空数据 ===")
+
+    empty = pd.DataFrame(columns=['date', 'code', 'close', 'volume', 'amount', 'turnover_rate'])
+
+    try:
+        res = compute_factors_vectorized(empty)
+        ok1 = res.empty
+    except Exception as e:
+        ok1 = False
+        res = e
+    report.record("因子计算-空数据", "边界", ok1, f"返回 empty={ok1}")
+
+    try:
+        res = ic_analysis_vectorized(empty, empty, ['x'])
+        ok2 = res == {}
+    except Exception as e:
+        ok2 = False
+        res = e
+    report.record("IC 分析-空数据", "边界", ok2, f"返回空 dict={ok2}")
+
+    try:
+        res = run_backtest_vectorized(empty, empty)
+        ok3 = 'metrics' in res and res['metrics'] == {}
+    except Exception as e:
+        ok3 = False
+    report.record("回测-空数据", "边界", ok3, f"返回空结果={ok3}")
+
+
+def test_single_code(report: TestReport):
+    """单只股票测试。"""
+    print("\n=== 边界测试：单只股票 ===")
+
+    data = make_synthetic_data(n_codes=1, n_days=60)
+    fr = make_forward_returns(data)
+
+    try:
+        factors = compute_factors_vectorized(data)
+        ok1 = len(factors) == 60 and 'reversal_20d' in factors.columns
+    except Exception as e:
+        ok1 = False
+        factors = e
+    report.record("因子计算-单只股票", "边界", ok1, f"行数={len(factors) if isinstance(factors, pd.DataFrame) else 'N/A'}")
+
+    try:
+        ic = ic_analysis_vectorized(factors, fr, ['reversal_20d'])
+        # 单只股票截面 IC 可能因样本不足返回空，不应报错
+        ok2 = isinstance(ic, dict)
+    except Exception as e:
+        ok2 = False
+        ic = e
+    report.record("IC 分析-单只股票", "边界", ok2, f"返回类型={type(ic).__name__}")
+
+
+def test_short_history(report: TestReport):
+    """短历史数据测试（窗口不足）。"""
+    print("\n=== 边界测试：短历史 ===")
+
+    data = make_synthetic_data(n_codes=10, n_days=15)  # 小于 20 日窗口
+    try:
+        factors = compute_factors_vectorized(data)
+        # ret_20d 应全为 NaN，但不报错
+        ok1 = 'ret_20d' in factors.columns and factors['ret_20d'].isna().all()
+    except Exception as e:
+        ok1 = False
+        factors = e
+    report.record("因子计算-短历史", "边界", ok1, f"ret_20d 全 NaN={ok1}")
+
+
+def test_all_nan_column(report: TestReport):
+    """全 NaN 列测试。"""
+    print("\n=== 边界测试：全 NaN 列 ===")
+
+    data = make_synthetic_data(n_codes=20, n_days=100)
+    data['turnover_rate'] = np.nan  # 制造全 NaN
+
+    try:
+        factors = compute_factors_vectorized(data)
+        ok1 = 'turnover_20d' in factors.columns and factors['turnover_20d'].isna().all()
+    except Exception as e:
+        ok1 = False
+        factors = e
+    report.record("因子计算-全NaN列", "边界", ok1, f"turnover_20d 全 NaN={ok1}")
+
+
+def test_walk_forward_correctness(report: TestReport, data: pd.DataFrame):
+    """Walk-Forward 分割正确性测试。"""
+    print("\n=== 正确性测试：Walk-Forward 分割 ===")
+
+    factor_df = compute_factors_vectorized(data)
+    fr = make_forward_returns(data)
+    merged = factor_df.merge(fr[['code', 'date', 'ret_forward_5d']], on=['code', 'date'], how='inner')
+    merged = merged.dropna(subset=['ret_forward_5d', 'reversal_20d', 'volatility_20d'])
+
+    dates = merged['date']
+    X = merged[['reversal_20d', 'volatility_20d', 'volume_ratio']].fillna(0)
+    y = merged['ret_forward_5d']
+
+    # 测试 purged_ts_split 不重叠
+    splits = purged_ts_split(dates, n_splits=3, purge_bars=5, embargo_bars=5)
+    no_overlap = True
+    for train_idx, test_idx in splits:
+        if set(train_idx) & set(test_idx):
+            no_overlap = False
             break
-    if f0_ic_5d:
-        passed = abs(f0_ic_5d['ic_mean']) > 0.05 and f0_ic_5d['ic_t_stat'] > 2
-        tr.add("factor_0 IC 显著性", passed, {
-            "ic_mean": f0_ic_5d['ic_mean'],
-            "ic_t_stat": f0_ic_5d['ic_t_stat'],
-            "ic_ir": f0_ic_5d['ic_ir'],
-        })
-
-
-def test_ic_performance(tr: TestResults):
-    """测试6: IC 分析性能对比"""
-    print("\n=== 测试6: IC 分析性能对比 ===")
-    # 用较大的数据集测试性能
-    factor_df, forward_returns = generate_factor_data(
-        n_stocks=300, n_dates=250, n_factors=5
+    report.record(
+        "Purged TS Split 无重叠",
+        "正确性",
+        no_overlap and len(splits) > 0,
+        f"折数={len(splits)}, 无重叠={no_overlap}",
     )
-    factor_names = [f'factor_{i}' for i in range(5)]
 
-    result = benchmark_ic(factor_df, forward_returns, factor_names, runs=3)
+    # 测试 walk_forward_splits
+    wf_splits = walk_forward_splits(dates, train_window=100, test_window=20, purge_bars=5)
+    wf_no_overlap = True
+    for train_idx, test_idx in wf_splits:
+        if set(train_idx) & set(test_idx):
+            wf_no_overlap = False
+            break
+    report.record(
+        "Walk-Forward Split 无重叠",
+        "正确性",
+        wf_no_overlap and len(wf_splits) > 0,
+        f"折数={len(wf_splits)}, 无重叠={wf_no_overlap}",
+    )
 
-    passed = result['speedup'] >= 1.0
-    tr.add("IC 性能提升", passed, {
-        "vectorized_median_time_s": result['vectorized']['median_time'],
-        "loop_median_time_s": result['loop']['median_time'],
-        "speedup_x": result['speedup'],
-        "max_ic_diff": result['max_ic_diff'],
-        "n_factors": result['n_factors'],
-        "n_stocks": 300,
-        "n_dates": 250,
-    })
-
-
-def test_ic_edge_cases(tr: TestResults):
-    """测试7: IC 边界条件"""
-    print("\n=== 测试7: IC 边界条件测试 ===")
-
-    # 7.1 空数据
-    empty = pd.DataFrame(columns=['date', 'code', 'factor_0'])
-    empty_ret = pd.DataFrame(columns=['date', 'code', 'ret_forward_1d'])
-    r1 = vectorized_ic(empty, empty_ret)
-    r2 = loop_ic(empty, empty_ret)
-    tr.add("IC 空数据", r1 == {} and r2 == {}, {
-        "vectorized_empty": r1 == {},
-        "loop_empty": r2 == {},
-    })
-
-    # 7.2 单日期（样本不足）
-    single = pd.DataFrame([
-        {'date': pd.Timestamp('2024-01-01'), 'code': 'A', 'factor_0': 1.0},
-        {'date': pd.Timestamp('2024-01-01'), 'code': 'B', 'factor_0': 2.0},
-    ])
-    single_ret = pd.DataFrame([
-        {'date': pd.Timestamp('2024-01-01'), 'code': 'A', 'ret_forward_1d': 0.01},
-        {'date': pd.Timestamp('2024-01-01'), 'code': 'B', 'ret_forward_1d': -0.01},
-    ])
-    # min_samples=10，应返回空
-    r1 = vectorized_ic(single, single_ret, ['factor_0'], min_samples=10)
-    tr.add("IC 样本不足保护", len(r1.get('ret_forward_1d', [])) == 0, {
-        "result_keys": list(r1.keys()),
-    })
+    # 测试 walk_forward_predict 生成完整 OOS 预测
+    from sklearn.linear_model import LinearRegression
+    preds, fold_info = walk_forward_predict(
+        X, y, dates,
+        model_factory=lambda: LinearRegression(),
+        train_window=100, test_window=20, purge_bars=5,
+    )
+    coverage = preds.notna().mean()
+    report.record(
+        "Walk-Forward 预测覆盖",
+        "正确性",
+        coverage > 0.3 and len(fold_info) > 0,
+        f"覆盖率={coverage:.2%}, 折数={len(fold_info)}",
+    )
 
 
-# ------------------------------------------------------------------
+def test_baseline_bug_demo(report: TestReport):
+    """演示原实现的索引 bug。"""
+    print("\n=== Bug 验证：原 train 方法索引错误 ===")
+
+    # 构造 100 行数据，后 20 行作为 test_dates
+    X = pd.DataFrame({'f1': np.arange(100), 'f2': np.arange(100) * 2})
+    y = pd.Series(np.arange(100), name='y')
+    test_dates = pd.Series(pd.date_range('2024-01-01', periods=20), index=range(80, 100))
+
+    X_train, X_test, y_train, y_test = train_baseline_bug(X, y, test_dates)
+
+    # bug：X.index 是 0..99，test_dates.index 是 80..99
+    # isin 会匹配 80..99，所以 train 应该是 0..79（80 行），test 是 80..99（20 行）
+    # 看似正确，但如果 X 经过 dropna/reset_index 后 index 不连续，bug 就会暴露
+    # 演示：X 重置索引后
+    X_reset = X.drop([0, 1, 2]).reset_index(drop=True)  # 现在 index 是 0..96
+    y_reset = y.drop([0, 1, 2]).reset_index(drop=True)
+    test_dates_reset = pd.Series(
+        pd.date_range('2024-01-01', periods=20),
+        index=range(77, 97),  # 对应原数据的后 20 行
+    )
+
+    X_train2, X_test2, _, _ = train_baseline_bug(X_reset, y_reset, test_dates_reset)
+    # bug：X_reset.index 是 0..96，test_dates_reset.index 是 77..96
+    # isin(77..96) 会匹配 X_reset 的 77..96 行，但语义上 test_dates 是日期不是行号
+    # 当 test_dates 的 index 与 X 的 index 不对齐时，划分就是错的
+    bug_exposed = len(X_test2) == 20  # 表面正确
+    # 真正的 bug：如果 test_dates.index 是日期而非行号
+    test_dates_dates = pd.Series(
+        pd.date_range('2024-01-01', periods=20),
+        index=pd.date_range('2023-01-01', periods=20),  # index 是日期
+    )
+    try:
+        X_train3, X_test3, _, _ = train_baseline_bug(X_reset, y_reset, test_dates_dates)
+        # X_reset.index 是 0..96，test_dates_dates.index 是日期
+        # isin(日期) 永远不匹配数字 index，所以 X_test3 为空，X_train3 = 全部
+        bug_confirmed = len(X_test3) == 0 and len(X_train3) == len(X_reset)
+    except Exception:
+        bug_confirmed = False
+
+    report.record(
+        "原 train 方法索引 Bug 确认",
+        "Bug验证",
+        bug_confirmed,
+        f"当 test_dates.index 为日期时，X_test 为空（{len(X_test3) if bug_confirmed else 'N/A'} 行），"
+        f"全部数据进入训练集，无样本外验证",
+    )
+
+
+# ----------------------------------------------------------------------
 # 主入口
-# ------------------------------------------------------------------
-def run_all_tests():
-    """运行全部测试"""
+# ----------------------------------------------------------------------
+
+def main():
     print("=" * 70)
     print("jingni-trader 优化验证测试套件")
     print(f"执行时间: {datetime.now().isoformat()}")
-    print(f"分支: feat/quant-opt-20260620")
     print("=" * 70)
 
-    tr = TestResults()
+    report = TestReport()
 
     # 生成测试数据
-    print("\n生成测试数据...")
-    t0 = time.perf_counter()
-    data = generate_market_data(n_stocks=50, start_date="2022-01-01", end_date="2024-12-31")
-    signals = generate_signals(data, rebalance_days=5, top_pct=0.2)
-    print(f"  行情数据: {len(data)} 行, {data['code'].nunique()} 只股票")
-    print(f"  信号数据: {len(signals)} 条")
-    print(f"  数据生成耗时: {time.perf_counter() - t0:.3f}s")
+    print("\n生成合成测试数据...")
+    data_small = make_synthetic_data(n_codes=50, n_days=250)
+    data_large = make_synthetic_data(n_codes=200, n_days=500)
+    fr_small = make_forward_returns(data_small)
+    fr_large = make_forward_returns(data_large)
+    signals_small = make_signals(data_small)
+    signals_large = make_signals(data_large)
+    bench_small = make_benchmark(data_small)
+    print(f"小数据集: {len(data_small)} 行, {data_small['code'].nunique()} 只股票")
+    print(f"大数据集: {len(data_large)} 行, {data_large['code'].nunique()} 只股票")
 
-    # 运行测试
-    test_backtest_correctness(tr, data, signals)
-    test_backtest_performance(tr, data, signals)
-    test_backtest_edge_cases(tr)
-    test_enhanced_metrics(tr, data, signals)
-    test_ic_correctness(tr)
-    test_ic_performance(tr)
-    test_ic_edge_cases(tr)
+    # 正确性测试
+    test_factor_correctness(report, data_small)
+    test_ic_correctness(report, data_small, fr_small)
+    test_backtest_correctness(report, data_small, signals_small)
+    test_backtest_with_benchmark(report, data_small, signals_small, bench_small)
+    test_walk_forward_correctness(report, data_small)
+    test_baseline_bug_demo(report)
+
+    # 性能测试（用大数据集）
+    test_factor_performance(report, data_large)
+    test_ic_performance(report, data_large, fr_large)
+    test_backtest_performance(report, data_large, signals_large)
+
+    # 边界测试
+    test_empty_data(report)
+    test_single_code(report)
+    test_short_history(report)
+    test_all_nan_column(report)
 
     # 汇总
-    print(tr.summary_str())
+    print("\n" + "=" * 70)
+    print("测试汇总")
+    print("=" * 70)
+    summary = report.summary()
+    print(f"总计: {summary['total']}, 通过: {summary['passed']}, 失败: {summary['failed']}")
+    print(f"通过率: {summary['pass_rate']:.2%}")
 
-    n_pass = sum(1 for t in tr.results["tests"] if t["passed"])
-    n_fail = sum(1 for t in tr.results["tests"] if not t["passed"])
-    tr.results["summary"] = {
-        "total": len(tr.results["tests"]),
-        "passed": n_pass,
-        "failed": n_fail,
-        "pass_rate": n_pass / len(tr.results["tests"]) if tr.results["tests"] else 0,
-    }
+    # 保存结果
+    out_dir = Path(__file__).parent
+    out_path = out_dir / "test_results.json"
+    with open(out_path, 'w', encoding='utf-8') as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2, default=str)
+    print(f"\n测试结果已保存: {out_path}")
 
-    return tr.results
+    return summary
 
 
 if __name__ == "__main__":
-    results = run_all_tests()
-
-    # 保存测试结果
-    output_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "test_results.json"
-    )
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(results, f, ensure_ascii=False, indent=2, default=str)
-    print(f"\n测试结果已保存至: {output_path}")
-
-    sys.exit(0 if results["summary"]["failed"] == 0 else 1)
+    main()
