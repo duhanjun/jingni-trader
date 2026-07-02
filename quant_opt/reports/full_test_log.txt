@@ -1,0 +1,68 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.13, pytest-9.0.3, pluggy-1.6.0 -- /root/.pyenv/versions/3.12.13/bin/python3
+cachedir: .pytest_cache
+rootdir: /workspace
+collecting ... collected 27 items
+
+quant_opt/tests/test_expression_engine.py::test_ref_equals_groupby_shift PASSED
+quant_opt/tests/test_expression_engine.py::test_delta_correctness PASSED
+quant_opt/tests/test_expression_engine.py::test_ts_mean_correctness PASSED
+quant_opt/tests/test_expression_engine.py::test_rank_correctness PASSED
+quant_opt/tests/test_expression_engine.py::test_zscore_correctness PASSED
+quant_opt/tests/test_expression_engine.py::test_compose_binary_ops PASSED
+quant_opt/tests/test_expression_engine.py::test_compose_complex_expression PASSED
+quant_opt/tests/test_expression_engine.py::test_evaluator_batch_eval PASSED
+quant_opt/tests/test_expression_engine.py::test_evaluator_memoization PASSED
+quant_opt/tests/test_expression_engine.py::test_performance_single_vs_builtin 
+[perf] 表达式引擎: 0.1880s vs 手写: 0.1883s
+PASSED
+quant_opt/tests/test_factor_registry.py::test_builtin_factors_registered PASSED
+quant_opt/tests/test_factor_registry.py::test_register_decorator_basic PASSED
+quant_opt/tests/test_factor_registry.py::test_register_duplicate_raises PASSED
+quant_opt/tests/test_factor_registry.py::test_filter_by_category PASSED
+quant_opt/tests/test_factor_registry.py::test_filter_by_tag PASSED
+quant_opt/tests/test_factor_registry.py::test_compute_single PASSED
+quant_opt/tests/test_factor_registry.py::test_compute_many_with_shared_evaluator PASSED
+quant_opt/tests/test_factor_registry.py::test_override_params PASSED
+quant_opt/tests/test_factor_registry.py::test_summary PASSED
+quant_opt/tests/test_integration.py::test_end_to_end_factor_signal_backtest 
+[集成测试] 20日反转因子回测结果:
+  total_return: 0.1963
+  annual_return: 0.4617
+  volatility: 0.3401
+  sharpe_ratio: 1.2692
+  max_drawdown: -0.1409
+  calmar_ratio: 3.2776
+  win_rate: 0.4286
+  n_days: 119
+PASSED
+quant_opt/tests/test_integration.py::test_registry_evaluate_via_expression_engine PASSED
+quant_opt/tests/test_integration.py::test_performance_summary 
+[性能汇总]
+  expression_engine_eval_many (3 factors): 59.7 ms
+  factor_registry_compute_many (5 factors): 127.0 ms
+  vectorized_backtest (100×500): 120.3 ms
+PASSED
+quant_opt/tests/test_vectorized_backtest.py::test_portfolio_weight_normalization PASSED
+quant_opt/tests/test_vectorized_backtest.py::test_vectorized_backtest_runs PASSED
+quant_opt/tests/test_vectorized_backtest.py::test_metrics_calculated PASSED
+quant_opt/tests/test_vectorized_backtest.py::test_long_short_weights PASSED
+quant_opt/tests/test_vectorized_backtest.py::test_performance_benchmark 
+[bench] 向量化回测 (100股×500日): 0.123s
+[bench] 纯 Python 循环回测: 2.989s
+[bench] 加速比: 24.4x
+PASSED
+
+=============================== warnings summary ===============================
+quant_opt/tests/test_integration.py: 620 warnings
+quant_opt/tests/test_vectorized_backtest.py: 660 warnings
+  /workspace/quant_opt/vectorized_backtest/engine.py:261: DeprecationWarning: Bitwise inversion '~' on bool is deprecated and will be removed in Python 3.16. This returns the bitwise inversion of the underlying int object and is usually not what you expect from negating a bool. Use the 'not' operator for boolean negation or ~int(x) if you really want the bitwise inversion of the underlying int.
+    (~price_limit) | (~np.asarray(limit_up_arr[t], dtype=bool))
+
+quant_opt/tests/test_integration.py: 618 warnings
+quant_opt/tests/test_vectorized_backtest.py: 657 warnings
+  /workspace/quant_opt/vectorized_backtest/engine.py:206: DeprecationWarning: Bitwise inversion '~' on bool is deprecated and will be removed in Python 3.16. This returns the bitwise inversion of the underlying int object and is usually not what you expect from negating a bool. Use the 'not' operator for boolean negation or ~int(x) if you really want the bitwise inversion of the underlying int.
+    (~price_limit) | (~np.asarray(limit_down_arr[t], dtype=bool))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+====================== 27 passed, 2555 warnings in 6.21s =======================

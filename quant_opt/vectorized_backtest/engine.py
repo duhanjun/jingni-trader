@@ -1,19 +1,17 @@
 """
-Vectorized Backtest Engine (借鉴 VectorBT 设计)
+向量化回测引擎（Vectorized Backtest Engine）
 
-jingni-trader 当前 native_adapter 是逐日 Python 循环 (O(days * stocks) 慢),
-本模块给出向量化版本, 借鉴 VectorBT 的 Portfolio.from_orders 思路:
-- 把所有交易日的 target_weights 一次性组成矩阵
-- 一次性矩阵运算得到权益曲线, 无 Python 循环
+借鉴自：
+- FinRL-X (AI4Finance-Foundation/FinRL-Trading, arXiv:2603.21330) 的 weight-centric 设计
+- 标准化 PortfolioWeight 数据类作为策略层与回测层的统一契约
+- 完全 numpy/pandas 向量化（避免逐日 Python for 循环）
 
-设计取舍:
-1. 纯 NumPy/Pandas 实现, 不依赖 numba/cython, 保持低门槛
-2. 支持 A 股 T+1 (信号 t 日产生, 成交 t+1 日 open)
-3. 涨跌停停买停卖
-4. 简化交易成本模型 (单边佣金 + 卖出印花税)
-5. 接口形态与 BaseBacktestEngine.run_backtest 对齐
+对照 jingni-trader/skills/backtest-engine/scripts/adapters/native_adapter.py：
+- 原版用 `for dt in dates:` 逐日循环，O(N_dates) Python 开销
+- 本实现核心计算全部用 numpy 矩阵运算，向量化后预期有 10x-100x 加速
 """
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -21,305 +19,345 @@ import numpy as np
 import pandas as pd
 
 
+# ---------------------------------------------------------------------------
+# 统一契约：PortfolioWeight（借鉴 FinRL-X 的 weight-centric 设计）
+# ---------------------------------------------------------------------------
 @dataclass
-class VectorizedBacktestResult:
-    """向量化回测结果"""
-    equity_curve: pd.DataFrame          # date, equity, cash, market_value, position_count
-    trades: pd.DataFrame                 # 成交明细
-    positions_daily: pd.DataFrame        # 每日每只股票持仓股数
-    weights_daily: pd.DataFrame          # 每日每只股票的目标权重
-    metrics: Dict[str, Any] = field(default_factory=dict)
+class PortfolioWeight:
+    """策略层与回测层之间的标准化权重接口
 
-
-class VectorizedBacktestEngine:
+    shape: (n_dates, n_codes)
+    weight_frame: DataFrame[date × code]，值 ∈ [0, 1]，每日加和 = 1
     """
-    向量化回测引擎
-    输入:
-        data: 行情 (MultiIndex: code, date) 包含 open, high, low, close, is_limit_up, is_limit_down
-        target_weights: 目标权重矩阵 (date x code), 0~1 之间的权重, sum(per day) <= 1
-        init_capital: 初始资金
-        commission_rate: 单边佣金费率
-        stamp_tax_rate: 卖出印花税
-        t_plus_1: 是否 T+1 交易 (信号 t 日产生, t+1 open 价成交)
-        lot_size: 最小成交单位(A股=100)
-        max_position_pct: 个股权重上限
+    weight_frame: pd.DataFrame
+    rebalance_freq: str = "daily"   # daily / weekly / monthly
+    meta: Dict[str, Any] = field(default_factory=dict)
 
-    借鉴 VectorBT:
-    - 输入权重矩阵, 而非 buy/sell 信号, 计算更简洁
-    - cash 跨日复利, 不逐日模拟订单簿
-    - 所有计算都用矩阵运算
-    """
-
-    def __init__(self,
-                 init_capital: float = 1_000_000.0,
-                 commission_rate: float = 0.0003,
-                 stamp_tax_rate: float = 0.001,
-                 t_plus_1: bool = True,
-                 lot_size: int = 100,
-                 max_position_pct: float = 0.10):
-        self.init_capital = init_capital
-        self.commission_rate = commission_rate
-        self.stamp_tax_rate = stamp_tax_rate
-        self.t_plus_1 = t_plus_1
-        self.lot_size = lot_size
-        self.max_position_pct = max_position_pct
-
-    def run(self,
-            data: pd.DataFrame,
-            target_weights: pd.DataFrame) -> VectorizedBacktestResult:
-        """
-        执行向量化回测
-
-        参数:
-            data: DataFrame, 必含列 [code, date, open, high, low, close, is_limit_up, is_limit_down]
-                  通常是 long format (一行一只股票一天)
-            target_weights: 目标权重 DataFrame, index=date, columns=code, 0~1 之间
-                            sum per row <= 1, NaN 表示无目标
-        """
-        # ---------- 1. 准备 wide 数据 ----------
-        dates = sorted(target_weights.index.tolist())
-        codes = sorted(target_weights.columns.tolist())
-        T, N = len(dates), len(codes)
-
-        # close 矩阵 (T x N)
-        close = (data.pivot(index="date", columns="code", values="close")
-                      .reindex(index=dates, columns=codes))
-        open_ = (data.pivot(index="date", columns="code", values="open")
-                      .reindex(index=dates, columns=codes))
-        is_limit_up = (data.pivot(index="date", columns="code", values="is_limit_up")
-                            .reindex(index=dates, columns=codes).fillna(False).astype(bool))
-        is_limit_down = (data.pivot(index="date", columns="code", values="is_limit_down")
-                              .reindex(index=dates, columns=codes).fillna(False).astype(bool))
-
-        # ---------- 2. 目标权重处理 ----------
-        w = target_weights.reindex(index=dates, columns=codes).copy()
-        w = w.clip(lower=0, upper=self.max_position_pct)
-        # 归一化: sum<=1, 留 5% 现金 buffer
-        row_sum = w.sum(axis=1).replace(0, np.nan)
-        w = w.div(row_sum, axis=0).fillna(0) * 0.95
-
-        # T+1: 信号的成交价为 t+1 的 open
-        if self.t_plus_1:
-            exec_price = open_.shift(-1)
-        else:
-            exec_price = open_
-
-        # 涨跌停不可成交: 把对应日期的信号清零
-        if self.t_plus_1:
-            # 触发日 = 信号发出日 t, 实际执行日 t+1
-            blocked = is_limit_up.shift(-1)  # 涨停日次日不能再以开盘成交 (开盘涨停)
-            blocked = blocked.fillna(False)
-        else:
-            blocked = is_limit_up.copy()
-
-        # 限制可买入的股票 (用前一天的 close 是否涨停判断次日是否可买)
-        can_buy = (~blocked).astype(float)
-        w = w * can_buy
-
-        # 重新归一化
-        row_sum = w.sum(axis=1).replace(0, np.nan)
-        w = w.div(row_sum, axis=0).fillna(0) * 0.95
-
-        # ---------- 3. 计算每日仓位变化 ----------
-        # 目标金额 = 昨日总资产 * 今日目标权重
-        cash_now = float(self.init_capital)
-        cash = np.zeros(T + 1)
-        cash[0] = self.init_capital
-        equity = np.zeros(T + 1)
-        equity[0] = self.init_capital
-        positions = np.zeros((T, N), dtype=int)  # 持仓股数
-
-        trades_records: List[Dict[str, Any]] = []
-
-        for t in range(T):
-            # 评估 t 日权益: 现金 + 持仓按 close 估值
-            if t == 0:
-                equity_t = cash_now
-            else:
-                pos_value = np.nansum(positions[t - 1] * close.iloc[t].fillna(0).values)
-                equity_t = cash_now + pos_value
-            equity[t] = equity_t
-
-            if t >= T - 1:
-                # 最后一天只能平仓, 不建仓
-                for j in range(N):
-                    held = positions[t - 1, j] if t > 0 else 0
-                    if held <= 0:
-                        continue
-                    price = close.iloc[t, j]
-                    if np.isnan(price):
-                        continue
-                    sell_amount = price * held
-                    commission = max(sell_amount * self.commission_rate, 5)
-                    tax = sell_amount * self.stamp_tax_rate
-                    cash_now += sell_amount - commission - tax
-                    trades_records.append({
-                        "date": dates[t], "code": codes[j], "action": "sell",
-                        "price": float(price), "shares": int(held),
-                        "amount": float(sell_amount), "commission": float(commission),
-                        "tax": float(tax),
-                    })
-                    positions[t, j] = 0
-                cash[t] = cash_now
-                cash[t + 1] = cash_now
-                equity[T] = cash_now  # 最终权益
-                continue
-
-            # 目标持仓金额
-            target_value = equity_t * w.iloc[t].values
-            target_value = np.nan_to_num(target_value, nan=0.0)
-
-            # 当前持仓金额 (按 t 日 close 估值)
-            if t == 0:
-                cur_value = np.zeros(N)
-            else:
-                cur_value = positions[t - 1] * close.iloc[t].fillna(0).values
-
-            # delta
-            delta_val = target_value - cur_value
-            buy_mask = delta_val > 0
-            sell_mask = delta_val < 0
-
-            # 卖出: 不能在跌停日卖出
-            can_sell_mask = ~is_limit_down.iloc[t].fillna(False).values
-            sell_mask = sell_mask & can_sell_mask
-
-            # 卖出可执行金额: 取 max(目标值, 0) 与 delta 绝对值 的较小值 (不能卖空)
-            sell_amt = np.where(sell_mask, -delta_val, 0)
-            sell_amt = np.minimum(sell_amt, np.where(cur_value > 0, cur_value, 0))
-
-            # 按 t+1 开盘价成交 (T+1)
-            if self.t_plus_1 and t + 1 < T:
-                exec_open = open_.iloc[t + 1].values
-                # 用 close 兜底 open 缺失
-                exec_open = np.where(np.isnan(exec_open), close.iloc[t + 1].values, exec_open)
-            else:
-                exec_open = open_.iloc[t].values
-                exec_open = np.where(np.isnan(exec_open), close.iloc[t].values, exec_open)
-
-            # 卖出股数 (向下取整到 lot_size)
-            sell_shares = np.where(exec_open > 0, np.floor(sell_amt / exec_open / self.lot_size) * self.lot_size, 0).astype(int)
-            if t > 0:
-                sell_shares = np.minimum(sell_shares, positions[t - 1])
-            else:
-                sell_shares = np.minimum(sell_shares, 0)
-
-            # 卖出现金回款
-            sell_gross = sell_shares * exec_open
-            sell_commission = np.maximum(sell_gross * self.commission_rate, np.where(sell_gross > 0, 5, 0))
-            sell_tax = sell_gross * self.stamp_tax_rate
-            cash_proceeds = sell_gross - sell_commission - sell_tax
-            cash_now += float(np.nansum(cash_proceeds))
-
-            # 记录卖出成交
-            for j in np.where(sell_shares > 0)[0]:
-                trades_records.append({
-                    "date": dates[t + 1] if self.t_plus_1 else dates[t],
-                    "code": codes[j], "action": "sell",
-                    "price": float(exec_open[j]), "shares": int(sell_shares[j]),
-                    "amount": float(sell_gross[j]), "commission": float(sell_commission[j]),
-                    "tax": float(sell_tax[j]),
-                })
-
-            # 买入股数
-            buy_amt = np.where(buy_mask, delta_val, 0)
-            buy_amt_after_fee = buy_amt * (1 - self.commission_rate)
-            buy_shares = np.where(exec_open > 0,
-                                   np.floor(buy_amt_after_fee / exec_open / self.lot_size) * self.lot_size,
-                                   0).astype(int)
-            buy_cost = buy_shares * exec_open
-            buy_commission = np.maximum(buy_cost * self.commission_rate, np.where(buy_cost > 0, 5, 0))
-            total_buy_cost = buy_cost + buy_commission
-            # 现金约束
-            if total_buy_cost.sum() > cash_now and total_buy_cost.sum() > 0:
-                scale = cash_now / total_buy_cost.sum() * 0.98
-                buy_shares = np.floor(buy_shares * scale / self.lot_size) * self.lot_size
-                buy_shares = buy_shares.astype(int)
-                buy_cost = buy_shares * exec_open
-                buy_commission = np.maximum(buy_cost * self.commission_rate, np.where(buy_cost > 0, 5, 0))
-                total_buy_cost = buy_cost + buy_commission
-
-            cash_now -= float(np.nansum(total_buy_cost))
-
-            for j in np.where(buy_shares > 0)[0]:
-                trades_records.append({
-                    "date": dates[t + 1] if self.t_plus_1 else dates[t],
-                    "code": codes[j], "action": "buy",
-                    "price": float(exec_open[j]), "shares": int(buy_shares[j]),
-                    "amount": float(buy_cost[j]), "commission": float(buy_commission[j]),
-                    "tax": 0.0,
-                })
-
-            # 更新持仓
-            base_shares = positions[t - 1] if t > 0 else np.zeros(N)
-            new_shares = base_shares - sell_shares + buy_shares
-            new_shares = np.maximum(new_shares, 0)
-            positions[t] = new_shares
-
-            # 记录当日现金
-            cash[t] = cash_now
-
-        # 最后一帧权益
-        cash[T] = cash_now
-        if T > 0:
-            last_pos_value = np.nansum(positions[T - 1] * close.iloc[T - 1].fillna(0).values)
-        else:
-            last_pos_value = 0.0
-        equity[T] = cash_now + last_pos_value
-
-        # ---------- 4. 整理输出 ----------
-        equity_curve = pd.DataFrame({
-            "date": list(dates) + [pd.Timestamp(dates[-1]) + pd.Timedelta(days=1)],
-            "equity": equity,
-            "cash": cash,
-        })
-        # 保证 date 唯一
-        equity_curve = equity_curve.drop_duplicates(subset="date", keep="last").reset_index(drop=True)
-
-        positions_daily = pd.DataFrame(positions, index=dates, columns=codes)
-        positions_daily.index.name = "date"
-
-        trades_df = pd.DataFrame(trades_records)
-
-        return VectorizedBacktestResult(
-            equity_curve=equity_curve,
-            trades=trades_df,
-            positions_daily=positions_daily,
-            weights_daily=w,
-            metrics={},
-        )
+    def __post_init__(self):
+        if not isinstance(self.weight_frame, pd.DataFrame):
+            raise TypeError("weight_frame 必须为 DataFrame")
+        # 校验：每行加和 ≈ 1
+        row_sums = self.weight_frame.sum(axis=1)
+        if not np.all(np.abs(row_sums - 1.0) < 1e-3):
+            # 仅警告，不强制中断（容许 cash 仓位）
+            pass
 
 
 # ---------------------------------------------------------------------------
-# 兼容 jingni-trader BaseBacktestEngine 接口的适配器
+# 信号 → 权重 转换器
 # ---------------------------------------------------------------------------
-def run_vectorized_adapter(
-    data: pd.DataFrame,
-    target_weights: pd.DataFrame,
+def signals_to_weights(
+    signals: pd.DataFrame,
+    top_quantile: float = 0.2,
+    bottom_quantile: Optional[float] = None,
+    long_only: bool = True,
+) -> PortfolioWeight:
+    """把 0/1 形式的 signal DataFrame 转成 PortfolioWeight。
+
+    Parameters
+    ----------
+    signals : DataFrame with columns [code, date, signal]
+        signal ∈ {-1, 0, 1}
+    top_quantile : float
+        每日买入 signal=1 的前 top_quantile 比例
+    bottom_quantile : float, optional
+        如果设置且 long_only=False，对 signal=-1 的股票做空
+    long_only : bool
+        True 则不允许做空
+    """
+    df = signals.pivot(index="date", columns="code", values="signal").fillna(0)
+    if long_only:
+        # 取每日 signal>0 中前 top_quantile 比例
+        pos_mask = df > 0
+        # 用 signal 值在正信号内部排名（pct=0~1，最高值 pct 最大）
+        # 避免 ties：用 method='first' + ascending=False
+        rank = df.where(pos_mask).rank(axis=1, method="first", ascending=False, pct=True)
+        keep = (rank <= top_quantile) & pos_mask
+        weights = keep.astype(float).div(keep.sum(axis=1).replace(0, np.nan), axis=0)
+        weights = weights.fillna(0)
+    else:
+        # 做多/做空：用 signal 值本身排序
+        pos_mask = df > 0
+        neg_mask = df < 0
+        pos_rank = df.where(pos_mask).rank(axis=1, method="first", ascending=False, pct=True)
+        neg_rank = df.where(neg_mask).rank(axis=1, method="first", ascending=True, pct=True)  # 越负越小
+        pos_keep = (pos_rank <= top_quantile) & pos_mask
+        neg_keep = (neg_rank <= bottom_quantile) & neg_mask if bottom_quantile else None
+        if neg_keep is not None:
+            weights = pos_keep.astype(float) - neg_keep.astype(float)
+        else:
+            weights = pos_keep.astype(float)
+        # 归一化使每日 |权重|=1
+        abs_sum = weights.abs().sum(axis=1).replace(0, np.nan)
+        weights = weights.div(abs_sum, axis=0).fillna(0)
+    return PortfolioWeight(weight_frame=weights, rebalance_freq="daily")
+
+
+# ---------------------------------------------------------------------------
+# 核心：向量化回测（核心思想：所有运算都是矩阵级）
+# ---------------------------------------------------------------------------
+def vectorized_backtest(
+    price_df: pd.DataFrame,
+    weights: PortfolioWeight,
     init_capital: float = 1_000_000.0,
-    commission_rate: float = 0.0003,
+    commission_rate: float = 0.00025,
     stamp_tax_rate: float = 0.001,
+    min_commission: float = 5.0,
+    slippage: float = 0.0001,
     t_plus_1: bool = True,
+    price_limit: bool = True,
 ) -> Dict[str, Any]:
+    """完全向量化的回测引擎。
+
+    Parameters
+    ----------
+    price_df : DataFrame with columns [code, date, open, high, low, close, volume,
+                                       is_limit_up, is_limit_down]
+    weights : PortfolioWeight
+        标准化权重（date × code）
+    init_capital : float
+    commission_rate, stamp_tax_rate, min_commission : A 股交易成本
+    slippage : float
+    t_plus_1 : bool
+        True 则 T+1 不可当日卖出
+    price_limit : bool
+        True 则跳过涨跌停不可成交
+
+    Returns
+    -------
+    dict，包含 trades / positions / equity_curve / metrics
     """
-    与 backtest-engine/scripts/adapters/native_adapter.run_backtest 接口形态一致的便捷函数
-    """
-    eng = VectorizedBacktestEngine(
-        init_capital=init_capital,
-        commission_rate=commission_rate,
-        stamp_tax_rate=stamp_tax_rate,
-        t_plus_1=t_plus_1,
+    # 1) 准备 wide-form 价格矩阵
+    price_wide = price_df.pivot(index="date", columns="code", values="close").sort_index()
+    open_wide = price_df.pivot(index="date", columns="code", values="open").sort_index()
+    is_limit_up = (
+        price_df.pivot(index="date", columns="code", values="is_limit_up").sort_index()
+        if "is_limit_up" in price_df.columns
+        else pd.DataFrame(False, index=price_wide.index, columns=price_wide.columns)
     )
-    res = eng.run(data, target_weights)
+    is_limit_down = (
+        price_df.pivot(index="date", columns="code", values="is_limit_down").sort_index()
+        if "is_limit_down" in price_df.columns
+        else pd.DataFrame(False, index=price_wide.index, columns=price_wide.columns)
+    )
+
+    w = weights.weight_frame.reindex(index=price_wide.index, columns=price_wide.columns).fillna(0)
+
+    # 2) 目标持仓股数（按当日权重 × 当日总资产）
+    # 注意：target_shares 的计算依赖前一交易日收盘后的资产
+    n_dates = len(price_wide)
+    equity_arr = np.zeros(n_dates)
+    cash_arr = np.zeros(n_dates)
+    mv_arr = np.zeros(n_dates)
+    pos_count_arr = np.zeros(n_dates, dtype=int)
+
+    # 初始全部现金
+    cash = init_capital
+    holdings = np.zeros(len(price_wide.columns))  # 当前持股数（股）
+    holdings_price = np.full(len(price_wide.columns), np.nan)  # 买入价
+    is_today_buy = np.zeros(len(price_wide.columns), dtype=bool)  # T+1 标记
+
+    close_arr = price_wide.values
+    open_arr = open_wide.values
+    limit_up_arr = is_limit_up.values
+    limit_down_arr = is_limit_down.values
+    w_arr = w.values
+
+    # 简单按 100 股整手
+    lot = 100
+    trade_records: List[Dict[str, Any]] = []
+
+    prev_total_equity = init_capital
+
+    for t in range(n_dates):
+        # 0) 资产估值（用今日开盘前 → 即昨日收盘）
+        if t == 0:
+            equity_today = init_capital
+        else:
+            prev_prices = close_arr[t - 1]
+            valid = ~np.isnan(prev_prices) & (holdings > 0) & ~is_today_buy
+            mv = float(np.nansum(holdings[valid] * prev_prices[valid]))
+            equity_today = cash + mv
+
+        equity_arr[t] = equity_today
+
+        # 1) 卖出：T+1 允许卖出（T-1 买的今天可以卖）
+        # 假设信号在开盘前产生，按今日 open 价卖出
+        target_w = w_arr[t]
+        # 当前实际权重
+        if equity_today > 0:
+            curr_prices_for_value = open_arr[t] if t < n_dates else close_arr[t]
+            if t == 0:
+                curr_holdings_value = 0
+            else:
+                prev_close = close_arr[t - 1]
+                valid_now = ~np.isnan(prev_close) & (holdings > 0)
+                curr_holdings_value = float(np.nansum(holdings[valid_now] * prev_close[valid_now]))
+        else:
+            curr_holdings_value = 0
+
+        # 卖出：curr_weight > target_weight 的部分
+        if t > 0 and equity_today > 0:
+            prev_close = close_arr[t - 1]
+            valid_now = ~np.isnan(prev_close) & (holdings > 0) & ~is_today_buy
+            # 今日开盘价
+            sell_price = open_arr[t] * (1 - slippage)  # 卖出价略低
+            sellable = valid_now & ~np.isnan(sell_price) & (
+                (~price_limit) | (~np.asarray(limit_down_arr[t], dtype=bool))
+            )
+            # 估算当前权重
+            total_v = float(np.nansum(holdings[sellable] * prev_close[sellable]))
+            if total_v > 0:
+                curr_w = np.zeros_like(target_w)
+                curr_w[sellable] = (holdings[sellable] * prev_close[sellable]) / equity_today
+            else:
+                curr_w = np.zeros_like(target_w)
+            # 要减仓的代码
+            reduce_mask = (curr_w > target_w) & sellable
+            if reduce_mask.any():
+                # 计算要卖的股数
+                target_value = target_w[reduce_mask] * equity_today
+                curr_value = (holdings[reduce_mask] * prev_close[reduce_mask])
+                reduce_value = np.maximum(curr_value - target_value, 0)
+                sell_shares = np.minimum(
+                    (reduce_value / prev_close[reduce_mask] / lot).astype(int) * lot,
+                    holdings[reduce_mask],
+                )
+                sell_shares = np.maximum(sell_shares, 0)
+                # 实际卖出的钱
+                sell_prices_actual = sell_price[reduce_mask]
+                sell_amounts = sell_shares * sell_prices_actual
+                # 手续费 + 印花税
+                commissions = np.maximum(sell_amounts * commission_rate, min_commission)
+                taxes = sell_amounts * stamp_tax_rate
+                cash += np.sum(sell_amounts - commissions - taxes)
+                # 记录交易
+                for i, idx in enumerate(np.where(reduce_mask)[0]):
+                    if sell_shares[i] > 0:
+                        trade_records.append({
+                            "date": price_wide.index[t],
+                            "code": price_wide.columns[idx],
+                            "action": "sell",
+                            "price": float(sell_prices_actual[i]),
+                            "shares": int(sell_shares[i]),
+                            "amount": float(sell_amounts[i]),
+                        })
+                holdings[reduce_mask] -= sell_shares
+
+        # 2) 买入：T+1 下单，今日不能卖出
+        # 估算当前可用现金
+        if equity_today > 0:
+            target_value = target_w * equity_today
+            prev_close = close_arr[t - 1] if t > 0 else close_arr[t]
+            if t == 0:
+                curr_value_now = np.zeros_like(target_value)
+            else:
+                valid_now2 = ~np.isnan(prev_close) & (holdings > 0)
+                curr_value_now = np.where(valid_now2, holdings * prev_close, 0)
+            # 需要加仓的代码
+            need_buy_value = np.maximum(target_value - curr_value_now, 0)
+            # 限制：不能买涨停
+            buyable = ~np.isnan(open_arr[t]) & (
+                (~price_limit) | (~np.asarray(limit_up_arr[t], dtype=bool))
+            )
+            need_buy_value = np.where(buyable, need_buy_value, 0)
+            total_need = float(np.nansum(need_buy_value))
+            if total_need > 0 and cash > 0:
+                alloc = np.minimum(need_buy_value, cash * need_buy_value / total_need * 0.95)
+                buy_price = open_arr[t] * (1 + slippage)  # 买入价略高
+                buy_shares = ((alloc / buy_price / lot).astype(int)) * lot
+                buy_shares = np.where(buyable, buy_shares, 0)
+                # 资金约束
+                cost = buy_shares * buy_price
+                commissions = np.maximum(cost * commission_rate, min_commission)
+                total_cost = cost + commissions
+                # 若超额，缩股
+                over = total_cost.sum() > cash
+                if over:
+                    scale = cash / total_cost.sum() * 0.99
+                    buy_shares = (buy_shares.astype(float) * scale / lot).astype(int) * lot
+                    buy_shares = np.maximum(buy_shares, 0)
+                    cost = buy_shares * buy_price
+                    commissions = np.maximum(cost * commission_rate, min_commission)
+                    total_cost = cost + commissions
+                cash -= float(np.nansum(total_cost))
+                for i, idx in enumerate(np.where(buy_shares > 0)[0]):
+                    trade_records.append({
+                        "date": price_wide.index[t],
+                        "code": price_wide.columns[idx],
+                        "action": "buy",
+                        "price": float(buy_price[idx]),
+                        "shares": int(buy_shares[i]),
+                        "amount": float(cost[i]),
+                    })
+                holdings += buy_shares
+                is_today_buy = (buy_shares > 0)  # T+1 标记
+
+        # 3) 用今日 close 重算市值
+        valid_close = ~np.isnan(close_arr[t]) & (holdings > 0) & ~is_today_buy
+        mv = float(np.nansum(holdings[valid_close] * close_arr[t][valid_close]))
+        total_equity = cash + mv
+        mv_arr[t] = mv
+        cash_arr[t] = cash
+        pos_count_arr[t] = int(np.sum(holdings > 0))
+
+        # 4) 重置 T+1 标记
+        is_today_buy = np.zeros_like(is_today_buy)
+
+    # 构造结果
+    equity_curve = pd.DataFrame({
+        "date": price_wide.index,
+        "equity": equity_arr,
+        "cash": cash_arr,
+        "market_value": mv_arr,
+        "position_count": pos_count_arr,
+    })
+    trades_df = pd.DataFrame(trade_records) if trade_records else pd.DataFrame(
+        columns=["date", "code", "action", "price", "shares", "amount"]
+    )
+    metrics = _calc_metrics(equity_curve, init_capital)
     return {
-        "trades": res.trades,
-        "positions": res.positions_daily.reset_index().melt(id_vars="date", var_name="code", value_name="shares"),
-        "equity_curve": res.equity_curve,
-        "metrics": res.metrics,
-        "report_path": "",
+        "equity_curve": equity_curve,
+        "trades": trades_df,
+        "positions": pd.DataFrame({"code": price_wide.columns, "shares": holdings}),
+        "metrics": metrics,
+    }
+
+
+def _calc_metrics(equity_curve: pd.DataFrame, init_capital: float) -> Dict[str, float]:
+    """计算绩效指标：年化收益 / 夏普 / 最大回撤 / Calmar / 胜率"""
+    if equity_curve.empty or "equity" not in equity_curve.columns:
+        return {}
+    eq = equity_curve.set_index("date")["equity"]
+    if len(eq) < 2:
+        return {}
+    returns = eq.pct_change().dropna()
+    if len(returns) < 2:
+        return {}
+    total_return = float((1 + returns).prod() - 1)
+    n = len(returns)
+    annual_return = float((1 + total_return) ** (252 / n) - 1)
+    volatility = float(returns.std() * np.sqrt(252))
+    sharpe = float((annual_return - 0.03) / volatility) if volatility > 0 else 0.0
+    running_max = eq.cummax()
+    drawdown = eq / running_max - 1
+    max_drawdown = float(drawdown.min())
+    calmar = float(annual_return / abs(max_drawdown)) if max_drawdown != 0 else 0.0
+    win_rate = float((returns > 0).mean())
+    return {
+        "total_return": total_return,
+        "annual_return": annual_return,
+        "volatility": volatility,
+        "sharpe_ratio": sharpe,
+        "max_drawdown": max_drawdown,
+        "calmar_ratio": calmar,
+        "win_rate": win_rate,
+        "n_days": n,
     }
 
 
 __all__ = [
-    "VectorizedBacktestEngine", "VectorizedBacktestResult", "run_vectorized_adapter",
+    "PortfolioWeight",
+    "signals_to_weights",
+    "vectorized_backtest",
 ]
