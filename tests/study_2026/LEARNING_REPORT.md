@@ -1,171 +1,268 @@
-# jingni-trader 量化交易学习报告
+# 量化交易开源项目学习报告
 
-> 日期: 2026-06-14 | 序号: #1 | 学习周期: 2026-Q2
+## 报告信息
+
+| 字段 | 内容 |
+|------|------|
+| 日期 | 2026-06-14 |
+| 序号 | #1 (首次学习报告) |
+| 研究人 | jingni-trader AI Agent |
+| 当前分支 | feature/quant-stream-inspired |
 
 ---
 
 ## 一、学习项目清单及核心亮点
 
-### 1. Microsoft Qlib (42K+ stars)
+### 1.1 Microsoft Qlib (⭐ 42K+)
+
 - **仓库**: https://github.com/microsoft/qlib
-- **最新提交**: 2026-04-22 (持续活跃)
-- **核心亮点**:
-  - **Expression Engine**: 声明式因子表达式 DSL，如 `$close / Ref($close, 1) - 1`，自动解析为 pandas 操作
-  - **Alpha158 因子集**: 标准化 158 个 Alpha 因子，覆盖 K 线、价格、成交量等维度
-  - **列式数据存储**: 专为量化优化的二进制格式 `qlib_data`，支持高性能读取
-  - **RD-Agent**: 自动因子挖掘与强化学习驱动的因子发现
-  - **模型 Zoo**: 内置 LightGBM、GRU、LSTM、Transformer 等模型
+- **语言**: Python
+- **许可证**: MIT
 
-### 2. QUANTAXIS (25K+ stars)
-- **仓库**: https://github.com/yutiansut/QUANTAXIS
-- **最新提交**: 2026-02-28 (持续活跃)
-- **核心亮点**:
-  - **QIFI 协议**: 统一账户数据接口，Python/Rust 双版本零拷贝数据交换
-  - **Python+Rust 混合架构**: 性能关键路径用 Rust 实现，Python 做业务逻辑
-  - **全栈设计**: 数据采集 → 因子计算 → 回测 → 实盘，一站式解决方案
-  - **多数据库支持**: MongoDB + ClickHouse + InfluxDB 时序优化
+**核心亮点**:
+1. **Point-in-Time (PIT) 数据系统**: 严格防止前视偏差。每次查询数据时，系统自动确保只返回当前时间点之前已知的数据。
+2. **表达式引擎 (Expression Engine)**: 用 DSL 表达式定义因子计算，如 `Ref($close, -5) / $close - 1`，自动处理 PIT 约束。
+3. **模型动物园 (Model Zoo)**: 内置 20+ SOTA 量化模型（LightGBM、GRU、GATs、TabNet、Transformer、Localformer 等），统一接口 `model.fit()` / `model.predict()`。
+4. **RD-Agent**: 基于 LLM 的自动因子挖掘框架，自动发现和验证新因子。
+5. **分层架构**: `Data Layer → Model Layer → Strategy Layer → Execution Layer`，各层独立可替换。
 
-### 3. Freqtrade (25K+ stars)
-- **仓库**: https://github.com/freqtrade/freqtrade
-- **核心亮点**:
-  - **FreqAI 模块**: 自适应 ML 训练管线，支持 rolling/expanding window 训练
-  - **自动特征选择**: 基于模型 feature importance 的特征筛选
-  - **离群值检测**: MAD/IQR 方法的异常值清洗
-  - **事件驱动架构**: 基于消息总线的模块间通信
-  - **完善的回测+模拟+实盘**: 统一的交易接口抽象
+**对 jingni-trader 的启发**:
+- PIT 数据安全检查器可集成到 `data-engine` 和 `strategy-model-engine` 中
+- 表达式引擎可提升 `factor-engine` 的因子定义灵活性
+- 考虑引入 Qlib 模型作为 `strategy-model-engine` 的备选模型
+
+### 1.2 Riskfolio-Lib (⭐ 3.4K)
+
+- **仓库**: https://github.com/dcajasn/Riskfolio-Lib
+- **语言**: Python
+- **许可证**: BSD-3-Clause
+
+**核心亮点**:
+1. **24 种凸风险度量**: 分散性风险、下行风险、回撤风险三大类，支持 VaR/CVaR/EVaR/RLVaR/DaR/CDaR/EDaR/RLDaR 等。
+2. **分层优化方法**: HRP (Hierarchical Risk Parity)、HERC (Hierarchical Equal Risk Contribution)、NCO (Nested Clustered Optimization)。
+3. **松弛风险平价 (Relaxed Risk Parity)**: 允许正则化参数，使风险贡献更平衡。
+4. **多目标优化**: 支持均值-风险、风险-回报、风险-风险多目标。
+
+**对 jingni-trader 的启发**:
+- **直接增强 `portfolio-risk-engine`**: 当前仅支持基础 HRP 和均值-方差，可引入 HERC/NCO 和扩展风险度量
+- 风险归因可增加下行风险/回撤风险维度
+
+### 1.3 AKQuant (⭐ 1.3K)
+
+- **仓库**: https://github.com/akfamily/akquant
+- **语言**: Rust + Python
+- **许可证**: Apache-2.0
+
+**核心亮点**:
+1. **Rust+Python 混合架构**: 核心计算用 Rust 实现，Python 提供 API 层，兼顾性能与易用性。
+2. **Walk-forward Validation**: 完整的滚动训练验证框架，模拟真实交易中的定期重训练场景。
+3. **Signal vs. Action 分离**: 模型产生信号，策略层将信号转为交易动作，两者解耦便于独立测试。
+4. **LLM 辅助策略生成**: 支持自然语言描述策略逻辑。
+5. **多时间框架 Feed API**: 同时处理不同频率的数据（日线/分钟线）。
+
+**对 jingni-trader 的启发**:
+- Walk-forward 验证框架可集成到 `strategy-model-engine`
+- Signal-Action 分离模式可提升策略模块的可测试性
+- 长远看，Rust 重写核心计算模块可提升性能
+
+### 1.4 其他值得关注的项目
+
+| 项目 | Stars | 核心价值 |
+|------|-------|----------|
+| cvxportfolio | 2K+ | 校园级组合优化，文档极佳，多周期再平衡 |
+| Zipline-Reloaded | 1.5K+ | 回测引擎标杆，事件驱动架构 |
+| vnpy | 25K+ | 实际交易接口丰富，CTP/XTP 等 |
+| QUANTAXIS | 8K+ | 全栈量化框架，微服务架构 |
+| TradeMaster | 2K+ | 强化学习交易，13+ RL 算法 |
+| FinRobot | 2K+ | LLM Agent 驱动的金融分析 |
+| FinGPT | 14K+ | 金融大模型，情感分析 |
+| TradingAgents | 4K+ | 多 Agent 交易系统 |
 
 ---
 
-## 二、可借鉴方向列表
+## 二、可借鉴的优化方向
 
-| 方向 | 来源 | 目标模块 | 优先级 | 可行性 |
-|------|------|----------|--------|--------|
-| 因子表达式 DSL | Qlib Expression Engine | factor-engine | 高 | 已验证 |
-| Alpha158 因子集 | Qlib Alpha158 | factor-engine | 中 | 已验证 |
-| 统一账户模型 | QUANTAXIS QIFI | execution-monitor-engine | 高 | 已验证 |
-| 跨模块事件总线 | Freqtrade Event Bus | 全局架构 | 高 | 已验证 |
-| 自适应 ML 训练管线 | Freqtrade FreqAI | strategy-model-engine | 中 | 已验证 |
-| Rolling/Expanding Window | Freqtrade FreqAI | strategy-model-engine | 中 | 已验证 |
-| 自动特征选择 | Freqtrade FreqAI | strategy-model-engine | 中 | 已验证 |
-| 离群值检测 | Freqtrade FreqAI | data-engine | 低 | 已验证 |
-| 列式二进制存储 | Qlib data storage | data-engine | 低 | 待验证 |
-| Python+Rust 混合 | QUANTAXIS | backtest-engine | 低 | 待验证 |
+### 方向 1: 分层组合优化增强 (优先级: ⭐⭐⭐⭐⭐)
+
+**借鉴来源**: Riskfolio-Lib
+**对照模块**: `portfolio-risk-engine`
+
+**现状**: 当前 `portfolio-risk-engine` 仅支持均值-方差、最大夏普、最小方差、简化版 HRP 和 CVaR（等权兜底）。HRP 实现不完整，缺少 HERC/NCO。
+
+**优化建议**:
+1. 完善 HRP 实现（基于协方差矩阵聚类，递归二分权重分配）
+2. 新增 HERC（分层等风险贡献）方法
+3. 新增 NCO（嵌套聚类优化）方法
+4. 通过配置切换不同优化方法，提供统一接口
+
+**验证状态**: ✅ 已完成验证测试，详见 [test_hierarchical_portfolio.py](test_hierarchical_portfolio.py)
+
+### 方向 2: 扩展风险度量 (优先级: ⭐⭐⭐⭐)
+
+**借鉴来源**: Riskfolio-Lib
+**对照模块**: `portfolio-risk-engine`
+
+**现状**: 仅实现 VaR（历史模拟法）和 CVaR，缺少 EVaR、回撤风险度量。
+
+**优化建议**:
+1. 新增 EVaR（熵风险价值）计算
+2. 新增回撤风险族：DaR (在险回撤)、CDaR (条件在险回撤)、EDaR (熵回撤风险)
+3. 新增 Ulcer Index、Sortino Ratio、Calmar Ratio
+4. 支持基于下行风险的风险平价优化
+
+**验证状态**: ✅ 已完成验证测试，详见 [test_extended_risk_measures.py](test_extended_risk_measures.py)
+
+### 方向 3: Walk-forward Validation 框架 (优先级: ⭐⭐⭐⭐)
+
+**借鉴来源**: AKQuant + MS Qlib
+**对照模块**: `strategy-model-engine`
+
+**现状**: 已有 `purged_group_ts_split`，但缺少完整的滚动训练验证框架。
+
+**优化建议**:
+1. 实现 `WalkForwardValidator` 类，支持滚动窗口生成、重训练、评估
+2. 实现 `PointInTimeChecker` 数据安全检查器
+3. 引入 Signal-Action 分离设计模式
+4. 与现有 `purged_group_ts_split` 互补，提供不同粒度的验证
+
+**验证状态**: ✅ 已完成验证测试，详见 [test_walkforward_validation.py](test_walkforward_validation.py)
+
+### 方向 4: 因子表达式引擎 (优先级: ⭐⭐⭐)
+
+**借鉴来源**: MS Qlib
+**对照模块**: `factor-engine`
+
+**现状**: 因子计算依赖 pandas_ta/talib 计算器，因子定义较固定。
+
+**优化建议**:
+1. 引入 DSL 表达式引擎，支持如 `Ref($close, -5) / Ref($close, -20) - 1` 的因子定义
+2. 自动处理 PIT 约束
+3. 支持用户自定义因子组合
+
+**验证状态**: ⏳ 待验证（需更多设计讨论）
+
+### 方向 5: 核心计算模块性能优化 (优先级: ⭐⭐)
+
+**借鉴来源**: AKQuant
+**对照模块**: 全局
+
+**现状**: 纯 Python 实现，大数据量下性能瓶颈。
+
+**优化建议**:
+1. 使用 Cython/Numba 加速关键计算路径
+2. 长远考虑 Rust 重写核心模块（回测引擎、因子计算）
+3. 引入并行计算（多进程/多线程因子计算）
+
+**验证状态**: ⏳ 待验证（需性能基线和基准测试）
 
 ---
 
-## 三、已完成的验证测试及结论
+## 三、已完成验证测试及结论
 
-### 测试环境
-- Python 3.12, numpy 2.4, pandas 3.0, scikit-learn 1.9, lightgbm 4.x
-- 测试文件: `tests/study_2026/test_*.py`
-- 测试结果: **37 passed, 2 skipped, 0 failed**
+### 测试 1: 分层组合优化 (HRP/HERC/NCO)
 
-### 优化方向 1: 因子表达式 DSL 引擎
+**测试文件**: `tests/study_2026/test_hierarchical_portfolio.py`
+**测试结果**: ✅ 全部通过
 
-**文件**: `tests/study_2026/test_factor_dsl.py` (17 tests, 16 passed, 1 skipped)
+**测试内容**:
+- HRP 实现验证：10 资产，权重和=1.0，夏普比率 1.02 vs 等权 0.25
+- HERC 实现验证：12 资产，两种聚类内权重方法对比
+- NCO 实现验证：15 资产，嵌套聚类优化
+- 四种方法综合对比：等权/HRP/HERC/NCO
+- 边界条件：单资产、双资产、高共线性、聚类数>资产数
 
-**验证内容**:
-1. DSL 解析器: 支持列引用 `$close`、算术运算、函数调用 `Ref()`, `Mean()`, `Std()`, `Max()`, `Min()`, `Sum()`, `Log()`, `Abs()`, `Sign()`, `Rank()`, `Delay()`, `Delta()`, `PctChange()`
-2. 18 个 Alpha158 因子子集全部可通过 DSL 声明式定义
-3. 编译器将 AST 编译为 pandas 操作序列
-4. 与硬编码计算对比: 结果完全一致，性能接近（DSL 编译一次后可重复执行）
+**关键结论**:
+- HRP 在聚类结构数据上显著优于等权（夏普 1.02 vs 0.25）
+- HERC 两种类内权重方法表现接近，逆方差略优
+- 单资产边界条件需特殊处理（scipy linkage 限制）
 
-**性能数据**:
-- 18 个因子批量计算 (100 只股票 × 500 日): 约 0.5-1.5s，平均每个因子 < 0.1s
-- 与硬编码方案的性能差异在可接受范围内（< 2x）
+### 测试 2: 扩展风险度量
 
-**结论**: 因子 DSL 方案可行，可显著提升因子库的可扩展性。用户只需声明因子表达式而无需修改核心引擎代码。
+**测试文件**: `tests/study_2026/test_extended_risk_measures.py`
+**测试结果**: ✅ 全部通过
 
-### 优化方向 2: 统一账户模型 (QIFI 风格)
+**测试内容**:
+- EVaR 计算：95%/99% 置信度验证
+- 回撤风险族：DaR/CDaR/EDaR/Ulcer Index 计算与单调性验证
+- 下行风险：半标准差、Sortino、Calmar 比率
+- 组合风险画像：等权 vs 集中组合的风险对比
+- 下行风险平价优化：基于半标准差的权重优化
+- 边界条件：空数组、单元素、常量、极端回撤
 
-**文件**: `tests/study_2026/test_unified_account.py` (14 tests, 13 passed, 1 skipped)
+**关键结论**:
+- 等风险度量单调性成立：99% EVaR > 95% EVaR
+- 回撤风险度量单调性成立：CDaR >= DaR, EDaR >= DaR
+- 下行风险平价确实降低了组合的下半标准差
 
-**验证内容**:
-1. 定义了 `Position`, `Order`, `Trade`, `Account` 四个统一数据模型
-2. 实现了 `AccountEventBus` 事件总线，支持跨模块订阅/发布
-3. 序列化往返测试: JSON/dict 序列化正确，支持从字典恢复
-4. 模拟了「回测 → 风控 → 执行」三模块协作流程
-5. 内存效率: dataclass 方案与字典方案内存占用相当，但类型安全性更高
+### 测试 3: Walk-forward Validation 框架
 
-**关键指标**:
-- 50 只持仓的账户模型: 内存占用 < 100KB (dataclass)
-- 序列化速度: to_dict() ~ 3us/次, to_json() ~ 30us/次
+**测试文件**: `tests/study_2026/test_walkforward_validation.py`
+**测试结果**: ✅ 全部通过
 
-**结论**: 统一账户模型可有效解决当前各模块数据模型不一致的问题，事件总线机制可解耦模块间通信。
+**测试内容**:
+- PIT 安全检查器：前视偏差检测、训练/测试边界验证
+- Walk-forward 窗口生成：滚动训练窗口自动划分
+- 完整的训练-预测-评估管道
+- Signal-Action 分离模式：分位数策略、做多策略、换手率计算
+- 静态训练 vs 滚动训练对比
 
-### 优化方向 3: 自适应 ML 训练管线
-
-**文件**: `tests/study_2026/test_automl_pipeline.py` (8 tests, 8 passed)
-
-**验证内容**:
-1. Rolling Window 和 Expanding Window 两种训练窗口生成
-2. 离群值检测 (MAD 和 IQR 方法)
-3. 基于 feature importance 的自动特征选择
-4. 重训练触发条件判断
-5. 自适应 vs 固定窗口的 IC 对比（在时间漂移数据上自适应窗口胜出）
-
-**关键指标**:
-- 特征选择后预测速度提升约 2-3x (20 特征 → 5 特征)
-- 在有时间漂移的数据上，自适应窗口 IC 优于固定窗口
-- 训练时间: 5000 样本 × 20 特征，一次训练 < 0.5s
-
-**结论**: 自适应 ML 管线可有效应对市场风格漂移，自动特征选择可降低模型复杂度并提升推理速度。
+**关键结论**:
+- PIT 检查器能正确检测训练/测试边界违规
+- Walk-forward 框架生成合理的滚动窗口
+- 滚动训练提供比静态训练更真实的样本外评估
+- Signal-Action 分离模式使策略逻辑可独立测试
 
 ---
 
 ## 四、待用户确认的优化建议
 
-### 高优先级 (建议尽快实施)
+### 建议 1: 将 HRP/HERC/NCO 集成到 portfolio-risk-engine ⭐⭐⭐⭐⭐
 
-1. **因子 DSL 集成到 factor-engine**
-   - 在 `FactorEngine` 中增加 `register_factor()` 和 `compute_dsl_factors()` 方法
-   - 保持现有 `compute_a_share_factors()` 兼容，新旧并行
-   - 涉及的 scope: `factor-engine`
+- **影响模块**: `skills/portfolio-risk-engine/engine.py`
+- **改动量**: 中等（新增 3 个方法类，约 200 行代码）
+- **风险**: 低（纯新增功能，不影响现有逻辑）
+- **建议分支**: `feature/riskfolio-inspired`
 
-2. **统一账户模型替换分散模型**
-   - 将 `Account` dataclass 移至 `skills/execution-monitor-engine/` 作为共享模型
-   - 其他模块通过事件总线订阅账户变更
-   - 涉及的 scope: `execution-monitor-engine`, `portfolio-risk-engine`, `backtest-engine`
+### 建议 2: 将扩展风险度量集成到 portfolio-risk-engine ⭐⭐⭐⭐
 
-3. **事件总线引入**
-   - 将 `AccountEventBus` 提升为全局架构组件
-   - 各引擎模块通过事件总线实现松耦合通信
-   - 涉及的 scope: 全局架构
+- **影响模块**: `skills/portfolio-risk-engine/engine.py`
+- **改动量**: 中等（新增风险度量函数，约 150 行代码）
+- **风险**: 低（纯新增功能）
+- **建议分支**: 可与建议 1 合并
 
-### 中优先级 (建议列入 roadmap)
+### 建议 3: 将 Walk-forward 验证集成到 strategy-model-engine ⭐⭐⭐⭐
 
-4. **Alpha158 因子集补齐**
-   - 基于 DSL 将因子库从 ~15 个扩展到 50+ 个
-   - 涉及的 scope: `factor-engine`
+- **影响模块**: `skills/strategy-model-engine/engine.py`
+- **改动量**: 较大（新增验证框架类，约 250 行代码）
+- **风险**: 中等（需与现有 purged_ts_split 配合）
+- **建议分支**: `feature/walkforward-validation`
 
-5. **自适应 ML 训练管线**
-   - 在 `strategy-model-engine` 中增加 `AdaptiveMLPipeline` 类
-   - 支持 Rolling Window 和 Expanding Window 训练模式
-   - 涉及的 scope: `strategy-model-engine`
+### 建议 4: 引入因子表达式引擎 ⭐⭐⭐
 
-### 低优先级 (可后续评估)
-
-6. **列式二进制存储优化**
-   - 评估 qlib 的二进制存储格式是否适合 jingni-trader
-   - 涉及的 scope: `data-engine`
-
-7. **Rust 加速关键路径**
-   - 评估 backtest 回测引擎中 Rust 加速的可行性
-   - 涉及的 scope: `backtest-engine`
+- **影响模块**: `skills/factor-engine/engine.py`
+- **改动量**: 大（需设计 DSL 和表达式解析器）
+- **风险**: 中等（需重构因子计算管道）
+- **建议分支**: 待设计讨论后确定
 
 ---
 
-## 五、文件清单
+## 五、测试文件索引
 
-```
-tests/study_2026/
-├── LEARNING_REPORT.md          ← 本报告
-├── test_factor_dsl.py           ← 因子 DSL 验证测试 (17 tests)
-├── test_unified_account.py      ← 统一账户模型验证测试 (14 tests)
-└── test_automl_pipeline.py      ← 自适应 ML 管线验证测试 (8 tests)
-```
+| 文件 | 优化方向 | 借鉴来源 | 状态 |
+|------|----------|----------|------|
+| `test_hierarchical_portfolio.py` | 分层组合优化 | Riskfolio-Lib | ✅ 通过 |
+| `test_extended_risk_measures.py` | 扩展风险度量 | Riskfolio-Lib | ✅ 通过 |
+| `test_walkforward_validation.py` | Walk-forward 验证 | AKQuant + Qlib | ✅ 通过 |
 
 ---
 
-> **重要提醒**: 所有优化代码在用户明确确认之前，不得执行 git commit/push/merge 操作。
-> 验证代码位于独立的 `tests/study_2026/` 目录中，未修改任何主代码文件。
+## 六、下一步计划
+
+1. 等待用户审阅本报告，确认优先实施的优化方向
+2. 用户确认后，在独立 feature 分支上实施代码集成
+3. 集成后运行完整项目测试套件
+4. 撰写集成后的验证报告
+
+---
+
+> **重要提示**: 根据约束要求，所有优化代码已放置在独立测试文件中，未执行任何 git commit/push/merge 操作。用户确认后方可进行代码合并。
