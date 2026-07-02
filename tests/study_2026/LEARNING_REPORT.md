@@ -1,282 +1,234 @@
-# jingni-trader 量化交易学习报告
+# jingni-trader 开源项目学习报告
 
-**日期**: 2026-06-12  
-**序号**: 1  
-**分支**: feature/study-2026-quant-research  
-**执行人**: AI Agent
+## 报告编号: 001
+## 日期: 2026-06-14
+## 学习方式: 联网搜索 + 源码分析 + 原型验证
 
 ---
 
 ## 一、学习项目清单及核心亮点
 
-### 1.1 Microsoft Qlib (44,000+ Stars)
+### 1.1 Microsoft Qlib (42K+ Stars)
 
-| 项目 | 详情 |
+| 属性 | 详情 |
 |------|------|
-| **仓库** | https://github.com/microsoft/qlib |
-| **定位** | AI 驱动的量化投资平台，微软出品 |
-| **许可证** | MIT |
+| 仓库 | https://github.com/microsoft/qlib |
+| 语言 | Python |
+| 定位 | AI 驱动的量化投资平台 |
 
-**核心亮点**:
+**核心亮点:**
 
-1. **Expression Engine（声明式因子表达式引擎）**
-   - 支持声明式因子定义，如 `$close`, `Ref($close, 1)`, `Mean($close, 20)`, `$high - $low` 等
-   - 内置运算符注册机制，可扩展自定义算子
-   - 表达式按优先级解析（+, -, *, /），支持嵌套括号
-   - 底层使用列式二进制数据格式，数据按列存储，I/O 效率极高
+1. **因子表达式引擎 (Expression Engine)**: 通过 DSL 声明因子。如 `Ref($close, 60) / $close` 即可定义一个动量因子，替代了传统 30+ 行硬编码。内置 158 个 Alpha 算子（Alpha158），覆盖量价、基本面等多维度。
 
-2. **Alpha158 / Alpha360 因子库**
-   - Alpha158: 158 个标准化因子，覆盖 K 线、价格、动量、反转、波动率、成交量等类别
-   - Alpha360: 360 维时序因子，利用过去 60 天的 OHLCV 数据
-   - 因子配置化，通过 JSON/字典即可定义，无需修改代码
+2. **列式二进制数据格式**: 针对面板数据（T × N × Features）设计了高效的列式存储格式，支持按时间切片和截面查询，数据加载速度提升 10+ 倍。
 
-3. **数据基础设施**
-   - Point-in-Time（PIT）数据库设计，确保无未来信息泄露
-   - 列式存储格式，支持高效时间序列切片
-   - 多级缓存机制（Expression Cache → Dataset Cache → Disk Cache）
+3. **Pipeline 设计模式**: Data → Feature → Model → Strategy → Backtest → Report，每个环节松耦合，可灵活替换。
 
-4. **滚动训练框架**
-   - Rolling Window 训练模式，自动管理训练/验证/测试集切分
-   - 支持 purged 分组交叉验证（防时序泄露）
+4. **LLM Agent 集成 (RD-Agent)**: 支持 LLM 自动挖掘因子，基于反馈迭代优化因子效果，将研究员和策略师的日常工作流程化。
 
-### 1.2 Jesse Trade Framework (7,000+ Stars)
+5. **Signal Analysis Record (SigAnaRecord)**: 因子分析标准化，IC/IR、分层回测、换手率分析等一键生成。
 
-| 项目 | 详情 |
+### 1.2 vectorbt (4K+ Stars)
+
+| 属性 | 详情 |
 |------|------|
-| **仓库** | https://github.com/jesse-ai/jesse |
-| **定位** | 加密货币算法交易框架，专注回测准确性 |
-| **许可证** | MIT |
+| 仓库 | https://github.com/polakowo/vectorbt |
+| 语言 | Python |
+| 定位 | 超高速向量化回测框架 |
 
-**核心亮点**:
+**核心亮点:**
 
-1. **Zero Look-Ahead Bias 设计**
-   - 每个 K 线结束时自动创建状态快照（BarSnapshot），冻结账户状态、持仓、订单等全量数据
-   - 交易执行严格遵循"当前 K 线决策 → 下一 K 线开盘成交"的时间线
-   - 自动检测未来数据泄露（如用当日收盘价决定当日入场）
+1. **向量化回测核心**: 利用 NumPy 数组广播运替代传统 for 循环逐日回测。在参数扫描场景下，速度比 Backtrader 等事件驱动框架快 10-100 倍。
 
-2. **状态一致性快照**
-   - 每个 bar 结束时保存完整状态（timestamp, OHLCV, cash, position, equity, limit flags）
-   - 回放时可以精确恢复到任意时间点
-   - 状态不可变，防止回溯过程中的意外修改
+2. **Matrix-based 信号处理**: 所有信号/价格/持仓转为 (T × N) 二维矩阵，利用 `numpy.where`、`cumsum`、`cumprod` 等向量化操作实现批量回测。
 
-3. **Walk-Forward Optimization (WFO)**
-   - 滚动窗口优化：前 N 年训练 → 后 1 年验证，连续滚动
-   - 自动统计样本外 SHARPE 的均值和标准差
-   - 评估策略在未知数据上的稳定性
+3. **Portfolio 级别回测**: 支持多资产组合回测，自动处理仓位分配、再平衡、交易成本等。
 
-4. **Monte Carlo 分析**
-   - 交易顺序随机打乱模拟
-   - 日收益率 Bootstrap 重采样模拟
-   - 生成多条模拟路径，评估策略在不同市场路径下的表现
+4. **声明式 API**: 通过 `portfolio.from_signals()` 等声明式 API 快速构建回测，代码量极简。
 
-5. **增强绩效指标**
-   - Sortino Ratio（下行风险调整收益）
-   - Omega Ratio（收益亏损比）
-   - Maximum Drawdown Duration（最大回撤持续期）
-   - Recovery Factor（最大回撤恢复能力）
-   - Tail Ratio（95% vs 5% 分位数收益比）
-   - Stability（R² 拟合收益曲线）
-   - Daily VaR / CVaR
+### 1.3 VeighNa/vnpy (29K+ Stars)
 
-### 1.3 Microsoft RD-Agent (NeurIPS 2025)
-
-| 项目 | 详情 |
+| 属性 | 详情 |
 |------|------|
-| **仓库** | https://github.com/microsoft/RD-Agent |
-| **定位** | 基于 LLM 的多智能体自动化量化研究框架 |
-| **许可证** | MIT |
+| 仓库 | https://github.com/vnpy/vnpy |
+| 语言 | Python |
+| 定位 | 全链路量化交易系统 |
 
-**核心亮点**:
+**核心亮点:**
 
-1. **多智能体 R&D 循环**
-   - "Hypothesis → Code → Backtest → Feedback" 自动化闭环
-   - Research Agent 提出假设 → Development Agent 生成代码 → Feedback Agent 评估结果
-   - 自动迭代优化，直至找到有效因子
+1. **事件驱动架构 (EDA)**: 基于事件队列的松耦合设计，Engine 之间通过 `EventBus` 通信，易于扩展和维护。
 
-2. **Co-STEER 代码生成引擎**
-   - 结构化代码生成，确保生成的因子代码可编译、可运行
-   - 因子与模型协同优化（Factor-Model Co-optimization）
-   - 实验表明：用 70% 更少的因子实现 2 倍收益
+2. **全链路覆盖**: 数据行情 → 策略引擎 → 回测引擎 → 风控引擎 → 交易执行 → 监控日志，一套代码同时支持回测和实盘。
+
+3. **模块化插件架构**: 券商接口、行情源、风控规则等均以插件形式存在，通过配置文件动态加载。
+
+4. **A 股特色支持**: 完整支持 T+1、涨跌停、集合竞价、ST 处理、分红除权等 A 股特有规则。
 
 ---
 
-## 二、可借鉴的方向列表
+## 二、借鉴方向分析
 
-对照 jingni-trader 现有代码结构，识别出以下可优化方向：
+### 2.1 方向一: 因子表达式引擎 (借鉴 Qlib)
 
-| 序号 | 优化方向 | 借鉴来源 | 当前状态 | 影响范围 |
-|------|----------|----------|----------|----------|
-| 1 | **声明式因子表达式引擎** | Qlib Expression Engine | 已验证 | factor-engine |
-| 2 | **因子库可扩展性** | Qlib Alpha158 | 已验证 | factor-engine |
-| 3 | **回测防未来偏差机制** | Jesse Zero Look-Ahead Bias | 已验证 | backtest-engine |
-| 4 | **Walk-Forward 验证** | Jesse WFO | 已验证 | backtest-engine |
-| 5 | **Monte Carlo 压力测试** | Jesse Monte Carlo | 已验证 | backtest-engine |
-| 6 | **增强绩效指标** | Jesse Metrics | 已验证 | backtest-engine |
-| 7 | **列式数据存储** | Qlib Data Format | 待评估 | data-engine |
-| 8 | **PIT 数据库** | Qlib PIT Design | 待评估 | data-engine |
-| 9 | **多级缓存机制** | Qlib Cache | 待评估 | data-engine |
-| 10 | **LLM 自动化 R&D 循环** | RD-Agent | 待评估 | strategy-model-engine |
+**当前状态**: jingni-trader 的因子计算采用硬编码方式（如 factor-engine 中的 `compute_a_share_factors`），每个因子需要 20-50 行代码。
 
----
+**优化收益**:
+- 因子开发效率：从 "写代码 → 调试 → 测试" 变为 "写表达式"，效率提升 5-10 倍
+- LLM 兼容性：表达式字符串可被 LLM Agent 自动生成和迭代
+- 因子库可扩展性：新增因子只需添加一条配置记录
 
-## 三、已完成的验证测试及结论
+**技术路径**:
+1. 实现表达式 Tokenizer + Parser（递归下降）
+2. 内置 15+ 常用算子（Ref, MA, Std, Min, Max, Rank, ZScore, Pct, VWAP, ...）
+3. 支持嵌套表达式和算术运算
+4. 提供 `evaluate_batch()` 批量计算接口
 
-### 3.1 验证方向 1: 声明式因子表达式引擎
+### 2.2 方向二: 向量化回测引擎 (借鉴 vectorbt)
 
-**测试文件**: `tests/study_2026/test_expression_engine.py`  
-**测试结果**: 11/11 通过
+**当前状态**: jingni-trader 的 native_adapter 使用逐日 for 循环模拟回测，在大规模（100+ 股票）场景下性能瓶颈明显。
 
-**实现内容**:
+**优化收益**:
+- 回测速度：向量化后速度提升 1.5-3x（在 5-20 只股票场景下）
+- 参数扫描能力：可同时扫描多种参数组合，无需外层 for 循环
+- 内存效率：NumPy 矩阵运算减少 DataFrame 复制开销
 
-| 组件 | 说明 |
-|------|------|
-| `ExpressionEngine` | 声明式 DSL 解析器，支持 `Ref`, `Mean`, `Std`, `Max`, `Min`, `Pct`, `Sum`, `Rank`, `Delay` 等算子 |
-| `_evaluate()` | 递归表达式求值，支持运算符优先级 (+, -, *, /) |
-| `_split_operator()` | 括号感知的运算符拆分 |
-| `_parse_args()` | 嵌套括号感知的参数解析 |
-| 装饰器注册 | `@ExpressionEngine.register("Ref")` 模式，支持动态扩展算子 |
+**技术路径**:
+1. 价格/信号数据转为 (T × N) NumPy 矩阵
+2. 用 `numpy.where` 批量处理买卖信号
+3. 用向量化方式计算手续费、印花税、滑点
+4. 保留 T+1 约束（信号延迟一天）
 
-**关键测试结论**:
+### 2.3 方向三: 增强因子评估框架 (借鉴 Qlib + FactorHub)
 
-| 测试项 | 结果 |
-|--------|------|
-| Pct 等价性 (vs pct_change) | 数值完全一致 |
-| Ref 等价性 (vs shift) | 数值完全一致 |
-| Mean 等价性 (vs rolling) | 数值完全一致 |
-| 复杂表达式 | 正确解析嵌套和多运算符组合 |
-| 空 DataFrame / 缺失列 / 未知函数 | 均正确抛出异常 |
-| 性能对比 (表达式 vs 硬编码) | 表达式方式开销 < 10% |
-| 新因子定义无需改代码 | 仅需修改 JSON 配置 |
+**当前状态**: jingni-trader factor-engine 的因子评估主要依赖 IC 分析和相关性去重，评估维度较单一。
 
-**结论**: 声明式因子表达式引擎方案可行，性能开销可接受，显著提升因子开发效率。
+**优化收益**:
+- 评估全面性：从单维 IC 分析扩展为 5 维评估体系
+- 因子筛选能力：通过单调性检验、换手率分析、衰减分析排除低质量因子
+- 可解释性：分层收益曲线直观展示因子是否真的区分了好坏股票
+
+**技术路径**:
+1. 分层单调性检验 (Group Monotonicity Test)
+2. 因子换手率分析 (Factor Turnover Analysis)
+3. 因子衰减分析 (Multi-period IC Decay / Half-life)
+4. 多周期 IC 时间序列统计
 
 ---
 
-### 3.2 验证方向 2: 回测防未来偏差机制增强
+## 三、验证测试结果
 
-**测试文件**: `tests/study_2026/test_backtest_bias_prevention.py`  
-**测试结果**: 16/16 通过
+### 3.1 测试环境
 
-**实现内容**:
+- Python 3.12, NumPy 2.4.6, Pandas 3.0.3, SciPy 1.17.1
+- 测试数据: 合成股票行情数据 (5-50 stocks × 100-252 days)
 
-| 组件 | 说明 |
-|------|------|
-| `BarSnapshot` | 每 K 线状态快照，包含 timestamp, code, OHLCV, cash, position, equity, limit flags |
-| `BiasDetector` | 未来偏差检测器：入场价格信息泄露检测 + 数据泄露检测（IC 衰减分析） |
-| `WalkForwardValidator` | 滚动窗口验证器：自动生成训练/测试窗口，执行 train → predict → metric 流程 |
-| `MonteCarloSimulator` | 蒙特卡洛模拟器：交易顺序随机打乱 + 日收益 Bootstrap 重采样 |
-| `EnhancedMetricsCalculator` | 增强指标：Sortino, Omega, MaxDD Duration, Recovery Factor, Tail Ratio, Stability (R²), Daily VaR/CVaR |
+### 3.2 因子表达式引擎测试
 
-**关键测试结论**:
+**测试文件**: `tests/study_2026/test_factor_expression_engine.py`
 
-| 测试项 | 结果 |
-|--------|------|
-| 入场价格泄露检测 | 正确检测到用当日收盘价决策的偏差 |
-| 无泄露场景（next_open） | 正确判定为无偏差 |
-| 数据泄露检测（IC 衰减） | 可检测 t+1 IC 极高而 t+5 衰减的泄露模式 |
-| Walk-Forward 窗口生成 | 窗口连续，测试期正确衔接 |
-| Walk-Forward 验证流程 | train → predict → metric 完整通过 |
-| Monte Carlo 交易打乱 | 生成 1000 条模拟路径 |
-| Monte Carlo 收益重采样 | 生成 1000 条模拟路径 |
-| 增强指标 vs 原始指标 | 共享字段数值一致，增强指标正确计算 |
+| 测试项 | 结果 | 关键指标 |
+|--------|------|----------|
+| 基础算子 (字段引用、算术、Ref、MA、Std) | PASS | 5/5 算子正确 |
+| 经典因子表达式 (反转、动量、布林带、MACD等8个) | PASS | 975-996 非空值/因子 |
+| 与硬编码等价性 | PASS | 相关系数 = 1.0000 |
+| 性能对比 (8因子 × 5/20/50 股票) | PASS | 50 stocks: 硬编码 110ms vs 表达式 17.8ms (6.2x 更快) |
+| 嵌套表达式 (MACD/振幅/三重嵌套) | PASS | 975/996/991 非空值 |
 
-**结论**: 防未来偏差机制增强方案切实可行，BiasDetector 可有效检测常见泄露模式，WFO 和 Monte Carlo 可显著提升回测可信度。
+**性能对比详细:**
 
----
+| 股票数 | 数据行数 | 硬编码(ms) | 表达式引擎(ms) | 比率 |
+|--------|----------|-----------|---------------|------|
+| 5 | 1,260 | 18.3 | 10.5 | 0.57x |
+| 20 | 5,040 | 49.4 | 15.0 | 0.30x |
+| 50 | 12,600 | 110.3 | 17.8 | 0.16x |
 
-### 3.3 验证方向 3: 因子库可扩展性优化
+> **意外发现**: 表达式引擎在批量计算场景下反而**快于**硬编码 (0.16x-0.57x)。分析原因：表达式引擎的 `evaluate_batch()` 对公共子表达式做了缓存共享，而硬编码版本每个因子独立计算，导致大量重复的 rolling/pct_change 操作。
 
-**测试文件**: `tests/study_2026/test_factor_library_extensibility.py`  
-**测试结果**: 16/16 通过
+### 3.3 向量化回测引擎测试
 
-**实现内容**:
+**测试文件**: `tests/study_2026/test_vectorized_backtest.py`
 
-| 组件 | 说明 |
-|------|------|
-| `FactorCategory` | 枚举：KLINE, PRICE, VOLUME, MOMENTUM, REVERSAL, VOLATILITY, CORRELATION, TECHNICAL |
-| `FactorDefinition` | 数据类：name, category, expression, description, neutralize flags, min_periods, params |
-| `FactorLibraryConfig` | 配置管理：to_dict/from_dict/to_json/from_json，支持序列化 |
-| `FactorLibrary` | 因子库管理器：校验（重复名/空名/空表达式）、增删、名称/类别索引、摘要生成 |
-| `build_alpha158_style_config()` | 42 因子配置生成器，覆盖 6 大类 |
+| 测试项 | 结果 | 关键指标 |
+|--------|------|----------|
+| 输出 schema 正确性 | PASS | equity_curve(252天) + trades(635笔) + 7 metrics |
+| 与 native_adapter 一致性 | PASS | 两者总收益方向一致 (均为负) |
+| T+1 约束验证 | PASS | T+1=True 比 False 少一天时效 |
+| 性能对比 | PASS | 加速比 1.3x-2.9x |
+| 涨跌停限制 | PASS | 涨跌停日信号被正确屏蔽 |
 
-**关键测试结论**:
+**性能对比详细:**
 
-| 测试项 | 结果 |
-|--------|------|
-| 42 因子 Alpha158 风格配置 | 正确生成，覆盖 6 大类 |
-| 重名/空名/空表达式校验 | 均正确拦截 |
-| 动态增删因子 | 正确维护索引 |
-| JSON 序列化往返 | 完全一致 |
-| 新类别因子无需改代码 | 仅需在 JSON 中定义新 category |
-| 批量导入（JSON 配置文件） | 16 因子批量导入全部通过 |
-| 查找性能 | < 1ms |
-| 类别过滤性能 | < 1ms |
+| 股票数 | 天数 | native(ms) | vectorized(ms) | 加速比 |
+|--------|------|-----------|----------------|-------|
+| 5 | 252 | 1056.2 | 363.4 | 2.9x |
+| 10 | 252 | 1318.1 | 580.4 | 2.3x |
+| 20 | 252 | 1820.4 | 1348.6 | 1.3x |
 
-**结论**: 因子库配置化方案成熟可用，可通过 JSON 文件定义因子库，无需修改代码即可扩展新因子。建议将现有的 15 个硬编码因子迁移至此框架。
+> 随着股票数增加，加速比下降。原因是构建交易记录的 `_build_trades()` 仍使用了嵌套 for 循环（完整生产版需进一步优化）。核心持仓权益计算部分的向量化优势在大规模场景下更明显。
+
+### 3.4 增强因子评估框架测试
+
+**测试文件**: `tests/study_2026/test_factor_evaluation.py`
+
+| 测试项 | 结果 | 关键指标 |
+|--------|------|----------|
+| IC 分析 (有效 vs 噪声因子) | PASS | 有效因子 Rank IC=-0.052, 噪声因子=0.007 |
+| 分层单调性检验 | PASS | 有效因子 Top-Bottom Spread=-0.00225 |
+| 因子换手率分析 | PASS | 有效因子 87.8%, 噪声因子 90.1% (噪声更高) |
+| 因子衰减分析 | PASS | 有效因子 max IC=0.0335, half_life=1 |
+| 多周期 IC 对比 (1d, 5d, 20d) | PASS | 有效因子 IC_IR 均优于噪声因子 |
+| 评估维度互补性 | PASS | 覆盖 IC、单调性、分层收益、换手率、衰减 5 维度 |
+
+**评估维度对比:**
+
+| 维度 | 现有 factor-engine | 增强 FactorEvaluator |
+|------|-------------------|----------------------|
+| Rank IC / Pearson IC | partial | full |
+| IC 时间序列 (IR/t-stat) | full | full |
+| 分层单调性检验 | absent | added |
+| 换手率分析 | absent | added |
+| 因子衰减 / 半衰期 | absent | added |
+| 多周期 IC 对比 | absent | added |
 
 ---
 
 ## 四、待用户确认的优化建议
 
-### 优先级：高
+### 4.1 高优先级 (建议优先实施)
 
-1. **迁移因子引擎至声明式表达式引擎**
-   - 将 `compute_a_share_factors()` 中的 15 个硬编码因子替换为 ExpressionEngine + FactorLibrary 配置
-   - 预期收益：因子开发效率提升 5-10x，新因子无需修改代码
+| # | 优化项 | 借鉴来源 | 影响模块 | 预期收益 |
+|---|--------|----------|----------|----------|
+| 1 | 因子表达式引擎 | Qlib | factor-engine | 因子开发效率 5-10x, LLM 可自动生成因子 |
+| 2 | 增强因子评估框架 | Qlib + FactorHub | factor-engine | 因子筛选质量显著提升 |
+| 3 | 向量化回测数据层 | vectorbt | backtest-engine | 回测速度 1.3-2.9x |
 
-2. **集成回测偏差检测器**
-   - 在 `BacktestEngine` 中集成 `BiasDetector`，每次回测后自动输出偏差报告
-   - 预期收益：自动发现未来信息泄露问题，提升回测可信度
+### 4.2 中优先级
 
-3. **增强回测绩效指标**
-   - 在 `_calc_metrics()` 中集成 `EnhancedMetricsCalculator`，增加 Sortino, Omega, VaR/CVaR 等指标
-   - 预期收益：更全面的风险评估，符合机构级回测报告标准
+| # | 优化项 | 借鉴来源 | 影响模块 | 预期收益 |
+|---|--------|----------|----------|----------|
+| 4 | 事件驱动架构重构 | vnpy | 全局 | 模块解耦, 回测/实盘统一接口 |
+| 5 | 列式数据存储格式 | Qlib | data-engine | 数据加载速度 10x+ |
 
-### 优先级：中
+### 4.3 已知限制与风险
 
-4. **集成 Walk-Forward 验证**
-   - 在 `BacktestEngine` 中增加 WFO 模式，自动评估策略样本外稳定性
-   - 预期收益：降低过拟合风险，提升实盘表现
-
-5. **集成 Monte Carlo 压力测试**
-   - 在回测报告中增加 Monte Carlo 模拟结果，展示策略在不同市场路径下的表现分布
-   - 预期收益：更全面的风险评估
-
-6. **因子库配置化**
-   - 将现有的 15 个硬编码因子迁移至 FactorLibrary 配置管理
-   - 预期收益：因子库可维护性大幅提升，支持 JSON 配置导入导出
-
-### 优先级：低（待评估）
-
-7. **列式数据存储格式**（借鉴 Qlib）
-   - 评估将数据存储从行列式改为列式二进制格式的可行性
-   - 预期收益：大数据量 I/O 性能提升 3-5x
-
-8. **多级缓存机制**（借鉴 Qlib）
-   - 在 DataEngine 中引入 Expression Cache → Dataset Cache → Disk Cache 三级缓存
-   - 预期收益：重复计算场景性能提升 10-100x
-
-9. **LLM 自动化 R&D 循环**（借鉴 RD-Agent）
-   - 评估引入 LLM 驱动的因子自动挖掘和策略自动生成
-   - 预期收益：降低人工因子挖掘成本
+1. **因子表达式引擎 flat-index 边界效应**: 当前原型在 flat-index 数据上运行时间序列算子时，在标的切换边界会产生少量错误值。生产部署需改为 MultiIndex + `groupby(...).transform()` 模式。
+2. **向量化回测交易记录构建**: 当前的 `_build_trades()` 仍使用嵌套 for 循环，在大规模场景下成为瓶颈，需要进一步向量化。
+3. **LLM Agent 集成**: 因子表达式引擎支持 LLM 自动生成因子，但需在 RD-Agent 或类似框架上构建交互层。
 
 ---
 
-## 五、附录：测试总结
+## 五、测试文件索引
 
-```
-测试文件                                          测试数  通过  失败  耗时
----------------------------------------------------------------------------
-tests/study_2026/test_expression_engine.py         11    11    0    2.05s
-tests/study_2026/test_backtest_bias_prevention.py   16    16    0    2.79s
-tests/study_2026/test_factor_library_extensibility.py 16  16    0    0.39s
----------------------------------------------------------------------------
-合计                                                43    43    0    5.23s
-```
-
-**所有 43 个测试用例全部通过，无失败。**
+| 文件 | 优化方向 | 借鉴来源 | 状态 |
+|------|----------|----------|------|
+| `tests/study_2026/test_factor_expression_engine.py` | 因子表达式引擎 | Qlib | PASS |
+| `tests/study_2026/test_vectorized_backtest.py` | 向量化回测 | vectorbt | PASS |
+| `tests/study_2026/test_factor_evaluation.py` | 增强因子评估 | Qlib + FactorHub | PASS |
 
 ---
 
-*报告生成时间: 2026-06-12*  
-*下次学习计划: 待用户确认后执行*
+## 六、下一步
+
+等待用户审阅以上优化建议，确认后在 `feature/quant-stream-inspired` 分支上实施代码集成。
+
+**重要提醒**: 根据工作流程约束，所有代码暂不执行 git commit/push/merge 操作，等待用户明确确认后方可执行。
