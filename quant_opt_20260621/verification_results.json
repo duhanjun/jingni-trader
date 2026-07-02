@@ -1,0 +1,136 @@
+[
+  {
+    "passed": true,
+    "detail": "trades native=83 vec=83, final_equity native=903910.05 vec=902516.73, rel_diff=0.1541%",
+    "native_trades": 83,
+    "vec_trades": 83,
+    "native_equity": 903910.0512470002,
+    "vec_equity": 902516.7298077503,
+    "rel_diff": 0.0015414381523114306,
+    "native_metrics": {
+      "total_return": -0.09608994875299981,
+      "annual_return": -0.3457768530071199,
+      "volatility": 0.10424801307932605,
+      "sharpe_ratio": -4.371971970098648,
+      "max_drawdown": -0.14372873186499974,
+      "calmar_ratio": -2.4057601324410083,
+      "sortino_ratio": -5.745026834516348,
+      "win_rate": 0.25301204819277107,
+      "total_trades": 83,
+      "calculation_time": "2026-06-21 04:23:21"
+    },
+    "vec_metrics": {
+      "total_return": -0.09748327019224967,
+      "annual_return": -0.35000188585236935,
+      "volatility": 0.1051516416581447,
+      "sharpe_ratio": -4.396076468489318,
+      "max_drawdown": -0.14387536937924975,
+      "calmar_ratio": -2.4326741078924936,
+      "sortino_ratio": -5.833494686984487,
+      "win_rate": 0.25301204819277107,
+      "total_trades": 83,
+      "calculation_time": "2026-06-21 04:23:21"
+    },
+    "name": "backtest_correctness",
+    "elapsed": 0.15771235000011075,
+    "status": "PASS"
+  },
+  {
+    "passed": true,
+    "detail": "3 scenarios, avg speedup=20.65x",
+    "scenarios": [
+      {
+        "n_codes": 10,
+        "n_days": 60,
+        "n_rows": 600,
+        "t_native": 0.0867,
+        "t_vectorized": 0.0095,
+        "speedup": 9.16
+      },
+      {
+        "n_codes": 50,
+        "n_days": 120,
+        "n_rows": 6000,
+        "t_native": 0.3627,
+        "t_vectorized": 0.0165,
+        "speedup": 22.0
+      },
+      {
+        "n_codes": 100,
+        "n_days": 200,
+        "n_rows": 20000,
+        "t_native": 0.9985,
+        "t_vectorized": 0.0324,
+        "speedup": 30.8
+      }
+    ],
+    "name": "backtest_performance",
+    "elapsed": 2.096874588999526,
+    "status": "PASS"
+  },
+  {
+    "passed": true,
+    "detail": "{'empty_data': True, 'single_stock': True, 'no_signal': True, 'all_limit_up': True}",
+    "results": {
+      "empty_data": true,
+      "single_stock": true,
+      "no_signal": true,
+      "all_limit_up": true
+    },
+    "name": "backtest_edge_cases",
+    "elapsed": 0.041085900999860314,
+    "status": "PASS"
+  },
+  {
+    "passed": true,
+    "detail": "nested parse ok=True",
+    "parsed": {
+      "Close": "Field(Close)",
+      "Rank(Close)": "Rank(Field(Close))",
+      "Ts_Mean(Close, 5)": "Ts_Mean(Field(Close),5)",
+      "Rank(Ts_Mean(Close, 5))": "Rank(Ts_Mean(Field(Close),5))",
+      "Add(Close, Open)": "Add(Field(Close),Field(Open))",
+      "Close + Open": "Add(Field(Close),Field(Open))",
+      "Close * 2": "Mul(Field(Close),Const(2.0))",
+      "(Close + Open) / 2": "Div(Add(Field(Close),Field(Open)),Const(2.0))"
+    },
+    "name": "expression_parser",
+    "elapsed": 0.0003232400003980729,
+    "status": "PASS"
+  },
+  {
+    "passed": true,
+    "detail": "ma5_diff=0.00e+00 rank_diff=0.00e+00 batch_ok=True",
+    "ma5_max_diff": 0.0,
+    "rank_max_diff": 0.0,
+    "batch_columns": [
+      "code",
+      "date",
+      "rev_5",
+      "mom_20",
+      "vol_20",
+      "vol_ratio",
+      "rank_rev_20"
+    ],
+    "batch_shape": [
+      600,
+      7
+    ],
+    "name": "expression_calculation",
+    "elapsed": 0.053921663999972225,
+    "status": "PASS"
+  },
+  {
+    "passed": true,
+    "detail": "ic_max_diff=6.94e-17 speedup=3.28x (orig 110 periods, vec 110 periods)",
+    "ic_max_diff": 6.938893903907228e-17,
+    "t_original": 0.1522,
+    "t_vectorized": 0.0463,
+    "speedup": 3.28,
+    "n_periods_orig": 110,
+    "n_periods_vec": 110,
+    "name": "vectorized_ic",
+    "elapsed": 0.3122622519995275,
+    "status": "PASS"
+  }
+]

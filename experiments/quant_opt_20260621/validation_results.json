@@ -1,0 +1,38 @@
+{
+  "data_shape": [
+    9000,
+    12
+  ],
+  "n_codes": 30,
+  "n_days": 300,
+  "n_trades": 670,
+  "metrics": {
+    "total_return": -0.049526437606487894,
+    "annual_return": -0.041770284061153795,
+    "annual_volatility": 0.13731555925978206,
+    "sharpe_ratio": -0.5226668008202503,
+    "sortino_ratio": -0.8811204985217406,
+    "max_drawdown": -0.22097746004116695,
+    "calmar_ratio": -0.1890250890447026,
+    "daily_win_rate": 0.49498327759197325,
+    "n_days": 300.0,
+    "benchmark_total_return": 0.05288892148260382,
+    "benchmark_annual_return": 0.04424245755040901,
+    "tracking_error": 0.12432686670667928,
+    "information_ratio": -0.6510368679863897,
+    "excess_return": -0.0860127416115628,
+    "n_trades": 670.0,
+    "n_buys": 340.0,
+    "n_sells": 330.0,
+    "trade_win_rate": 0.5121212121212121,
+    "profit_loss_ratio": 0.9167771196705506,
+    "turnover": 33.47566968847523,
+    "monthly_mean_return": -0.0031856474862409587,
+    "monthly_std": 0.04374871853753774,
+    "monthly_win_rate": 0.46153846153846156,
+    "best_month": 0.09179390553618716,
+    "worst_month": -0.06937308062194159
+  },
+  "equity_final": 950473.5623935121,
+  "execution_price": "next_open"
+}

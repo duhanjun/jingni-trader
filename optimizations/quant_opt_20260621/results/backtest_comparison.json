@@ -1,0 +1,30 @@
+{
+  "vectorized_time_ms": 31.306694666758027,
+  "native_time_ms": 1324.2293536665481,
+  "speedup": 42.298599956406036,
+  "vectorized_metrics": {
+    "total_return": 0.08226232185598659,
+    "annual_return": 0.08294699213387924,
+    "volatility": 0.18923292413002565,
+    "sharpe_ratio": 0.3595190490731481,
+    "max_drawdown": -0.11368394955420445,
+    "calmar_ratio": 0.7296279946214408,
+    "sortino_ratio": 0.44620518101224876,
+    "win_rate": 0.0,
+    "total_trades": 450,
+    "calculation_time": "2026-06-21 11:36:46",
+    "backtest_time_sec": 0.0265
+  },
+  "native_metrics": {
+    "total_return": 0.1416168556715025,
+    "annual_return": 0.14282711332845732,
+    "volatility": 0.13582881597541757,
+    "sharpe_ratio": 0.8338537673556725,
+    "max_drawdown": -0.05238454676807335,
+    "calmar_ratio": 2.7265123426725095,
+    "sortino_ratio": 1.33054063023904,
+    "win_rate": 0.0807057057057057,
+    "total_trades": 2664,
+    "calculation_time": "2026-06-21 11:36:50"
+  }
+}
