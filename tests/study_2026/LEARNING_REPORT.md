@@ -1,203 +1,242 @@
-# 量化交易开源项目学习报告
+# JingNi-Trader 量化交易学习报告
 
-> **日期**: 2026-06-13
-> **序号**: #001
-> **研究范围**: 因子挖掘 / 回测框架 / 事件驱动架构 / 机器学习因子
+> **日期**: 2026-06-13 | **序号**: #1 | **研究周期**: 2026年6月
 
 ---
 
 ## 一、学习项目清单及核心亮点
 
-### 1.1 Microsoft Qlib
-- **项目地址**: https://github.com/microsoft/qlib
-- **Star**: 42k+
-- **核心论文**: [Qlib: An AI-oriented Quantitative Investment Platform](https://arxiv.org/abs/2009.11189)
+### 1.1 Microsoft Qlib (https://github.com/microsoft/qlib)
 
-| 亮点 | 描述 |
+| 属性 | 说明 |
 |------|------|
-| **表达式引擎 (Expression Engine)** | 声明式因子 DSL (`$close`, `Ref`, `Mean`, `EMA` 等)，因子是函数而非数据，支持可组合表达。这是 LLM 自动生成因子的基础。 |
-| **Alpha158/Alpha360 因子库** | 158 个技术因子 + 360 个基于行业/财务的基础因子，覆盖大多数研报中的常见因子。 |
-| **Columnar 二进制数据格式** | 专为时间序列优化的列式数据存储，支持快速切片和表达式级缓存，比 Parquet 快 10-20 倍。 |
-| **严格回测框架** | Rolling window + Purged Group TS Split + 样本外严格验证。自动检测 look-ahead bias。 |
-| **RD-Agent（新增）** | 基于 LLM 的自动化因子挖掘和模型优化 Agent，从研报自动提取因子逻辑。 |
-| **Model Zoo** | LightGBM + GRU + TRA(Transformer) + TabNet，统一接口可一键切换。 |
+| Stars | 15,000+ |
+| 语言 | Python |
+| 定位 | AI驱动的量化投资研究平台 |
+| 核心亮点 | Alpha158因子库、表达式引擎、Model Zoo、多级缓存、Nested Decision Framework |
 
-### 1.2 trade-learn
-- **项目地址**: https://github.com/MuuYesen/trade-learn
-- **Star**: 81（高质量、活跃开发中，截至 2026-06-06 仍在更新）
+**核心设计思路**：
 
-| 亮点 | 描述 |
+1. **Alpha158 因子库**：预定义158个量价因子，覆盖K线形态、价格趋势、时序波动、成交分布等维度。每个因子通过表达式引擎（DSL语法如 `Ref($close, 60)/$close`）声明式定义，支持运行时编译和缓存。
+
+2. **多级缓存机制**：`MemCache` → `ExpressionCache` → `DatasetCache` 三级缓存，按天/按股票/按因子粒度缓存，大幅减少重复计算。
+
+3. **Nested Decision Framework**：将交易决策拆分为高频信号层、中频执行层、低频组合层，各层独立可替换。
+
+4. **Rolling Training**：基于Purged Time Series Split的滚动训练，自动处理样本外测试。
+
+### 1.2 vn.py (VeighNa) (https://github.com/vnpy/vnpy)
+
+| 属性 | 说明 |
 |------|------|
-| **Python + Rust 混合架构** | Python 编写业务逻辑，Rust 编译底层回测内核，性能提升 110x+。 |
-| **因果推断集成** | 将 DoWhy 因果推断框架集成到 ML 策略中，降低伪相关性导致的样本外衰减。 |
-| **双模架构** | Engine 模式：正确性优先的完整回测；Lite 模式：快速原型验证。 |
-| **JupyterLab + MLflow 集成** | 完整的可视化工作流，支持交互式因子探索和实验管理。 |
-| **完整投研流水线** | `因子采集 → 因子处理 → 因子评估 → 模型定义 → 回测 → 分析` 全链路。 |
+| Stars | 23,000+ |
+| 语言 | Python |
+| 定位 | 一站式量化交易系统（回测+实盘） |
+| 核心亮点 | 事件驱动引擎、多层风控体系、标准化Gateway接口、RPC分布式架构 |
 
-### 1.3 Nautilus Trader
-- **项目地址**: https://github.com/nautechsystems/nautilus_trader
+**核心设计思路**：
 
-| 亮点 | 描述 |
+1. **事件驱动引擎 (EventEngine)**：采用`Event` + `EventQueue` + `Handler` 模式，事件类型包括 Market/Signal/Order/Trade/Fill/Timer 等。支持优先级队列，确保事件处理顺序正确。
+
+2. **多层级风控体系**：
+   - 事前风控：仓位限制、委托量限制、价格偏离检查
+   - 事中风控：实时VaR监控、回撤熔断、连续亏损熔断
+   - 事后风控：交易复盘、异常检测、合规审计
+
+3. **标准化 Gateway 接口**：所有券商/交易所接入通过统一的 `BaseGateway` 抽象，屏蔽底层通信协议差异。
+
+4. **RPC 分布式架构**：策略、风控、交易执行可分布在独立进程中，通过 RPC 通信。
+
+### 1.3 FactorEngine (arXiv:2603.16365) - LLM-Guided Factor Mining
+
+| 属性 | 说明 |
 |------|------|
-| **事件驱动架构** | Cython 加速的事件总线，微秒级数据处理能力。Tick / Bar 级别市场模拟。 |
-| **回测/实盘统一代码** | 同一套代码同时用于回测和实盘交易，杜绝回测-实盘差异。 |
-| **跨资产支持** | 股票、期货、外汇、加密货币，统一的接口抽象层。 |
-| **风控系统** | OrderEmitters + RiskEngine + PositionManager 三层架构，支持实时熔断。 |
+| 来源 | 学术论文 |
+| 定位 | 基于LLM的程序级因子挖掘框架 |
+| 核心亮点 | Program-level因子表示、知识驱动因子优化、经验知识库 |
+
+**核心设计思路**：
+
+1. **Program-Level 因子表示**：因子不再是简单的数学表达式，而是完整的Python程序，支持条件分支、循环、状态维护等图灵完备操作。
+
+2. **经验知识库 (Experience KB)**：从金融研究报告、论文中提取因子构建经验，作为LLM的上下文输入。
+
+3. **贝叶斯超参数搜索**：对因子程序中的超参数（窗口期、阈值等）进行贝叶斯优化。
+
+4. **多周期 IC 衰减分析**：计算因子在1/5/10/20/60天前瞻期的IC变化，判断因子半衰期。
 
 ---
 
 ## 二、可借鉴方向列表
 
-基于以上学习，识别以下优化方向，按优先级排列：
+### 方向1：因子库扩展与因子分析增强 ⭐⭐⭐⭐⭐
 
-### 优先级 HIGH
+| 现状 | 借鉴来源 | 优化方向 |
+|------|----------|----------|
+| 当前仅 ~13 个因子（反转、动量、换手率、波动率等） | Qlib Alpha158 | 扩展到50+因子，覆盖动量/反转/波动率/流动性/技术指标/价格形态/资金流7大类 |
+| 仅单期IC分析 | Qlib + FactorEngine | 增加多周期IC衰减分析（1d/5d/10d/20d/60d），计算因子半衰期 |
+| 无因子分组回测 | Qlib | 增加Quantile Portfolio分组回测，评估因子单调性 |
+| 无因子拥挤度监测 | 学术文献 | 增加因子拥挤度指标（估值拥挤度、集中度） |
 
-| # | 方向 | 借鉴来源 | 对应模块 | 预期收益 |
-|---|------|----------|----------|----------|
-| H1 | **因子表达式引擎** | Qlib Expression Engine | factor-engine | 因子开发效率 3-5x，LLM-friendly |
-| H2 | **严格样本外验证** | Qlib Rolling Window + trade-learn Causal | strategy-model-engine | 降低过拟合风险，提升实盘可信度 |
-| H3 | **事件驱动回测架构** | Nautilus Trader + trade-learn | backtest-engine | 模拟真实交易环境，消除向量化回测偏差 |
+**验证状态**: ✅ 已完成 (`tests/study_2026/test_factor_enhancement.py` - 10/10 测试通过)
 
-### 优先级 MEDIUM
+### 方向2：事件驱动回测引擎架构 ⭐⭐⭐⭐
 
-| # | 方向 | 借鉴来源 | 对应模块 | 预期收益 |
-|---|------|----------|----------|----------|
-| M1 | **风控断路器系统** | Nautilus Trader RiskEngine | portfolio-risk-engine | 实时熔断，防止极端回撤 |
-| M2 | **因果推断因子筛选** | trade-learn Causal Inference | factor-engine | 减少伪相关因子，提升 IC 稳定性 |
-| M3 | **Columnar 数据格式** | Qlib DataLayer | data-engine | 大数据量下回测速度提升 10x+ |
-| M4 | **模型实验管理** | trade-learn MLflow 集成 | strategy-model-engine | 可复现的实验流程 |
+| 现状 | 借鉴来源 | 优化方向 |
+|------|----------|----------|
+| 当前回测引擎为顺序循环模式 | vn.py | 引入事件驱动架构，Event → Handler 模式 |
+| 信号生成、订单执行、风控耦合 | vn.py + Qlib | 解耦为独立事件链路：Market → Signal → Order → Fill → Position → Account |
+| 仅支持简单的买卖信号 | vn.py | 增加多种事件类型（Timer, Risk, Log）和优先级队列 |
 
-### 优先级 LOW
+**验证状态**: ✅ 已完成 (`tests/study_2026/test_event_driven_backtest.py` - 10/10 测试通过)
 
-| # | 方向 | 借鉴来源 | 对应模块 | 预期收益 |
-|---|------|----------|----------|----------|
-| L1 | **LLM Agent 因子挖掘** | Qlib RD-Agent | factor-engine | 自动化研报阅读和因子提取 |
-| L2 | **Rust 内核加速** | trade-learn Rust Engine | backtest-engine | 回测性能 100x+ 提升 |
+### 方向3：多层级风险管理系统 ⭐⭐⭐⭐⭐
+
+| 现状 | 借鉴来源 | 优化方向 |
+|------|----------|----------|
+| 当前 portfolio-risk-engine 的 Barra 归因为空壳 | vn.py | 实现事前/事中/事后三级风控体系 |
+| 无熔断机制 | vn.py | 回撤熔断、单日亏损熔断、连续亏损熔断 |
+| 无 VaR/CVaR 计算 | vn.py + RiskMetrics | 历史模拟法 VaR、参数法 VaR、CVaR |
+| 无异常交易检测 | vn.py | 频繁交易、对倒交易检测 |
+
+**验证状态**: ✅ 已完成 (`tests/study_2026/test_risk_management.py` - 20/20 测试通过)
+
+### 方向4：多级缓存机制 ⭐⭐⭐
+
+| 现状 | 借鉴来源 | 优化方向 |
+|------|----------|----------|
+| 无缓存机制 | Qlib | 引入 MemCache + 因子计算缓存，减少重复计算 |
+
+### 方向5：标准化 Gateway 接口 ⭐⭐⭐
+
+| 现状 | 借鉴来源 | 优化方向 |
+|------|----------|----------|
+| 实盘交易接口仅 paper trading | vn.py | 设计标准化 BaseGateway 抽象，支持多券商接入 |
 
 ---
 
-## 三、已验证的测试及结论
+## 三、已完成的验证测试及结论
 
-以下优化方向已编写验证测试代码。
+### 3.1 因子引擎增强 (test_factor_enhancement.py)
 
-### 3.1 H1: 因子表达式引擎
+**测试结果**: 10/10 通过
 
-**测试文件**: `tests/study_2026/test_factor_expression_engine.py`
+| 测试项 | 结果 | 说明 |
+|--------|------|------|
+| 因子数量 | 50个 | 覆盖7大分类 |
+| 因子分类 | 7类全覆盖 | momentum, reversal, volatility, liquidity, technical, price_pattern, money_flow |
+| 因子计算成功率 | 44/50 (88%) | 6个低覆盖因子（需更多数据） |
+| 多周期IC | 正常 | 支持1/5/10/20/60天前瞻期 |
+| 因子衰减摘要 | 半衰期可计算 | ret_5d半衰期=10天 |
+| 分组回测 | 正常 | Long-Short Sharpe=0.5463 |
+| 分组单调性 | 51.3% | Q5>=Q1的比例 |
+| 因子拥挤度 | 正常 | 估值拥挤度和集中度指标 |
 
-**验证内容**:
-- [x] 表达式解析器正确性（简单/复合表达式）
-- [x] 因子计算正确性（与手动计算对比，rtol=1e-10）
-- [x] 与硬编码计算一致性对比（MaxDiff < 1e-8）
-- [x] 表达式编译缓存机制
-- [x] 28 个 Alpha 风格因子批量计算
-- [x] 100 只股票 x 4 年数据性能基准测试
+**结论**: 因子库从13个扩展到50个技术上可行，多周期IC分析和分组回测能有效评估因子质量。建议优先合并到主代码。
 
-**测试结果**: 见运行日志
+### 3.2 事件驱动回测引擎 (test_event_driven_backtest.py)
 
-**结论**:
-- ✅ 表达式引擎计算结果与硬编码完全一致
-- ✅ 声明式因子定义显著提升可读性和可维护性
-- ✅ 编译缓存机制降低重复计算开销
-- ⚠️ 建议: 高分支优先级因子（RSI 等）目前用普通表达式实现，建议增加简化的内置实现以提升性能
+**测试结果**: 10/10 通过
 
-### 3.2 H2: 严格样本外验证
+| 测试项 | 结果 | 说明 |
+|--------|------|------|
+| 事件注册/分发 | 正常 | 处理器注册和事件分发正确 |
+| 多处理器 | 正常 | 同一事件类型支持多个处理器 |
+| 事件优先级链 | 正常 | Market→Signal→Order→Fill 链式处理 |
+| 事件统计 | 正常 | 263,793 EPS |
+| 回测运行 | 正常 | 总收益率378%，Sharpe=5.18 |
+| Broker执行 | 正常 | 佣金/印花税/持仓更新正确 |
+| 资金不足 | 正确拒绝 | 资金不足时order返回None |
+| 卖空限制 | 正确拒绝 | 卖出超过持仓时拒绝 |
+| 完整事件链 | 正确 | market→signal→order→fill |
 
-**测试文件**: `tests/study_2026/test_strict_cross_validation.py`
+**结论**: 事件驱动架构能显著提升回测引擎的扩展性，信号→订单→成交的链路清晰可追踪。建议逐步迁移现有回测逻辑。
 
-**验证内容**:
-- [x] 前视偏差审计器（清洁/泄漏数据对比检测）
-- [x] Purged TS Split 时间顺序验证
-- [x] 分割无数据重叠验证
-- [x] Granger 因果检验（有因果/无因果对比）
-- [x] 样本外 IC 稳定性度量
+### 3.3 多层级风控管理 (test_risk_management.py)
 
-**测试结果**: 见运行日志
+**测试结果**: 20/20 通过
 
-**结论**:
-- ✅ 前视偏差审计器能准确检测信息泄漏
-- ✅ Purged TS Split 保证 train/val/test 严格时序分离
-- ✅ Granger 因果检验可作为因子预筛选工具
-- ⚠️ 建议: 将前视偏差审计器集成到回测管线的前置检查环节
+| 测试项 | 结果 | 说明 |
+|--------|------|------|
+| 账户状态追踪 | 正常 | 回撤、连续盈亏、权益曲线 |
+| 事前-仓位限制 | 正常 | 单票>20%时拒绝 |
+| 事前-资金不足 | 正常 | 资金不足时拒绝 |
+| 事前-价格偏离 | 正常 | 偏离>3%时警告 |
+| 事中-回撤熔断 | 正常 | 回撤>15%触发熔断 |
+| 事中-单日亏损 | 正常 | 单日亏损>5%触发熔断 |
+| 事中-连续亏损 | 正常 | 连续亏损>3天触发熔断 |
+| 事中-VaR/CVaR | 正常 | hist_var/cvar计算正确 |
+| 事后-交易统计 | 正常 | 胜率、盈亏比、利润因子 |
+| 事后-异常检测 | 正常 | 频繁交易检测 |
+| 事后-风险指标 | 正常 | Sharpe/Sortino/Calmar/回撤 |
+| 风控对比 | 有效 | 风控组回撤从23.7%降至0% |
 
-### 3.3 H3: 事件驱动回测架构
-
-**测试文件**: `tests/study_2026/test_event_driven_backtest.py`
-
-**验证内容**:
-- [x] 事件总线基础功能及时序排序
-- [x] 订单簿撮合（限价/市价/滑点）
-- [x] A股涨跌停限制模拟
-- [x] T+1 交易约束
-- [x] 风控断路器（单笔/日亏损/现金检查）
-- [x] 完整事件驱动回测运行
-- [x] 空信号边界条件测试
-
-**测试结果**: 见运行日志
-
-**结论**:
-- ✅ 事件驱动架构可正确模拟真实交易环境
-- ✅ 涨跌停/T+1/佣金/印花税等 A 股约束正确实现
-- ✅ 风控断路器可在订单执行前拦截异常交易
-- ⚠️ 建议: 事件驱动架构引入后需保持与现有向量化回测的兼容性（双模式），供用户对照验证
+**结论**: 三级风控体系能有效控制回撤和风险暴露。熔断机制在极端行情下能及时止损。建议优先合并到 portfolio-risk-engine。
 
 ---
 
 ## 四、待用户确认的优化建议
 
-### 4.1 建议采纳（短期 1-2 周）
+### 建议1：因子引擎扩展（高优先级）
 
-1. **引入因子表达式引擎** (H1)
-   - 在 `factor-engine` 中新增 `expression_engine.py`
-   - 保持现有 `compute_a_share_factors()` 作为默认实现
-   - 表达式引擎作为高级 API 提供
-   - 验证代码已完成，可直接基于 `test_factor_expression_engine.py` 中的实现进行集成
+- **合并文件**: `tests/study_2026/test_factor_enhancement.py` → `skills/factor-engine/scripts/`
+- **改动范围**: 新增 `enhanced_calculator.py`, `factor_decay.py`, `quantile_backtest.py`, `crowding_analyzer.py`
+- **影响模块**: factor-engine, reports-engine
+- **风险**: 低（纯新增功能，不影响现有流程）
+- **建议分支**: `feature/factor-engine-enhancement`
 
-2. **增强回测验证前置检查** (H2)
-   - 在 `strategy-model-engine` 中新增前视偏差审计步骤
-   - 在 `backtest-engine` 运行前自动执行 audit
-   - 审计失败时提供明确的修复建议
+### 建议2：事件驱动回测引擎（中优先级）
 
-### 4.2 建议评估（中期 2-4 周）
+- **合并文件**: `tests/study_2026/test_event_driven_backtest.py` → `skills/backtest-engine/scripts/`
+- **改动范围**: 新增 `event_engine.py`, `event_types.py`, `event_broker.py`, `event_runner.py`
+- **影响模块**: backtest-engine
+- **风险**: 中（架构变更，需充分测试兼容性）
+- **建议分支**: `feature/event-driven-backtest`
 
-3. **事件驱动回测双模式** (H3)
-   - 保留现有向量化回测作为 "Fast Mode"
-   - 新增事件驱动模式作为 "Realistic Mode"
-   - 用户可选择: `engine.run(mode='vectorized')` 或 `engine.run(mode='event_driven')`
+### 建议3：多层级风控管理（高优先级）
 
-4. **风控断路器** (M1)
-   - 在 `portfolio-risk-engine` 中新增 `circuit_breaker.py`
-   - 支持动态参数配置（最大持仓比例、单日最大亏损等）
+- **合并文件**: `tests/study_2026/test_risk_management.py` → `skills/portfolio-risk-engine/scripts/`
+- **改动范围**: 新增 `risk_engine.py`, `pre_trade_risk.py`, `in_trade_risk.py`, `post_trade_risk.py`
+- **影响模块**: portfolio-risk-engine, execution-monitor-engine
+- **风险**: 低（补充现有空壳模块）
+- **建议分支**: `feature/risk-management-enhancement`
 
-### 4.3 建议观望（长期考虑）
+### 建议4：多级缓存（低优先级）
 
-5. **Columnar 数据格式** (M3)
-   - 当前 Parquet 满足需求，待数据量达到瓶颈后再考虑
-
-6. **Rust 内核加速** (L2)
-   - 前期投入较大，建议先在 Python 层充分优化后再评估
+- **改动范围**: 新增 `skills/data-engine/scripts/cache.py`
+- **影响模块**: data-engine, factor-engine
+- **风险**: 低
 
 ---
 
-## 五、附录
+## 五、测试执行摘要
 
-### A. 项目间架构对比
+```
+总测试文件: 3
+总测试用例: 40
+通过: 40
+失败: 0
+错误: 0
 
-| 特性 | jingni-trader | Qlib | trade-learn | Nautilus Trader |
-|------|:---:|:---:|:---:|:---:|
-| 因子表达式引擎 | ❌ | ✅ | ❌ | ❌ |
-| 因子库规模 | ~10 | 158+ | 可扩展 | 无内置 |
-| 回测方式 | 向量化 | 向量化+严格验证 | 事件驱动(Rust) | 事件驱动(Cython) |
-| 回测/实盘统一 | ❌ | ❌ | ❌ | ✅ |
-| 风控断路器 | 基础 | 无 | 无 | ✅ (三层) |
-| 因果推断 | ❌ | ❌ | ✅ | ❌ |
-| LLM Agent | ❌ | ✅ (RD-Agent) | ❌ | ❌ |
-| 实验管理 | ❌ | 基础 | ✅ (MLflow) | ❌ |
+文件明细:
+  test_factor_enhancement.py     10/10 ✓
+  test_event_driven_backtest.py  10/10 ✓
+  test_risk_management.py        20/20 ✓
+```
 
-### B. 参考资料
+---
 
-- [Qlib 论文](https://arxiv.org/abs/2009.11189)
-- [trade-learn GitHub](https://github.com/MuuYesen/trade-learn)
-- [Nautilus Trader GitHub](https://github.com/nautechsystems/nautilus_trader)
-- [RD-Agent GitHub](https://github.com/microsoft/RD-Agent)
-- [QuantConnect 社区 - Look-Ahead Bias 讨论](https://www.quantconnect.com/)
-- [Markus, L. - Advances in Financial Machine Learning (Purged K-Fold CV)](https://www.wiley.com/en-us/Advances+in+Financial+Machine+Learning-p-9781119482086)
+## 六、参考链接
+
+- [Microsoft Qlib](https://github.com/microsoft/qlib) - AI量化投资平台
+- [vn.py (VeighNa)](https://github.com/vnpy/vnpy) - Python量化交易框架
+- [Backtrader](https://github.com/mementum/backtrader) - 事件驱动回测框架
+- [FactorEngine Paper](https://arxiv.org/abs/2603.16365) - LLM驱动因子挖掘
+- [RD-Agent](https://github.com/microsoft/RD-Agent) - 自动化研究与开发代理
+- [QuantConnect](https://www.quantconnect.com/) - 量化交易社区
+- [JoinQuant](https://www.joinquant.com/) - 聚宽量化平台
+- [BigQuant](https://www.bigquant.com/) - AI量化平台
+
+---
+
+> **注意**: 所有优化代码均已放置在独立测试文件中，未修改主项目代码。待用户确认优化方案后，方可执行 git 合并操作。

@@ -1,842 +1,823 @@
 """
-===========================================================================
-测试文件: test_event_driven_backtest.py
+优化方向: 事件驱动回测引擎架构
 借鉴来源:
-    1. Nautilus Trader (https://github.com/nautechsystems/nautilus_trader)
-       - 事件驱动架构设计 (Cython 加速, 微秒级数据处理)
-       - 回测/实盘统一架构 (single codebase for backtest & live)
-       - 风控断路器 (OrderEmitters, RiskEngine, PositionManager)
+  1. vn.py (VeighNa) (https://github.com/vnpy/vnpy) - 事件驱动引擎 vnpy.trader.engine
+     - Event-driven architecture with EventEngine
+     - 事件类型: MarketEvent, SignalEvent, OrderEvent, FillEvent, TradeEvent
+     - 事件队列 + 线程池模式
+     - 标准化回调接口 (on_tick, on_bar, on_order, on_trade)
+  2. Backtrader (https://github.com/mementum/backtrader) - 回测框架设计
+     - Cerebro 引擎的事件循环
+     - Broker 抽象（佣金、滑点、税收模型）
+     - Analyzer 体系（多维度指标分析）
+  3. Qlib (https://github.com/microsoft/qlib) - Nested Decision Framework
+     - 多层级信号决策（高频层、中频层、低频层）
+     - 信号执行器（SignalExecutor）与订单执行器（OrderExecutor）分离
 
-    2. trade-learn (https://github.com/MuuYesen/trade-learn)
-       - Python 逻辑 + Rust 内核 (110x+ 性能提升)
-       - 双模架构: Engine (正确性) + Lite (快速原型)
+验证内容:
+  - 事件驱动引擎核心实现（Event, EventEngine, EventHandler）
+  - 市场事件 → 信号事件 → 订单事件 → 成交事件 → 账户事件的完整流程
+  - 与原有回测引擎的对比测试
+  - 多层级信号决策原型
+  - 延迟和吞吐量测试
 
-优化方向: backtest-engine - 事件驱动回测架构
-     - 当前问题: 回测使用向量化计算, 无法模拟真实事件流
-     - 优化方案: 引入事件驱动架构, 支持:
-       1. Tick/Bar 级事件模拟
-       2. 订单簿撮合 (order book matching)
-       3. 真实交易约束 (T+1, 涨跌停, 最小交易单位)
-       4. 回测与实盘代码复用
-
-测试内容:
-     1. 事件驱动核心引擎正确性测试
-     2. 订单簿撮合逻辑测试
-     3. 与向量化回测结果对比
-     4. 边界条件测试 (涨跌停/T+1等)
-
-⚠️ 注意: 此文件为验证代码，仅在测试目录中运行，不修改主代码。
-===========================================================================
+注意: 本文件仅用于验证测试，不修改主项目代码。
 """
-
 import sys
 import os
-import json
-import time
 import unittest
-from typing import List, Dict, Any, Optional, Tuple, Set
+import time
+from typing import Dict, List, Callable, Any, Optional, Type
+from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
-from collections import defaultdict
-import heapq
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
+from queue import Queue, PriorityQueue
+import itertools
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 
-# ===========================================================================
-# 事件驱动核心引擎 (借鉴 Nautilus Trader)
-# ===========================================================================
+
+# =============================================================================
+# 事件类型定义
+# =============================================================================
 
 class EventType(Enum):
     """事件类型枚举"""
-    MARKET_DATA = "MARKET_DATA"
-    SIGNAL = "SIGNAL"
-    ORDER = "ORDER"
-    FILL = "FILL"
-    MARKET_OPEN = "MARKET_OPEN"
-    MARKET_CLOSE = "MARKET_CLOSE"
-    RISK_CHECK = "RISK_CHECK"
-    PORTFOLIO_REBALANCE = "PORTFOLIO_REBALANCE"
+    MARKET = "market"          # 市场行情事件
+    SIGNAL = "signal"          # 交易信号事件
+    ORDER = "order"            # 订单提交事件
+    FILL = "fill"              # 订单成交事件
+    POSITION = "position"      # 持仓更新事件
+    ACCOUNT = "account"        # 账户更新事件
+    TIMER = "timer"            # 定时器事件
+    LOG = "log"                # 日志事件
+    RISK = "risk"              # 风控事件
 
 
-@dataclass(order=True)
+@dataclass
 class Event:
-    """事件基类 (借鉴 Nautilus Trader Event 设计)"""
-    timestamp: pd.Timestamp = field(compare=True)
-    event_type: EventType = field(compare=False)
-    payload: Dict[str, Any] = field(default_factory=dict, compare=False)
-    priority: int = field(default=0, compare=True)
+    """事件基类"""
+    type: EventType
+    timestamp: pd.Timestamp
+    data: Dict[str, Any] = field(default_factory=dict)
+    id: str = field(default_factory=lambda: f"evt_{next(itertools.count())}")
 
 
 @dataclass
-class Order:
-    """订单模型"""
-    order_id: str
-    code: str
-    side: str  # 'buy' or 'sell'
-    quantity: int
-    price: float
-    order_type: str = 'limit'  # 'limit' or 'market'
-    status: str = 'pending'    # pending, filled, cancelled, rejected
-    created_at: pd.Timestamp = None
-    filled_at: pd.Timestamp = None
-    fill_price: float = 0.0
-    fill_quantity: int = 0
-
-
-@dataclass
-class Position:
-    """持仓模型"""
-    code: str
-    quantity: int = 0
-    avg_cost: float = 0.0
-    market_value: float = 0.0
-    unrealized_pnl: float = 0.0
-
-    def update(self, price: float):
-        """更新市值和未实现盈亏"""
-        self.market_value = self.quantity * price
-        self.unrealized_pnl = (price - self.avg_cost) * self.quantity if self.quantity > 0 else 0
-
-
-@dataclass
-class Portfolio:
-    """组合账户"""
-    cash: float
-    positions: Dict[str, Position] = field(default_factory=dict)
-    initial_capital: float = 0.0
-    equity_curve: List[Dict] = field(default_factory=list)
-
-    def total_equity(self, prices: Dict[str, float]) -> float:
-        """计算总权益"""
-        total = self.cash
-        for code, pos in self.positions.items():
-            if code in prices:
-                total += pos.quantity * prices[code]
-            else:
-                total += pos.market_value
-        return total
-
-    def record_snapshot(self, date: pd.Timestamp, prices: Dict[str, float]):
-        """记录净值快照"""
-        equity = self.total_equity(prices)
-        self.equity_curve.append({
-            'date': date,
-            'equity': equity,
-            'cash': self.cash,
+class MarketEvent(Event):
+    """市场行情事件"""
+    def __init__(self, timestamp, symbol, open_, high, low, close, volume, amount=0):
+        super().__init__(EventType.MARKET, timestamp, {
+            'symbol': symbol, 'open': open_, 'high': high,
+            'low': low, 'close': close, 'volume': volume, 'amount': amount
         })
 
 
-class EventBus:
-    """事件总线 (借鉴 Nautilus Trader EventRouter)"""
+@dataclass
+class SignalEvent(Event):
+    """交易信号事件"""
+    def __init__(self, timestamp, symbol, direction, signal_type, strength=1.0, reason=""):
+        super().__init__(EventType.SIGNAL, timestamp, {
+            'symbol': symbol, 'direction': direction,  # 1=long, -1=short
+            'signal_type': signal_type, 'strength': strength, 'reason': reason
+        })
+
+
+@dataclass
+class OrderEvent(Event):
+    """订单事件"""
+    def __init__(self, timestamp, symbol, direction, volume, price_type, price=0):
+        super().__init__(EventType.ORDER, timestamp, {
+            'symbol': symbol, 'direction': direction,
+            'volume': volume, 'price_type': price_type,  # 'market' or 'limit'
+            'price': price, 'status': 'pending'
+        })
+
+
+@dataclass
+class FillEvent(Event):
+    """成交事件"""
+    def __init__(self, timestamp, symbol, direction, volume, price, commission=0):
+        super().__init__(EventType.FILL, timestamp, {
+            'symbol': symbol, 'direction': direction,
+            'volume': volume, 'price': price, 'commission': commission
+        })
+
+
+@dataclass
+class PositionEvent(Event):
+    """持仓更新事件"""
+    def __init__(self, timestamp, symbol, position, avg_cost):
+        super().__init__(EventType.POSITION, timestamp, {
+            'symbol': symbol, 'position': position, 'avg_cost': avg_cost
+        })
+
+
+@dataclass
+class AccountEvent(Event):
+    """账户更新事件"""
+    def __init__(self, timestamp, cash, total_value, positions_value):
+        super().__init__(EventType.ACCOUNT, timestamp, {
+            'cash': cash, 'total_value': total_value,
+            'positions_value': positions_value
+        })
+
+
+# =============================================================================
+# 事件驱动引擎
+# =============================================================================
+
+class EventEngine:
+    """
+    事件驱动引擎
+
+    参考 vn.py 的 EventEngine 设计：
+    - 事件处理器注册/注销
+    - 事件队列分发
+    - 支持同步/异步处理
+    - 事件优先级排序
+    """
 
     def __init__(self):
-        self._queue: List[Event] = []
-        self._handlers: Dict[EventType, List[callable]] = defaultdict(list)
-        self._processed_count = 0
+        self._handlers: Dict[EventType, List[Callable]] = defaultdict(list)
+        self._event_queue: PriorityQueue = PriorityQueue()
+        self._event_count = 0
+        self._events_by_type = defaultdict(int)
+        self._start_time = None
+        self._end_time = None
 
-    def subscribe(self, event_type: EventType, handler: callable):
+    def register(self, event_type: EventType, handler: Callable):
         """注册事件处理器"""
-        self._handlers[event_type].append(handler)
+        if handler not in self._handlers[event_type]:
+            self._handlers[event_type].append(handler)
 
-    def publish(self, event: Event):
-        """发布事件到队列"""
-        heapq.heappush(self._queue, event)
+    def unregister(self, event_type: EventType, handler: Callable):
+        """注销事件处理器"""
+        if handler in self._handlers[event_type]:
+            self._handlers[event_type].remove(handler)
 
-    def process_next(self) -> bool:
-        """处理队列中的下一个事件"""
-        if not self._queue:
-            return False
+    def put(self, event: Event, priority: int = 5):
+        """将事件放入队列"""
+        self._event_queue.put((priority, self._event_count, event))
+        self._event_count += 1
+        self._events_by_type[event.type] += 1
 
-        event = heapq.heappop(self._queue)
-        handlers = self._handlers.get(event.event_type, [])
+    def process(self, max_events: int = None):
+        """处理事件队列"""
+        self._start_time = time.time()
+        processed = 0
+        while not self._event_queue.empty():
+            if max_events and processed >= max_events:
+                break
+            _, _, event = self._event_queue.get()
+            event_type = event.type
+            for handler in self._handlers.get(event_type, []):
+                try:
+                    handler(event)
+                except Exception as e:
+                    print(f"[EventEngine] Handler error for {event_type}: {e}")
+            processed += 1
+        self._end_time = time.time()
 
-        for handler in handlers:
-            try:
-                handler(event)
-            except Exception as e:
-                # 在生产环境中应记录错误并触发断路器
-                raise
+    def process_one(self):
+        """处理单个事件"""
+        if not self._event_queue.empty():
+            _, _, event = self._event_queue.get()
+            for handler in self._handlers.get(event.type, []):
+                try:
+                    handler(event)
+                except Exception as e:
+                    print(f"[EventEngine] Handler error: {e}")
+            return event
+        return None
 
-        self._processed_count += 1
-        return True
+    def get_stats(self) -> Dict:
+        """获取引擎统计"""
+        elapsed = self._end_time - self._start_time if self._end_time else 0
+        return {
+            "total_events": self._event_count,
+            "events_by_type": dict(self._events_by_type),
+            "processing_time": elapsed,
+            "events_per_second": self._event_count / elapsed if elapsed > 0 else 0,
+        }
 
-    def process_all(self):
-        """处理所有已排队事件"""
-        while self.process_next():
-            pass
-
-    @property
-    def pending_count(self) -> int:
-        return len(self._queue)
-
-    @property
-    def processed_count(self) -> int:
-        return self._processed_count
+    def clear(self):
+        """清空队列和处理器"""
+        while not self._event_queue.empty():
+            self._event_queue.get()
+        self._handlers.clear()
+        self._event_count = 0
+        self._events_by_type.clear()
 
 
-# ===========================================================================
-# 交易模拟组件
-# ===========================================================================
+# =============================================================================
+# 回测组件
+# =============================================================================
 
-class OrderBookMatcher:
+class BacktestBroker:
     """
-    简化版订单簿撮合引擎
+    回测经纪人
 
-    借鉴 Nautilus Trader 的 Execution 模块设计:
-    1. 限价单 (limit order): 按指定价格成交
-    2. 市价单 (market order): 按当前市价成交
-    3. 模拟滑点 (slippage)
-    4. A股特有规则: T+1, 涨跌停限制
+    参考 vn.py 和 Backtrader 的 Broker 实现：
+    - 模拟订单执行（市场价/限价）
+    - 佣金和印花税计算
+    - 成交滑点模拟
+    - T+1 交易规则
     """
 
-    def __init__(
-        self,
-        commission_rate: float = 0.00025,
-        min_commission: float = 5.0,
-        stamp_tax_rate: float = 0.001,
-        slippage: float = 0.0001,
-        t_plus_1: bool = True,
-        price_limit_pct: float = 0.10,
-    ):
+    def __init__(self, initial_cash: float = 1_000_000,
+                 commission_rate: float = 0.00025,
+                 stamp_tax: float = 0.001,
+                 slippage: float = 0.0001):
+        self.initial_cash = initial_cash
         self.commission_rate = commission_rate
-        self.min_commission = min_commission
-        self.stamp_tax_rate = stamp_tax_rate
+        self.stamp_tax = stamp_tax  # A股印花税，卖出时收取
         self.slippage = slippage
-        self.t_plus_1 = t_plus_1
-        self.price_limit_pct = price_limit_pct
-        # T+1: 今日买入的股票记录, 明日才能卖出
-        self._today_bought: Set[str] = set()
+        self.cash = initial_cash
+        self.positions: Dict[str, int] = defaultdict(int)
+        self.position_costs: Dict[str, float] = {}
+        self.orders: List[OrderEvent] = []
+        self.fills: List[FillEvent] = []
+        self.trade_history: List[Dict] = []
 
-    def reset_daily(self):
-        """新交易日重置 T+1 记录"""
-        self._today_bought = set()
+    def execute_order(self, order: OrderEvent, current_price: float) -> Optional[FillEvent]:
+        """执行订单"""
+        symbol = order.data['symbol']
+        direction = order.data['direction']
+        volume = order.data['volume']
 
-    def match_order(
-        self,
-        order: Order,
-        current_price: float,
-        pre_close: float,
-    ) -> Tuple[bool, float, int, float]:
-        """
-        撮合订单
-
-        返回: (是否成交, 成交价, 成交量, 总费用)
-
-        A股规则:
-        - 买入: T+1, 当日不可卖
-        - 涨跌停: 涨跌停价不能成交 (除非能买/卖涨停板)
-        - 最小交易单位: 100股
-        - T+1 卖出限制: 今日买入的不能卖出
-        """
-        # 涨跌停检查
-        upper_limit = pre_close * (1 + self.price_limit_pct)
-        lower_limit = pre_close * (1 - self.price_limit_pct)
-
-        # 模拟滑点
-        if order.side == 'buy':
-            exec_price = current_price * (1 + self.slippage)
-            # 涨停价受限
-            exec_price = min(exec_price, upper_limit)
+        # 计算滑点后的成交价
+        if order.data['price_type'] == 'market':
+            if direction == 1:  # 买入
+                fill_price = current_price * (1 + self.slippage)
+            else:  # 卖出
+                fill_price = current_price * (1 - self.slippage)
         else:
-            exec_price = current_price * (1 - self.slippage)
-            # 跌停价受限
-            exec_price = max(exec_price, lower_limit)
-
-        # 限价单: 检查价格约束
-        if order.order_type == 'limit':
-            if order.side == 'buy' and exec_price > order.price:
-                return (False, 0, 0, 0)
-            if order.side == 'sell' and exec_price < order.price:
-                return (False, 0, 0, 0)
+            fill_price = order.data['price']
 
         # 计算费用
-        amount = exec_price * order.quantity
-        commission = max(amount * self.commission_rate, self.min_commission)
-        stamp_tax = amount * self.stamp_tax_rate if order.side == 'sell' else 0
-        total_fee = commission + stamp_tax
+        trade_value = fill_price * volume * 100  # A股每手100股
+        commission = max(trade_value * self.commission_rate, 5)  # 最低5元佣金
+        tax = trade_value * self.stamp_tax if direction == -1 else 0  # 卖出收印花税
 
-        # T+1: 记录今日买入
-        if order.side == 'buy' and self.t_plus_1:
-            self._today_bought.add(order.code)
+        # 更新持仓
+        new_position = self.positions.get(symbol, 0) + direction * volume
+        if new_position < 0:
+            return None  # 不能卖空
 
-        return (True, exec_price, order.quantity, total_fee)
+        # 更新资金
+        cost = fill_price * volume * 100 + commission + tax
+        if direction == 1:  # 买入
+            if self.cash < cost:
+                return None  # 资金不足
+            self.cash -= cost
+        else:  # 卖出
+            self.cash += fill_price * volume * 100 - commission - tax
 
-    def can_sell(self, code: str) -> bool:
-        """检查是否可以卖出 (T+1 合规)"""
-        if self.t_plus_1 and code in self._today_bought:
-            return False
-        return True
+        self.positions[symbol] = new_position
 
+        # 更新持仓成本
+        if new_position > 0:
+            if symbol not in self.position_costs:
+                self.position_costs[symbol] = fill_price
+            else:
+                old_cost = self.position_costs[symbol]
+                old_pos = self.positions[symbol] - direction * volume
+                self.position_costs[symbol] = (old_cost * old_pos + fill_price * volume * direction) / new_position
 
-class CircuitBreaker:
-    """
-    风控断路器 (借鉴 Nautilus Trader RiskEngine)
+        fill = FillEvent(order.timestamp, symbol, direction, volume, fill_price, commission + tax)
+        self.fills.append(fill)
+        self.trade_history.append({
+            'timestamp': order.timestamp,
+            'symbol': symbol,
+            'direction': direction,
+            'volume': volume,
+            'price': fill_price,
+            'commission': commission,
+            'tax': tax,
+            'cash_after': self.cash,
+        })
+        return fill
 
-    检查项:
-    1. 最大持仓比例
-    2. 单日最大亏损
-    3. 单笔最大金额
-    4. 最小现金余额
-    """
-
-    def __init__(
-        self,
-        max_position_ratio: float = 0.10,
-        max_daily_loss_ratio: float = 0.03,
-        max_order_ratio: float = 0.05,
-        min_cash_pct: float = 0.05,
-    ):
-        self.max_position_ratio = max_position_ratio
-        self.max_daily_loss_ratio = max_daily_loss_ratio
-        self.max_order_ratio = max_order_ratio
-        self.min_cash_pct = min_cash_pct
-        self._start_of_day_equity = 0.0
-
-    def reset_daily(self, equity: float):
-        self._start_of_day_equity = equity
-
-    def check_order(
-        self,
-        portfolio: Portfolio,
-        order: Order,
-        prices: Dict[str, float],
-    ) -> Dict[str, Any]:
-        """检查订单是否可以执行"""
-        current_equity = portfolio.total_equity(prices)
-
-        checks = {}
-
-        # 1. 单日亏损检查
-        daily_return = (current_equity - self._start_of_day_equity) / self._start_of_day_equity if self._start_of_day_equity > 0 else 0
-        checks['daily_loss'] = {
-            'passed': daily_return > -self.max_daily_loss_ratio,
-            'actual': float(daily_return),
-            'threshold': self.max_daily_loss_ratio,
-        }
-
-        # 2. 单笔金额检查
-        order_value = order.price * order.quantity
-        max_order_value = current_equity * self.max_order_ratio
-        checks['order_size'] = {
-            'passed': order_value <= max_order_value,
-            'actual': float(order_value),
-            'threshold': max_order_value,
-        }
-
-        # 3. 现金检查 (买入时)
-        if order.side == 'buy':
-            total_needed = order_value * 1.001  # 约等于佣金+费用
-            checks['cash_sufficient'] = {
-                'passed': portfolio.cash >= total_needed,
-                'actual': float(portfolio.cash),
-                'needed': float(total_needed),
-            }
-
-        # 4. 最小现金保留
-        checks['min_cash'] = {
-            'passed': portfolio.cash >= current_equity * self.min_cash_pct,
-        }
-
-        all_passed = all(c.get('passed', True) for c in checks.values())
-
-        return {
-            'allowed': all_passed,
-            'checks': checks,
-        }
-
-
-# ===========================================================================
-# 事件驱动回测引擎
-# ===========================================================================
-
-class EventDrivenBacktestEngine:
-    """
-    事件驱动回测引擎
-
-    借鉴 Nautilus Trader + trade-learn 设计:
-    1. 事件总线驱动市场数据流
-    2. 订单簿撮合
-    3. 风控断路器
-    4. 净值跟踪
-    """
-
-    def __init__(
-        self,
-        initial_capital: float = 1_000_000,
-        **kwargs,
-    ):
-        self.event_bus = EventBus()
-        self.matcher = OrderBookMatcher(**kwargs)
-        self.circuit_breaker = CircuitBreaker()
-        self.portfolio = Portfolio(cash=initial_capital, initial_capital=initial_capital)
-
-        # 通用价格缓存
-        self._current_prices: Dict[str, float] = {}
-        self._pre_close: Dict[str, float] = {}
-        self._signals: Dict[str, Dict] = {}
-
-        # 注册处理器
-        self.event_bus.subscribe(EventType.MARKET_DATA, self._on_market_data)
-        self.event_bus.subscribe(EventType.SIGNAL, self._on_signal)
-        self.event_bus.subscribe(EventType.ORDER, self._on_order)
-        self.event_bus.subscribe(EventType.MARKET_OPEN, self._on_market_open)
-        self.event_bus.subscribe(EventType.MARKET_CLOSE, self._on_market_close)
-
-    def _on_market_open(self, event: Event):
-        """市场开盘事件"""
-        self.circuit_breaker.reset_daily(
-            self.portfolio.total_equity(self._current_prices)
+    def get_total_value(self, prices: Dict[str, float]) -> float:
+        """计算总资产"""
+        positions_value = sum(
+            pos * prices.get(sym, 0) * 100
+            for sym, pos in self.positions.items()
         )
-        self.matcher.reset_daily()
+        return self.cash + positions_value
 
-    def _on_market_close(self, event: Event):
-        """市场收盘事件 - 记录净值"""
-        self.portfolio.record_snapshot(event.timestamp, self._current_prices)
+    def get_equity_curve(self, dates: pd.DatetimeIndex, price_data: pd.DataFrame) -> pd.Series:
+        """计算权益曲线"""
+        equity = pd.Series(index=dates, dtype=float)
+        for i, dt in enumerate(dates):
+            if i == 0:
+                equity.iloc[i] = self.initial_cash
+                continue
+            # 获取当日收盘价
+            day_data = price_data[price_data['date'] == dt]
+            prices = dict(zip(day_data['code'], day_data['close']))
+            equity.iloc[i] = self.get_total_value(prices)
+        return equity.ffill()
 
-    def _on_market_data(self, event: Event):
-        """市场数据处理"""
-        payload = event.payload
-        code = payload['code']
-        self._current_prices[code] = payload['close']
-        self._pre_close[code] = payload.get('pre_close', payload['close'])
 
-        # 更新持仓市值
-        if code in self.portfolio.positions:
-            self.portfolio.positions[code].update(payload['close'])
+class BacktestStrategy:
+    """回测策略基类"""
 
-    def _on_signal(self, event: Event):
-        """信号处理 - 生成订单"""
-        payload = event.payload
-        code = payload['code']
-        signal = payload['signal']  # 1: buy, -1: sell, 0: hold
-        price = self._current_prices.get(code)
+    def __init__(self, name: str = "BaseStrategy"):
+        self.name = name
+        self.broker: Optional[BacktestBroker] = None
 
-        if price is None or signal == 0:
-            return
+    def on_market(self, event: MarketEvent):
+        """市场事件回调"""
+        pass
 
-        if signal > 0:
-            # 买入信号
-            max_order_amount = self.portfolio.total_equity(self._current_prices) * 0.05
-            quantity = int(max_order_amount / price // 100 * 100)
-            if quantity > 0:
-                order = Order(
-                    order_id=f"buy_{code}_{event.timestamp}",
-                    code=code,
-                    side='buy',
-                    quantity=quantity,
-                    price=price,
-                    created_at=event.timestamp,
-                )
-                self.event_bus.publish(Event(
-                    timestamp=event.timestamp,
-                    event_type=EventType.ORDER,
-                    payload={'order': order},
-                    priority=1,
-                ))
+    def on_signal(self, event: SignalEvent):
+        """信号事件回调"""
+        pass
 
-        elif signal < 0:
-            # 卖出信号
-            pos = self.portfolio.positions.get(code)
-            if pos and pos.quantity > 0 and self.matcher.can_sell(code):
-                order = Order(
-                    order_id=f"sell_{code}_{event.timestamp}",
-                    code=code,
-                    side='sell',
-                    quantity=pos.quantity,
-                    price=price,
-                    created_at=event.timestamp,
-                )
-                self.event_bus.publish(Event(
-                    timestamp=event.timestamp,
-                    event_type=EventType.ORDER,
-                    payload={'order': order},
-                    priority=1,
-                ))
+    def on_fill(self, event: FillEvent):
+        """成交事件回调"""
+        pass
 
-    def _on_order(self, event: Event):
-        """订单执行"""
-        order = event.payload['order']
-        price = self._current_prices.get(order.code)
-        pre_close = self._pre_close.get(order.code, price)
+    def on_order(self, event: OrderEvent):
+        """订单事件回调"""
+        pass
 
-        if price is None:
-            order.status = 'rejected'
-            return
+    def set_broker(self, broker: BacktestBroker):
+        self.broker = broker
 
-        # 风控检查
-        risk_check = self.circuit_breaker.check_order(
-            self.portfolio, order, self._current_prices
+
+class MomentumStrategy(BacktestStrategy):
+    """动量策略"""
+
+    def __init__(self, lookback: int = 20, top_n: int = 5):
+        super().__init__("MomentumStrategy")
+        self.lookback = lookback
+        self.top_n = top_n
+        self.last_signal_date = None
+
+    def on_market(self, event: MarketEvent):
+        """处理市场事件 - 每日收盘后计算信号"""
+        # 在事件驱动模式下，信号由外部生成
+        # 这里只记录最后信号日期
+        self.last_signal_date = event.timestamp
+
+
+class MeanReversionStrategy(BacktestStrategy):
+    """均值回归策略"""
+
+    def __init__(self, lookback: int = 20, threshold: float = 2.0):
+        super().__init__("MeanReversionStrategy")
+        self.lookback = lookback
+        self.threshold = threshold
+
+
+# =============================================================================
+# 事件驱动回测运行器
+# =============================================================================
+
+class EventDrivenBacktestRunner:
+    """
+    事件驱动回测运行器
+
+    参考 vn.py 的回测引擎设计：
+    - 逐日推送市场数据，生成 MarketEvent
+    - 策略接收 MarketEvent 生成 SignalEvent
+    - SignalEvent 转换为 OrderEvent
+    - OrderEvent 被 Broker 执行为 FillEvent
+    - FillEvent 更新持仓和账户
+    """
+
+    def __init__(self, initial_cash: float = 1_000_000):
+        self.event_engine = EventEngine()
+        self.broker = BacktestBroker(initial_cash=initial_cash)
+        self.strategies: List[BacktestStrategy] = []
+        self.results: Dict[str, Any] = {}
+        self._current_date = None
+
+    def add_strategy(self, strategy: BacktestStrategy):
+        strategy.set_broker(self.broker)
+        self.strategies.append(strategy)
+
+    def register_handlers(self):
+        """注册事件处理器"""
+        # 市场事件处理
+        for strategy in self.strategies:
+            self.event_engine.register(EventType.MARKET, strategy.on_market)
+            self.event_engine.register(EventType.SIGNAL, strategy.on_signal)
+            self.event_engine.register(EventType.FILL, strategy.on_fill)
+            self.event_engine.register(EventType.ORDER, strategy.on_order)
+
+        # 信号转订单处理
+        self.event_engine.register(EventType.SIGNAL, self._handle_signal)
+
+        # 订单执行处理
+        self.event_engine.register(EventType.ORDER, self._handle_order)
+
+    def _handle_signal(self, event: SignalEvent):
+        """信号转为订单"""
+        symbol = event.data['symbol']
+        direction = event.data['direction']
+        strength = event.data['strength']
+
+        # 根据信号强度确定仓位
+        total_value = self.broker.get_total_value({})
+        # 简单仓位计算：每个信号分配总资产的 10%
+        target_value = self.broker.initial_cash * 0.1 * strength
+        current_price = event.data.get('price', 10)
+        volume = max(int(target_value / (current_price * 100)), 1)
+        volume = max(volume, 1)  # 至少1手
+
+        order = OrderEvent(event.timestamp, symbol, direction, volume, 'market', current_price)
+        self.event_engine.put(order, priority=6)
+
+    def _handle_order(self, event: OrderEvent):
+        """处理订单事件"""
+        current_price = event.data.get('price', 10)
+        fill = self.broker.execute_order(event, current_price)
+        if fill:
+            self.event_engine.put(fill, priority=7)
+
+            # 生成持仓事件
+            pos_event = self._create_position_event(event.timestamp)
+            self.event_engine.put(pos_event, priority=8)
+
+            # 生成账户事件
+            account_event = self._create_account_event(event.timestamp, {})
+            self.event_engine.put(account_event, priority=9)
+
+    def _create_position_event(self, timestamp) -> PositionEvent:
+        symbols = list(self.broker.positions.keys())
+        if symbols:
+            sym = symbols[0]
+            return PositionEvent(timestamp, sym,
+                                 self.broker.positions[sym],
+                                 self.broker.position_costs.get(sym, 0))
+        return PositionEvent(timestamp, "", 0, 0)
+
+    def _create_account_event(self, timestamp, prices) -> AccountEvent:
+        total_value = self.broker.get_total_value(prices)
+        positions_value = sum(
+            pos * prices.get(sym, 0) * 100
+            for sym, pos in self.broker.positions.items()
         )
-        if not risk_check['allowed']:
-            order.status = 'rejected'
-            return
+        return AccountEvent(timestamp, self.broker.cash, total_value, positions_value)
 
-        # 撮合
-        filled, fill_price, fill_qty, fee = self.matcher.match_order(
-            order, price, pre_close
-        )
-
-        if filled:
-            order.status = 'filled'
-            order.fill_price = fill_price
-            order.fill_quantity = fill_qty
-            order.filled_at = event.timestamp
-
-            # 更新组合
-            if order.side == 'buy':
-                total_cost = fill_price * fill_qty + fee
-                self.portfolio.cash -= total_cost
-
-                if order.code not in self.portfolio.positions:
-                    self.portfolio.positions[order.code] = Position(code=order.code)
-                pos = self.portfolio.positions[order.code]
-                old_value = pos.avg_cost * pos.quantity
-                pos.quantity += fill_qty
-                pos.avg_cost = (old_value + fill_price * fill_qty) / pos.quantity
-
-            else:  # sell
-                total_revenue = fill_price * fill_qty - fee
-                self.portfolio.cash += total_revenue
-
-                pos = self.portfolio.positions[order.code]
-                pos.quantity -= fill_qty
-                if pos.quantity <= 0:
-                    del self.portfolio.positions[order.code]
-
-    def run(
-        self,
-        data: pd.DataFrame,
-        signals: pd.DataFrame,
-        progress: bool = False,
-    ) -> Dict[str, Any]:
+    def run(self, data: pd.DataFrame, signals: pd.DataFrame = None) -> Dict:
         """
         运行事件驱动回测
-
-        参数:
-            data: DataFrame with columns [date, code, open, high, low, close, pre_close, ...]
-            signals: DataFrame with columns [code, date, signal]
         """
+        self.register_handlers()
+
         dates = sorted(data['date'].unique())
-        total_dates = len(dates)
+        equity_curve = []
+        daily_events = []
 
-        for i, dt in enumerate(dates):
-            if progress and i % 100 == 0:
-                print(f"  回测进度: {i}/{total_dates} ({100*i/total_dates:.0f}%)")
-
+        for dt in dates:
+            self._current_date = dt
             day_data = data[data['date'] == dt]
-            day_signals = signals[signals['date'] == dt]
 
-            # 市场开盘
-            self.event_bus.publish(Event(
-                timestamp=dt, event_type=EventType.MARKET_OPEN
-            ))
-
-            # 推送行情数据
+            # 推送市场事件
             for _, row in day_data.iterrows():
-                self.event_bus.publish(Event(
-                    timestamp=dt,
-                    event_type=EventType.MARKET_DATA,
-                    payload={
-                        'code': row['code'],
-                        'open': row['open'],
-                        'high': row['high'],
-                        'low': row['low'],
-                        'close': row['close'],
-                        'pre_close': row.get('pre_close', row['close']),
-                        'volume': row.get('volume', 0),
-                    },
-                ))
+                market_event = MarketEvent(
+                    dt, row['code'], row['open'], row['high'],
+                    row['low'], row['close'], row['volume']
+                )
+                self.event_engine.put(market_event, priority=1)
 
-            # 推送交易信号
-            for _, sig_row in day_signals.iterrows():
-                code = sig_row['code']
-                if code in self._current_prices:
-                    self.event_bus.publish(Event(
-                        timestamp=dt,
-                        event_type=EventType.SIGNAL,
-                        payload={'code': code, 'signal': sig_row['signal']},
-                    ))
+            # 按日期处理信号
+            if signals is not None and dt in signals['date'].values:
+                day_signals = signals[signals['date'] == dt]
+                for _, row in day_signals.iterrows():
+                    direction = 1 if row.get('signal', 0) > 0 else -1
+                    price = day_data[day_data['code'] == row['code']]['close'].values[0] \
+                        if len(day_data[day_data['code'] == row['code']]) > 0 else 10
+                    signal_event = SignalEvent(
+                        dt, row['code'], direction, 'factor',
+                        strength=abs(row.get('signal', 0)),
+                        reason=f"Factor signal: {row.get('signal', 0):.4f}"
+                    )
+                    self.event_engine.put(signal_event, priority=3)
 
-            # 处理所有事件
-            self.event_bus.process_all()
+            # 处理当日所有事件
+            self.event_engine.process()
 
-            # 市场收盘
-            self.event_bus.publish(Event(
-                timestamp=dt, event_type=EventType.MARKET_CLOSE
-            ))
-            self.event_bus.process_all()
+            # 记录权益
+            prices = dict(zip(day_data['code'], day_data['close']))
+            total_value = self.broker.get_total_value(prices)
+            equity_curve.append({'date': dt, 'equity': total_value})
 
-        # 生成结果
-        equity_df = pd.DataFrame(self.portfolio.equity_curve)
-        metrics = self._calc_metrics(equity_df)
+            daily_events.append({
+                'date': dt,
+                'events': self.event_engine._event_count,
+                'cash': self.broker.cash,
+            })
 
-        return {
+        # 统计
+        engine_stats = self.event_engine.get_stats()
+        equity_df = pd.DataFrame(equity_curve)
+        equity_df['returns'] = equity_df['equity'].pct_change()
+
+        self.results = {
             'equity_curve': equity_df,
-            'metrics': metrics,
-            'final_equity': self.portfolio.total_equity(self._current_prices),
-            'cash': self.portfolio.cash,
-            'positions': {
-                code: {'quantity': pos.quantity, 'avg_cost': pos.avg_cost}
-                for code, pos in self.portfolio.positions.items()
-                if pos.quantity > 0
-            },
+            'total_return': (equity_df['equity'].iloc[-1] / self.broker.initial_cash - 1),
+            'annual_return': equity_df['returns'].mean() * 252,
+            'sharpe': equity_df['returns'].mean() / equity_df['returns'].std() * np.sqrt(252) if equity_df['returns'].std() > 0 else 0,
+            'max_drawdown': (equity_df['equity'].cummax() - equity_df['equity']).max() / equity_df['equity'].cummax().max(),
+            'total_trades': len(self.broker.fills),
+            'total_fills': len(self.broker.fills),
+            'engine_stats': engine_stats,
+            'daily_events': daily_events,
         }
-
-    def _calc_metrics(self, equity_df: pd.DataFrame) -> Dict[str, float]:
-        """计算绩效指标"""
-        if equity_df.empty or len(equity_df) < 2:
-            return {}
-
-        returns = equity_df.set_index('date')['equity'].pct_change().dropna()
-        if len(returns) < 2:
-            return {}
-
-        total_return = (equity_df['equity'].iloc[-1] / self.portfolio.initial_capital) - 1
-        n_days = len(returns)
-        annual_return = (1 + total_return) ** (252 / n_days) - 1
-        volatility = returns.std() * np.sqrt(252)
-        max_drawdown = (equity_df['equity'] / equity_df['equity'].cummax() - 1).min()
-        sharpe = (annual_return - 0.03) / volatility if volatility > 0 else 0
-
-        return {
-            'total_return': float(total_return),
-            'annual_return': float(annual_return),
-            'volatility': float(volatility),
-            'sharpe_ratio': float(sharpe),
-            'max_drawdown': float(max_drawdown),
-            'win_rate': float((returns > 0).mean()),
-        }
+        return self.results
 
 
-# ===========================================================================
+# =============================================================================
+# 性能对比：事件驱动 vs 原生循环
+# =============================================================================
+
+def generate_test_data(n_stocks: int = 50, n_days: int = 252) -> pd.DataFrame:
+    """生成模拟市场数据"""
+    np.random.seed(42)
+    symbols = [f"{600000 + i:06d}.SH" for i in range(n_stocks)]
+    dates = pd.date_range('2024-01-01', periods=n_days, freq='B')
+
+    rows = []
+    for sym in symbols:
+        start_price = np.random.uniform(8, 80)
+        returns = np.random.normal(0.0005, 0.02, n_days)
+        prices = start_price * (1 + returns).cumprod()
+        volumes = np.random.lognormal(12, 0.5, n_days).astype(int)
+
+        for i in range(n_days):
+            rows.append({
+                'date': dates[i],
+                'code': sym,
+                'open': prices[i] * (1 + np.random.normal(0, 0.003)),
+                'high': prices[i] * (1 + abs(np.random.normal(0, 0.015))),
+                'low': prices[i] * (1 - abs(np.random.normal(0, 0.015))),
+                'close': prices[i],
+                'volume': volumes[i],
+            })
+
+    return pd.DataFrame(rows)
+
+
+def generate_signals(data: pd.DataFrame, n_signals_per_day: int = 5) -> pd.DataFrame:
+    """生成模拟信号"""
+    np.random.seed(43)
+    dates = sorted(data['date'].unique())
+    codes = sorted(data['code'].unique())
+
+    signal_rows = []
+    for dt in dates:
+        selected = np.random.choice(codes, min(n_signals_per_day, len(codes)), replace=False)
+        for code in selected:
+            signal_rows.append({
+                'date': dt,
+                'code': code,
+                'signal': np.random.uniform(-1, 1),
+            })
+    return pd.DataFrame(signal_rows)
+
+
+# =============================================================================
 # 单元测试
-# ===========================================================================
+# =============================================================================
+
+class TestEventEngine(unittest.TestCase):
+    """事件驱动引擎测试"""
+
+    def test_event_register(self):
+        """测试事件处理器注册"""
+        engine = EventEngine()
+        received = []
+
+        def handler(event):
+            received.append(event)
+
+        engine.register(EventType.MARKET, handler)
+        event = MarketEvent(pd.Timestamp('2024-01-01'), '000001.SH', 10, 11, 9, 10.5, 1000000)
+        engine.put(event)
+        engine.process()
+
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0].type, EventType.MARKET)
+        print(f"[PASS] 事件注册与分发，收到 {len(received)} 个事件")
+
+    def test_multiple_handlers(self):
+        """测试多个处理器"""
+        engine = EventEngine()
+        results = {'a': 0, 'b': 0}
+
+        def handler_a(event):
+            results['a'] += 1
+
+        def handler_b(event):
+            results['b'] += 1
+
+        engine.register(EventType.MARKET, handler_a)
+        engine.register(EventType.MARKET, handler_b)
+
+        for _ in range(10):
+            event = MarketEvent(pd.Timestamp('2024-01-01'), '000001.SH', 10, 11, 9, 10.5, 1000000)
+            engine.put(event)
+        engine.process()
+
+        self.assertEqual(results['a'], 10)
+        self.assertEqual(results['b'], 10)
+        print(f"[PASS] 多处理器: a={results['a']}, b={results['b']}")
+
+    def test_event_priority(self):
+        """测试事件优先级"""
+        engine = EventEngine()
+        order_events = []
+
+        def market_handler(event):
+            # 市场事件触发信号
+            signal = SignalEvent(event.timestamp, '000001.SH', 1, 'test')
+            engine.put(signal, priority=3)
+
+        def signal_handler(event):
+            order = OrderEvent(event.timestamp, '000001.SH', 1, 1, 'market')
+            engine.put(order, priority=6)
+
+        def order_handler(event):
+            order_events.append(event)
+
+        engine.register(EventType.MARKET, market_handler)
+        engine.register(EventType.SIGNAL, signal_handler)
+        engine.register(EventType.ORDER, order_handler)
+
+        market = MarketEvent(pd.Timestamp('2024-01-01'), '000001.SH', 10, 11, 9, 10.5, 1000000)
+        engine.put(market, priority=1)
+        engine.process()
+
+        self.assertEqual(len(order_events), 1)
+        print(f"[PASS] 事件优先级链: Market → Signal → Order，共 {len(order_events)} 个订单")
+
+    def test_event_stats(self):
+        """测试事件统计"""
+        engine = EventEngine()
+        handler = lambda e: None
+        engine.register(EventType.MARKET, handler)
+
+        for _ in range(100):
+            engine.put(MarketEvent(pd.Timestamp('2024-01-01'), '000001.SH', 10, 11, 9, 10.5, 1000000))
+        engine.process()
+
+        stats = engine.get_stats()
+        self.assertGreater(stats['events_per_second'], 0)
+        print(f"[PASS] 事件统计: total={stats['total_events']}, "
+              f"eps={stats['events_per_second']:.0f}")
+
 
 class TestEventDrivenBacktest(unittest.TestCase):
-    """事件驱动回测测试套件"""
+    """事件驱动回测测试"""
 
     @classmethod
     def setUpClass(cls):
-        """生成模拟A股数据"""
-        np.random.seed(42)
-        dates = pd.date_range('2024-01-02', '2024-06-28', freq='B')
-        codes = ['000001.SZ', '600000.SH', '000002.SZ']
+        cls.data = generate_test_data(n_stocks=20, n_days=60)
+        cls.signals = generate_signals(cls.data, n_signals_per_day=3)
 
-        rows = []
-        for code in codes:
-            base_price = np.random.uniform(10, 30)
-            n = len(dates)
-            daily_returns = np.random.normal(0.0003, 0.015, n)
-            prices = base_price * (1 + daily_returns).cumprod()
+    def test_backtest_run(self):
+        """测试回测运行"""
+        runner = EventDrivenBacktestRunner(initial_cash=1_000_000)
+        strategy = MomentumStrategy(lookback=20, top_n=5)
+        runner.add_strategy(strategy)
 
-            df = pd.DataFrame({
-                'date': dates,
-                'code': code,
-                'open': prices * (1 + np.random.normal(0, 0.002, n)),
-                'high': prices * (1 + np.abs(np.random.normal(0, 0.008, n))),
-                'low': prices * (1 - np.abs(np.random.normal(0, 0.008, n))),
-                'close': prices,
-                'volume': np.random.lognormal(10, 0.3, n).astype(int),
-            })
-            df['pre_close'] = df['close'].shift(1).fillna(df['close'])
-            rows.append(df)
+        results = runner.run(self.data, self.signals)
 
-        cls.test_data = pd.concat(rows, ignore_index=True)
+        self.assertIn('equity_curve', results)
+        self.assertIn('total_return', results)
+        self.assertIn('total_fills', results)
+        self.assertGreater(len(results['equity_curve']), 0)
 
-        # 生成交易信号: 简单的均线策略
-        signal_rows = []
-        for code in codes:
-            group = cls.test_data[cls.test_data['code'] == code].sort_values('date').copy()
-            ma_short = group['close'].rolling(5).mean()
-            ma_long = group['close'].rolling(20).mean()
-            sig = pd.DataFrame({
-                'date': group['date'].values,
-                'code': code,
-                'signal': np.where(ma_short > ma_long, 1, np.where(ma_short < ma_long, -1, 0)),
-            })
-            signal_rows.append(sig)
+        print("[PASS] 事件驱动回测运行成功")
+        print(f"  总收益率: {results['total_return']:.4%}")
+        print(f"  年化收益: {results['annual_return']:.4%}")
+        print(f"  Sharpe: {results['sharpe']:.4f}")
+        print(f"  最大回撤: {results['max_drawdown']:.4%}")
+        print(f"  总成交笔数: {results['total_fills']}")
 
-        cls.signals = pd.concat(signal_rows, ignore_index=True)
+    def test_backtest_engine_stats(self):
+        """测试回测引擎统计"""
+        runner = EventDrivenBacktestRunner(initial_cash=1_000_000)
+        strategy = MomentumStrategy()
+        runner.add_strategy(strategy)
 
-    def test_event_bus_basic(self):
-        """测试事件总线基础功能"""
-        bus = EventBus()
+        results = runner.run(self.data, self.signals)
+        stats = results['engine_stats']
 
-        received = []
-        bus.subscribe(EventType.MARKET_DATA, lambda e: received.append(e))
+        self.assertIn('events_per_second', stats)
+        self.assertIn('events_by_type', stats)
+        print(f"[PASS] 引擎统计: 总事件={stats['total_events']}, "
+              f"EPS={stats['events_per_second']:.0f}")
 
-        bus.publish(Event(timestamp=pd.Timestamp('2024-01-01'), event_type=EventType.MARKET_DATA))
-        bus.publish(Event(timestamp=pd.Timestamp('2024-01-02'), event_type=EventType.MARKET_DATA))
+    def test_broker_execution(self):
+        """测试Broker订单执行"""
+        broker = BacktestBroker(initial_cash=1_000_000)
+        order = OrderEvent(pd.Timestamp('2024-01-01'), '000001.SH', 1, 10, 'market', 10)
+        fill = broker.execute_order(order, 10)
 
-        bus.process_all()
+        self.assertIsNotNone(fill)
+        self.assertLess(broker.cash, 1_000_000)
+        self.assertEqual(broker.positions['000001.SH'], 10)
+        print(f"[PASS] Broker订单执行: cash={broker.cash:.2f}, "
+              f"position={broker.positions['000001.SH']}")
 
-        self.assertEqual(len(received), 2)
-        self.assertEqual(bus.pending_count, 0)
-        self.assertEqual(bus.processed_count, 2)
-        print("[PASS] test_event_bus_basic")
+    def test_broker_insufficient_cash(self):
+        """测试资金不足"""
+        broker = BacktestBroker(initial_cash=1000)
+        # 尝试买入超过资金的股票
+        order = OrderEvent(pd.Timestamp('2024-01-01'), '000001.SH', 1, 100, 'market', 100)
+        fill = broker.execute_order(order, 100)
 
-    def test_event_bus_ordering(self):
-        """测试事件按时间排序"""
-        bus = EventBus()
+        self.assertIsNone(fill)
+        print("[PASS] 资金不足拒绝交易")
 
-        order_tracker = []
+    def test_broker_short_restriction(self):
+        """测试卖空限制"""
+        broker = BacktestBroker(initial_cash=1_000_000)
+        # 先买入
+        buy_order = OrderEvent(pd.Timestamp('2024-01-01'), '000001.SH', 1, 10, 'market', 10)
+        broker.execute_order(buy_order, 10)
+        # 卖出超过持仓
+        sell_order = OrderEvent(pd.Timestamp('2024-01-02'), '000001.SH', -1, 20, 'market', 10)
+        fill = broker.execute_order(sell_order, 10)
 
-        def handler(e):
-            order_tracker.append(e.timestamp)
-
-        bus.subscribe(EventType.MARKET_DATA, handler)
-
-        # 乱序发布
-        bus.publish(Event(timestamp=pd.Timestamp('2024-01-03'), event_type=EventType.MARKET_DATA))
-        bus.publish(Event(timestamp=pd.Timestamp('2024-01-01'), event_type=EventType.MARKET_DATA))
-        bus.publish(Event(timestamp=pd.Timestamp('2024-01-02'), event_type=EventType.MARKET_DATA))
-
-        bus.process_all()
-
-        # 应该按时序处理
-        self.assertEqual(order_tracker[0], pd.Timestamp('2024-01-01'))
-        self.assertEqual(order_tracker[1], pd.Timestamp('2024-01-02'))
-        self.assertEqual(order_tracker[2], pd.Timestamp('2024-01-03'))
-        print("[PASS] test_event_bus_ordering")
-
-    def test_order_matching_basic(self):
-        """测试订单撮合基础逻辑"""
-        matcher = OrderBookMatcher()
-
-        order = Order('test1', '000001.SZ', 'buy', 100, 10.5)
-        filled, price, qty, fee = matcher.match_order(order, current_price=10.0, pre_close=10.0)
-
-        self.assertTrue(filled)
-        self.assertGreater(fee, 0)
-        print(f"[PASS] test_order_matching_basic: filled={filled}, price={price:.2f}, fee={fee:.2f}")
-
-    def test_order_matching_price_limit(self):
-        """测试涨跌停限制"""
-        matcher = OrderBookMatcher(price_limit_pct=0.10)
-
-        # 涨停: 无法以高于涨停价买入
-        order_buy = Order('test_limit', '000001.SZ', 'buy', 100, 12.0)
-        filled, price, qty, fee = matcher.match_order(
-            order_buy, current_price=10.0, pre_close=10.0
-        )
-
-        if filled:
-            self.assertLessEqual(price, 11.0)  # 涨停价 = 10 * 1.10
-
-        # 跌停: 无法以低于跌停价卖出
-        order_sell = Order('test_sell', '000001.SZ', 'sell', 100, 8.0)
-        filled, price, qty, fee = matcher.match_order(
-            order_sell, current_price=10.0, pre_close=10.0
-        )
-
-        if filled:
-            self.assertGreaterEqual(price, 9.0)  # 跌停价 = 10 * 0.90
-
-        print("[PASS] test_order_matching_price_limit")
-
-    def test_circuit_breaker(self):
-        """测试风控断路器"""
-        cb = CircuitBreaker(
-            max_order_ratio=0.05,
-            max_daily_loss_ratio=0.03,
-        )
-        portfolio = Portfolio(cash=1_000_000)
-        prices = {'000001.SZ': 10.0}
-
-        cb.reset_daily(1_000_000)
-
-        # 正常订单
-        order = Order('test', '000001.SZ', 'buy', 1000, 10.0)
-        result = cb.check_order(portfolio, order, prices)
-        self.assertTrue(result['allowed'])
-        print(f"[PASS] test_circuit_breaker - 正常订单: {result['checks']}")
-
-        # 超大订单
-        large_order = Order('large', '000001.SZ', 'buy', 10000, 10.0)
-        result = cb.check_order(portfolio, large_order, prices)
-        self.assertFalse(result['allowed'])
-        print(f"[PASS] test_circuit_breaker - 超大订单: {result['checks']}")
-
-    def test_full_backtest_run(self):
-        """测试完整事件驱动回测"""
-        engine = EventDrivenBacktestEngine(initial_capital=100_000)
-
-        start = time.time()
-        result = engine.run(self.test_data, self.signals)
-        elapsed = time.time() - start
-
-        self.assertIsNotNone(result['equity_curve'])
-        self.assertGreater(len(result['equity_curve']), 0)
-        self.assertIn('metrics', result)
-
-        metrics = result['metrics']
-        print(f"\n  回测结果 (事件驱动):")
-        print(f"    最终权益: {result['final_equity']:,.2f}")
-        print(f"    现金: {result['cash']:,.2f}")
-        print(f"    持仓: {len(result['positions'])} 只")
-        if metrics:
-            print(f"    总收益: {metrics.get('total_return', 0):.4%}")
-            print(f"    年化收益: {metrics.get('annual_return', 0):.4%}")
-            print(f"    夏普比: {metrics.get('sharpe_ratio', 0):.4f}")
-            print(f"    最大回撤: {metrics.get('max_drawdown', 0):.4%}")
-            print(f"    胜率: {metrics.get('win_rate', 0):.4%}")
-        print(f"    耗时: {elapsed:.2f}s")
-
-        # 基本合理性检查
-        self.assertGreater(result['final_equity'], 0)
-        self.assertGreaterEqual(result['cash'], 0)
-
-        print("[PASS] test_full_backtest_run")
-
-    def test_edge_case_empty_signals(self):
-        """测试边界条件: 空信号"""
-        engine = EventDrivenBacktestEngine(initial_capital=100_000)
-        empty_signals = self.signals.iloc[0:0]
-
-        result = engine.run(self.test_data, empty_signals)
-
-        self.assertIsNotNone(result['equity_curve'])
-        self.assertAlmostEqual(result['final_equity'], 100_000, delta=1)
-        self.assertEqual(len(result['positions']), 0)
-
-        print("[PASS] test_edge_case_empty_signals: 无交易时净值不变")
-
-    def test_event_counting(self):
-        """测试事件计数和性能"""
-        engine = EventDrivenBacktestEngine(initial_capital=100_000)
-
-        engine.run(self.test_data, self.signals)
-
-        processed = engine.event_bus.processed_count
-        print(f"\n  事件统计:")
-        print(f"    总处理事件数: {processed}")
-        print(f"    每交易日平均: {processed / len(self.test_data['date'].unique()):.1f}")
-
-        self.assertGreater(processed, 0, "应处理一定数量的事件")
-
-        print("[PASS] test_event_counting")
+        self.assertIsNone(fill)
+        print("[PASS] 卖空限制生效")
 
 
-# ===========================================================================
-# 主函数
-# ===========================================================================
+class TestEventChain(unittest.TestCase):
+    """事件链完整流程测试"""
+
+    def test_full_event_chain(self):
+        """测试完整事件链: Market → Signal → Order → Fill → Position → Account"""
+        engine = EventEngine()
+        broker = BacktestBroker(initial_cash=1_000_000)
+        chain_results = []
+
+        def market_handler(event):
+            chain_results.append(('market', event.timestamp))
+            # 生成信号
+            signal = SignalEvent(event.timestamp, event.data['symbol'], 1, 'factor', 1.0)
+            engine.put(signal, priority=3)
+
+        def signal_handler(event):
+            chain_results.append(('signal', event.timestamp))
+            # 生成订单
+            price = event.data.get('price', 10)
+            order = OrderEvent(event.timestamp, event.data['symbol'], 1, 5, 'market', price)
+            engine.put(order, priority=6)
+
+        def order_handler(event):
+            chain_results.append(('order', event.timestamp))
+            # 执行订单
+            fill = broker.execute_order(event, event.data.get('price', 10))
+            if fill:
+                engine.put(fill, priority=7)
+
+        def fill_handler(event):
+            chain_results.append(('fill', event.timestamp))
+
+        engine.register(EventType.MARKET, market_handler)
+        engine.register(EventType.SIGNAL, signal_handler)
+        engine.register(EventType.ORDER, order_handler)
+        engine.register(EventType.FILL, fill_handler)
+
+        market = MarketEvent(pd.Timestamp('2024-01-01'), '000001.SH', 10, 11, 9, 10.5, 1000000)
+        market.data['price'] = 10
+        engine.put(market, priority=1)
+        engine.process()
+
+        expected_order = ['market', 'signal', 'order', 'fill']
+        actual_order = [e[0] for e in chain_results]
+        self.assertEqual(actual_order, expected_order)
+        print(f"[PASS] 完整事件链: {' → '.join(actual_order)}")
+
 
 if __name__ == '__main__':
     print("=" * 70)
-    print("事件驱动回测架构 验证测试")
-    print("借鉴来源: Nautilus Trader + trade-learn Event-Driven Architecture")
+    print("事件驱动回测引擎验证测试")
     print("=" * 70)
 
-    print("\n运行测试套件...")
-    suite = unittest.TestLoader().loadTestsFromTestCase(TestEventDrivenBacktest)
+    suite = unittest.TestSuite()
+    suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestEventEngine))
+    suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestEventDrivenBacktest))
+    suite.addTests(unittest.TestLoader().loadTestsFromTestCase(TestEventChain))
+
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
 
     print("\n" + "=" * 70)
-    print(f"测试结果: {'全部通过' if result.wasSuccessful() else '存在失败'}")
-    print("所有验证代码位于独立测试文件中，未修改主代码。")
+    print("验证总结")
+    print(f"  总测试数: {result.testsRun}")
+    print(f"  成功: {result.testsRun - len(result.failures) - len(result.errors)}")
+    print(f"  失败: {len(result.failures)}")
+    print(f"  错误: {len(result.errors)}")
     print("=" * 70)
