@@ -1,0 +1,58 @@
+{
+  "generated_at": "2026-06-18T10:17:58.357089",
+  "results": [
+    {
+      "category": "factor_engine",
+      "name": "硬编码 vs 公式 DSL",
+      "n_stocks": 50,
+      "n_days": 1200,
+      "n_rows": 60000,
+      "legacy_seconds": 0.0948,
+      "new_seconds": 0.1333,
+      "speedup_x": 0.71,
+      "max_ret5_diff": 1.1102230246251565e-16,
+      "legacy_factors": 5,
+      "new_factors": 6,
+      "new_extras": [
+        "mom_rank"
+      ],
+      "lines_of_code_legacy": 11,
+      "lines_of_code_new": 6
+    },
+    {
+      "category": "pit_merge",
+      "name": "直接 merge vs PIT merge",
+      "left_rows": 12000,
+      "right_rows": 240,
+      "legacy_seconds": 0.0134,
+      "new_seconds": 0.0126,
+      "lookahead_eliminated": 18039,
+      "lookahead_ratio_pct": 12.5271
+    },
+    {
+      "category": "walk_forward",
+      "name": "滚动训练 OOS 预测",
+      "n_rows": 29600,
+      "n_folds": 8,
+      "seconds": 0.1125,
+      "oos_rows": 19100,
+      "oos_coverage_pct": 100.0,
+      "mean_ic": -0.003452,
+      "icir": -0.3258,
+      "positive_ic_ratio": 0.125
+    },
+    {
+      "category": "cache",
+      "name": "fingerprint 缓存",
+      "first_compute_seconds": 0.1003,
+      "cache_hit_seconds": 0.0001,
+      "speedup_x": 1975.0,
+      "fingerprint_changed_invalidate_seconds": 0.1003,
+      "stats": {
+        "hits": 1,
+        "misses": 2,
+        "hit_rate": 0.33
+      }
+    }
+  ]
+}

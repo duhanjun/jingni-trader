@@ -1,36 +1,14 @@
-"""
-可组合因子表达式引擎（quant_opt.expression_engine）
-
-详细使用参见 engine.py。本包通过 __init__ 暴露核心 API。
-"""
-from .engine import (
-    Expression,
-    Evaluator,
-    F,
-    Feature,
-    Ref,
-    Delta,
-    TsMean,
-    TsStd,
-    TsRank,
-    Rank,
-    Zscore,
-    Mean,
-    builtin_a_share_factors,
+"""Expression engine subpackage."""
+from .expr_engine import (
+    BinaryOp, ExpressionEvaluator, FieldRef, FuncCall, Number,
+    OperatorRegistry, UnaryOp, DEFAULT_EVALUATOR, evaluate_formula,
+    list_operators, parse_formula, tokenize,
 )
+from .alpha_catalog import ALPHA_CATALOG, get_catalog, get_formula
 
 __all__ = [
-    "Expression",
-    "Evaluator",
-    "F",
-    "Feature",
-    "Ref",
-    "Delta",
-    "TsMean",
-    "TsStd",
-    "TsRank",
-    "Rank",
-    "Zscore",
-    "Mean",
-    "builtin_a_share_factors",
+    "BinaryOp", "ExpressionEvaluator", "FieldRef", "FuncCall", "Number",
+    "OperatorRegistry", "UnaryOp", "DEFAULT_EVALUATOR", "evaluate_formula",
+    "list_operators", "parse_formula", "tokenize",
+    "ALPHA_CATALOG", "get_catalog", "get_formula",
 ]

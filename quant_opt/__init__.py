@@ -1,15 +1,46 @@
 """
-Quant Optimization Package
-===========================
-
-This package contains optimizations for jingni-trader, inspired by:
-
-* Microsoft **Qlib** (Expression Engine, Data Layer, Alpha158 factor set)
-* **AKQuant** (Polars-driven factor DSL, Walk-forward Validation)
-* **VeighNa vnpy.alpha** (dataset / model / strategy / lab layered design)
-
-The package is fully **additive** — it lives under ``quant_opt/`` and does
-not modify any file in ``main``.  Each module can be imported
-independently and is exercised by ``quant_opt/tests/``.
+Top-level package for the ``quant_opt`` validation work.
 """
-__version__ = "0.1.0"
+from .expression_engine.expr_engine import (
+    BinaryOp,
+    ExpressionEvaluator,
+    FieldRef,
+    FuncCall,
+    Number,
+    OperatorRegistry,
+    UnaryOp,
+    DEFAULT_EVALUATOR,
+    evaluate_formula,
+    list_operators,
+    parse_formula,
+    tokenize,
+)
+from .expression_engine.alpha_catalog import ALPHA_CATALOG, get_catalog, get_formula
+from .ic_analysis.vectorized_ic import (
+    batch_ic,
+    compute_ic_series,
+    rank_ic_decay,
+    summarize_ic,
+)
+from .cv_splitter.purged_cv import (
+    CVSplit,
+    LeakageReport,
+    PurgedFold,
+    PurgedKFold,
+    TimeSeriesCV,
+    leakage_check,
+)
+
+__all__ = [
+    # expression engine
+    "BinaryOp", "ExpressionEvaluator", "FieldRef", "FuncCall", "Number",
+    "OperatorRegistry", "UnaryOp", "DEFAULT_EVALUATOR", "evaluate_formula",
+    "list_operators", "parse_formula", "tokenize",
+    # catalog
+    "ALPHA_CATALOG", "get_catalog", "get_formula",
+    # ic
+    "batch_ic", "compute_ic_series", "rank_ic_decay", "summarize_ic",
+    # cv + leakage
+    "CVSplit", "LeakageReport", "PurgedFold", "PurgedKFold", "TimeSeriesCV",
+    "leakage_check",
+]

@@ -1,40 +1,133 @@
 {
-  "n_pass": 3,
-  "n_total": 4,
-  "results": {
-    "T1_expression_engine": {
-      "n_parsed": 5,
-      "n_factors": 23,
-      "elapsed_s": 0.165,
-      "n_rows": 25000,
-      "max_diff_vs_legacy": 0.0,
-      "status": "PASS"
+  "summary": {
+    "passed": 25,
+    "total": 25
+  },
+  "tests": [
+    {
+      "name": "tokenizer_basic",
+      "passed": true,
+      "message": "ok (0.0 ms)"
     },
-    "T2_look_ahead_detector": {
-      "files_scanned": 3,
-      "n_critical": 0,
-      "n_warning": 4,
-      "status": "WARN"
+    {
+      "name": "parser_simple_binary",
+      "passed": true,
+      "message": "ok (0.0 ms)"
     },
-    "T3_vectorized_ic": {
-      "n_factors": 4,
-      "n_periods": 3,
-      "n_rows": 25000,
-      "legacy_elapsed_s": 8.927,
-      "new_elapsed_s": 1.0488,
-      "speedup": 8.51,
-      "max_ic_diff": 0.0,
-      "status": "PASS"
+    {
+      "name": "parser_unary_negation",
+      "passed": true,
+      "message": "ok (0.0 ms)"
     },
-    "T4_walk_forward": {
-      "backend": "lightgbm",
-      "n_folds": 15,
-      "overall_ic": 0.0439,
-      "overall_rank_ic": 0.0426,
-      "ic_ir": 0.7278,
-      "ic_win_rate": 0.8,
-      "elapsed_s": 1.836,
-      "status": "PASS"
+    {
+      "name": "parser_nested_calls",
+      "passed": true,
+      "message": "ok (0.0 ms)"
+    },
+    {
+      "name": "parser_invalid_should_raise",
+      "passed": true,
+      "message": "ok (0.0 ms)"
+    },
+    {
+      "name": "evaluator_momentum",
+      "passed": true,
+      "message": "ok (18.0 ms)"
+    },
+    {
+      "name": "evaluator_ma_ratio",
+      "passed": true,
+      "message": "ok (21.9 ms)"
+    },
+    {
+      "name": "evaluator_cross_sectional_rank",
+      "passed": true,
+      "message": "ok (25.4 ms)"
+    },
+    {
+      "name": "evaluator_log_return",
+      "passed": true,
+      "message": "ok (17.0 ms)"
+    },
+    {
+      "name": "evaluator_signed_power",
+      "passed": true,
+      "message": "ok (19.8 ms)"
+    },
+    {
+      "name": "operator_registry_known_ops",
+      "passed": true,
+      "message": "ok (0.0 ms)"
+    },
+    {
+      "name": "alpha_catalog_unique",
+      "passed": true,
+      "message": "ok (0.8 ms)"
+    },
+    {
+      "name": "alpha_catalog_all_evaluable",
+      "passed": true,
+      "message": "ok (605.8 ms)"
+    },
+    {
+      "name": "ic_summary_monotone",
+      "passed": true,
+      "message": "ok (6.0 ms)"
+    },
+    {
+      "name": "ic_pearson_equals_spearman_for_linear",
+      "passed": true,
+      "message": "ok (8.4 ms)"
+    },
+    {
+      "name": "batch_ic_returns_dict",
+      "passed": true,
+      "message": "ok (9.5 ms)"
+    },
+    {
+      "name": "rank_ic_decay_shape",
+      "passed": true,
+      "message": "ok (24.8 ms)"
+    },
+    {
+      "name": "ts_cv_basic",
+      "passed": true,
+      "message": "ok (4.7 ms)"
+    },
+    {
+      "name": "ts_cv_purge_gap",
+      "passed": true,
+      "message": "ok (7.8 ms)"
+    },
+    {
+      "name": "purged_kfold_no_overlap",
+      "passed": true,
+      "message": "ok (0.1 ms)"
+    },
+    {
+      "name": "purged_kfold_purge_respects_gap",
+      "passed": true,
+      "message": "ok (0.9 ms)"
+    },
+    {
+      "name": "leakage_check_clean",
+      "passed": true,
+      "message": "ok (4.6 ms)"
+    },
+    {
+      "name": "leakage_check_dups",
+      "passed": true,
+      "message": "ok (4.8 ms)"
+    },
+    {
+      "name": "leakage_check_future_dated",
+      "passed": true,
+      "message": "ok (4.8 ms)"
+    },
+    {
+      "name": "leakage_check_perfect_corr",
+      "passed": true,
+      "message": "ok (6.7 ms)"
     }
-  }
+  ]
 }
