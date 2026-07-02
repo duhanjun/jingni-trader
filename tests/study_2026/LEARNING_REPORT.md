@@ -1,225 +1,198 @@
-# jingni-trader 量化学习报告
+# jingni-trader 量化交易学习报告
 
-**日期**: 2026-06-12  
-**学习序号**: #01  
-**当前分支**: feature/quant-stream-inspired  
+## 日期: 2026-06-11 | 序号: #1
 
 ---
 
 ## 一、学习项目清单
 
-本次学习选定了近期活跃、最具借鉴价值的三个开源项目：
+本次研究聚焦三个高影响力量化交易开源项目，从因子引擎、数据处理性能、ML管道三个维度为 jingni-trader 寻找优化方向。
 
-| 项目 | 类型 | 来源 | 星标 | 核心领域 |
-|------|------|------|------|----------|
-| [Factor Engine](https://arxiv.org/abs/2602.14138) | 因子计算库 | 学术论文 (arXiv 2026-02) | - | 系统化因子计算与分析 |
-| [AKQuant](https://github.com/akfamily/akquant) | 高性能量化框架 | GitHub | 1.4k+ | Rust+Python混合架构，Polars高性能引擎 |
-| [Qlib](https://github.com/microsoft/qlib) | AI量化研究平台 | Microsoft GitHub | 15k+ | AI在量化投资中的应用 |
+### 1.1 Qlib (Microsoft)
 
----
+| 项目 | 详情 |
+|------|------|
+| GitHub | https://github.com/microsoft/qlib |
+| Stars | ~15,000+ |
+| 语言 | Python |
+| 核心亮点 | Expression Engine, Alpha因子库, 配置驱动工作流 |
 
-## 二、各项目核心亮点与可借鉴之处
+**关键设计:**
 
-### 1. Factor Engine (arXiv 2602.14138)
+1. **Expression Engine（表达式引擎）** — 支持声明式因子定义，如 `Ref($close, 1)`、`Mean($close, 20)`、`Corr($close, $volume, 10)`。用户通过 DSL 定义因子，引擎自动解析依赖关系和计算。这极大降低了编写新因子的门槛。
 
-**核心亮点**:
-- **装饰器式因子注册 API**: 使用 Python 装饰器注册因子函数，模块化设计，用户扩展自定义因子非常方便
-- **基于 Polars 构建**: 利用 Polars 优越的性能，处理大规模面板数据
-- **三大设计原则**: 模块化、兼容性、可扩展性
-- **开箱即用**: 内建已验证的经典因子，用户无需从零开始
-- **无缝集成**: 与现代数据科学生态系统（pandas、scikit-learn）兼容
+2. **Alpha158/Alpha360** — 预定义的标准化因子库，覆盖158或360个常见Alpha因子，所有因子经过对齐、标准化、中性化处理。
 
-**可借鉴之处**:
-1. 当前 jingni-trader 的 factor-engine 使用硬编码方式在 `compute_a_share_factors` 中定义所有因子，新增因子需要修改核心代码。装饰器式注册机制可以解决这个问题。
-2. Polars 在大规模数据计算上相比 Pandas 有显著性能优势，可以评估迁移。
+3. **Point-in-Time 数据管理** — 确保回测无未来信息泄露。使用 `handler` 串行处理数据加载、标准化、Alpha处理等流水线。
 
----
+4. **qrun + YAML 配置驱动** — 整个研究流程（数据→特征→模型→回测）通过 YAML 文件一键配置执行。
 
-### 2. AKQuant (akfamily/akquant)
+### 1.2 QUANTAXIS
 
-**核心亮点**:
-- **Rust + Python 混合架构**: 极致性能，零开销抽象，Zero-Copy 数据架构
-- **Polars 驱动高性能因子计算引擎**: 原生支持 Alpha101 风格公式 `Rank(Ts_Mean(Close, 5))`
-- **自动并行计算与数据对齐**: 减少用户手动处理
-- **原生 ML 支持**: 内建 Walk-forward Validation 滚动训练框架，无缝集成 PyTorch/Scikit-learn
-- **TA-Lib 双后端兼容**: 支持 Python/Rust 两种实现，自动降级
-- **专业级风控**: 完善的订单流管理与即时风控模块
+| 项目 | 详情 |
+|------|------|
+| GitHub | https://github.com/yutiansut/QUANTAXIS |
+| Stars | ~8,000+ |
+| 语言 | Python + Rust |
+| 核心亮点 | Rust核心性能优化, QIFI统一协议, 零拷贝数据桥 |
 
-**可借鉴之处**:
-1. 因子计算性能优化：采用 Polars 替换 Pandas，可以获得数量级的性能提升
-2. 表达式因子语言：支持类 Alpha101 公式写法，让策略研究者更专注于因子逻辑而非代码
-3. 渐进式性能升级：保留 Python 兼容，当 Rust 核心可用时自动获得性能提升，不影响可用性
+**关键设计:**
 
----
+1. **Rust核心 (QAPRO-RS)** — 计算密集型任务（数据处理、因子计算、回测迭代）使用Rust重写，获得10~100x性能提升。
 
-### 3. Qlib (microsoft/qlib)
+2. **QADataBridge（零拷贝数据桥）** — 基于Apache Arrow的共享内存数据交换，避免了Python与Rust间的频繁数据拷贝。
 
-**核心亮点**:
-- **成熟的 AI 量化研究流程**: 从数据处理 → 特征工程 → 模型训练 → 回测评估全链路支持
-- **严谨的回测框架**: 支持滚动窗口回测、样本外测试，有效防范过拟合
-- **丰富的预训练模型和因子**: 内置数百个 A 股特色因子
-- **持续活跃维护**: 2026 年 4 月仍有代码提交
+3. **QIFI协议** — 统一的账户/持仓/订单/成交协议，屏蔽不同券商API差异。这对jingni-trader的多券商对接有直接参考价值。
 
-**可借鉴之处**:
-1. 滚动训练/验证支持：当前 strategy-model-engine 已使用 `purged_group_ts_split`，但可以进一步完善 Walk-forward Validation 支持
-2. 因子表达标准化：参考 Qlib 的因子数据接口规范，让因子更容易被模型复用
+4. **Polars集成** — 从Pandas逐步迁移到Polars，利用其惰性执行（LazyFrame）和查询优化的特性。
 
----
+### 1.3 Freqtrade (+ FreqAI)
 
-## 三、可优化方向评估
+| 项目 | 详情 |
+|------|------|
+| GitHub | https://github.com/freqtrade/freqtrade |
+| Stars | ~35,000+ |
+| 语言 | Python |
+| 核心亮点 | FreqAI自适应ML管道, Optuna超参优化(NSGA-III), 实盘就绪 |
 
-对照 jingni-trader 现有架构，从各个模块分析优化可行性：
+**关键设计:**
 
-| 维度 | 当前状况 | 优化潜力 | 推荐优先级 |
-|------|----------|----------|------------|
-| **回测引擎准确性与性能** | 当前支持多后端适配器 (rqalpha/backtrader/gm/native)，架构已经合理 | 采用 Polars 加速信号处理部分可以获得明显收益 | ⭐⭐⭐⭐ |
-| **因子库的可扩展性** | 当前硬编码在 compute_a_share_factors，新增因子需要改核心代码 | 装饰器式注册机制可以极大提升可扩展性 | ⭐⭐⭐⭐⭐ |
-| **策略编写 API 易用性** | 基于 Context 全流程编排，总体易用 | 可以考虑增加表达式因子语言支持 | ⭐⭐⭐ |
-| **风险管理的完善程度** | 当前支持组合优化、VaR/CVaR、个股止损 | 可以增加动态止损、杠杆调整、换手率约束 | ⭐⭐⭐ |
-| **数据获取与处理效率** | 已有降级链、模拟兜底，架构合理 | 大规模数据清洗可考虑用 Polars 加速 | ⭐⭐⭐⭐ |
-| **代码架构合理性** | 清晰的模块化划分，主引擎+子 Skill 设计优良 | 仅需要在 factor-engine 引入装饰器注册 | ⭐⭐⭐⭐⭐ |
+1. **FreqAI自适应重训练** — 支持多种重训练策略：
+   - 时间窗口训练（每N天）
+   - 性能退化触发训练（回测指标低于阈值）
+   - 每N次完整循环训练
+   - 模型过期自动替换
+
+2. **预测置信度系统** — 基于最近N次预测误差（Dissimilarity Index / RMSE）计算置信度，低置信度时自动降低仓位或切换备用策略。
+
+3. **HyperOpt NSGA-III** — 多目标优化（Pareto最优前沿），同时优化收益、最大回撤、胜率等多个目标，而非简单的加权融合。
+
+4. **市场状态检测** — 内置市场regime检测，不同regime使用不同模型参数。
 
 ---
 
-## 四、已完成验证测试
+## 二、可借鉴方向列表
 
-### 测试 1：装饰器式因子注册 API
-
-**测试文件**: [test_decorator_factor_api.py](./test_decorator_factor_api.py)  
-**借鉴来源**: Factor Engine (arXiv:2602.14138)  
-**优化方向**: 提升因子库可扩展性，让用户无需修改引擎代码即可添加自定义因子
-
-**测试结果**:
-- ✅ **所有 10 个单元测试通过**，耗时 0.434s
-- ✅ 注册机制正确：支持按类别查询、动态注册
-- ✅ 计算结果与原始实现完全一致
-- ✅ 支持运行时动态添加新因子（演示：动态添加 RSI14 成功）
-- ✅ 支持按类别选择计算因子（如只计算 momentum 类）
-
-**关键设计**:
-```python
-# 用户只需这样定义新因子，自动注册：
-@registry.register(
-    name="rsi_14",
-    category="technical",
-    requires=["close"],
-    neutralize=True,
-    description="14日RSI指标"
-)
-def compute_rsi_14(df: pd.DataFrame) -> pd.Series:
-    # ... 计算逻辑
-    return rsi.rename("rsi_14")
-```
-
-**结论**: 方案验证成功，设计可行，不会破坏现有计算正确性，可以放心重构。
+| 序号 | 优化方向 | 借鉴来源 | 当前状态 | 优先级 | 对应模块 |
+|------|---------|---------|---------|--------|---------|
+| 1 | 声明式因子表达式引擎 | Qlib Expression Engine | 已编写验证代码并测试通过 | **高** | factor-engine |
+| 2 | Polars替代Pandas核心操作 | QUANTAXIS | 已编写性能对比验证代码 | **高** | data-engine, factor-engine |
+| 3 | 自适应ML重训练管道 | FreqAI | 已编写验证代码并测试通过 | **高** | strategy-model-engine |
+| 4 | 预测置信度评估 | FreqAI | 已编写验证代码并测试通过 | 中 | strategy-model-engine |
+| 5 | 配置驱动工作流 (YAML) | Qlib qrun | 待验证 | 中 | engine (主引擎) |
+| 6 | NSGA-III多目标优化 | Freqtrade HyperOpt | 已编写验证代码 | 低 | portfolio-risk-engine |
+| 7 | 统一券商协议接口 | QIFI (QUANTAXIS) | 待验证 | 低 | execution-monitor-engine |
+| 8 | Point-in-Time数据管理 | Qlib | 待验证 | 低 | data-engine |
 
 ---
 
-### 测试 2：Polars vs Pandas 因子计算性能对比
+## 三、已完成的验证测试
 
-**测试文件**: [test_polars_performance.py](./test_polars_performance.py)  
-**借鉴来源**: Factor Engine + AKQuant  
-**优化方向**: 评估 Polars 在大规模因子计算上的性能收益
+### 3.1 因子表达式引擎 — test_factor_expression_engine.py
 
-**测试环境**:
-- Python 3.12
-- pandas: 2.2.x, polars: 1.23.x
-- 云服务器，单 CPU
+**测试结果: 全部通过**
 
-**基准测试结果** (批量计算 12 个因子):
+| 测试项 | 结果 | 说明 |
+|--------|------|------|
+| 基本计算正确性 | PASS | 与硬编码方式计算结果完全一致 |
+| 表达式可组合性 | PASS | 支持嵌套复合因子 (如MomVolAdj = 动量/波动率) |
+| 扩展性 | PASS | 自定义函数注册 (如ZScore) 正常工作 |
+| 边界条件 | PASS | 空数据、单股票、NaN、零成交量正确处理 |
 
-| 规模 | 行数 | Pandas 耗时 | Polars 耗时 | 加速比 |
-|------|------|-------------|-------------|--------|
-| 小规模 | 2,520 | 42.1 ms | 4.9 ms | **8.53x** |
-| 中规模 | 50,400 | 444.2 ms | 22.9 ms | **19.38x** |
-| 中大规模 | 126,000 | 1057.7 ms | 61.5 ms | **17.20x** |
-| 大规模 | 252,000 | 2148.2 ms | 117.4 ms | **18.30x** |
+**对比数据:**
+- 声明式引擎: 0.042s
+- 硬编码方式: 0.023s
+- 性能差异约 1.8x，但声明式提供了更高的灵活性和可维护性
 
-**分操作性能对比** (200股 × 500天 = 10万行):
+### 3.2 Polars性能对比 — test_polars_performance.py
 
-| 操作 | Pandas | Polars | 加速比 |
-|------|--------|--------|--------|
-| 5日收益率 | 6.45ms | 4.57ms | 1.41x |
-| 20日波动率 | 139.81ms | 9.72ms | **14.38x** |
-| 批量12因子 | 480.63ms | 40.81ms | **11.78x** |
-| 1000股 × 252天 全量 | 2145ms | 110ms | **19.49x** |
+**测试结果: Polars 在核心操作上有显著优势（特定场景除外）**
 
-**一致性验证**:
-- ✅ **所有单元测试通过**，计算结果与 Pandas 在数值精度范围内一致
-- ✅ 数值对比通过 `np.allclose` 验证一致
+| 基准测试 | Pandas | Polars | 加速比 |
+|----------|--------|--------|--------|
+| 分组滚动计算 | 0.766s | 0.079s | **9.63x** |
+| 截面排名排序 | 0.095s | 0.021s | **4.60x** |
+| 透视+协方差 | 0.037s | 3.704s | 0.01x (注) |
+| Parquet写 | 0.130s | 0.024s | **5.38x** |
+| Parquet读 | 0.024s | 0.013s | 1.91x |
 
-**结论**:
-- **数据规模越大，加速效果越明显**。在 25 万行数据上，**加速比接近 20 倍**
-- 即使小规模数据也有 8~9 倍加速
-- Polars 的窗口函数（rolling）优化相比 Pandas 有极大优势，这正是因子计算最常用的操作
-- **方案验证成功**，性能收益非常显著，值得引入。
+**注:** 透视+协方差场景下Polars的逐元素cov计算循环远慢于Pandas的matrix cov操作。这说明不是所有操作Polars都有优势，需要针对性优化。
 
----
+**正确性:** Pandas vs Polars 因子计算结果一致性PASS，最大浮点误差 < 0.00004。
 
-## 五、验证总结
+### 3.3 自适应ML管道 — test_adaptive_ml_pipeline.py
 
-| 优化方向 | 验证状态 | 预期收益 | 风险 |
-|----------|----------|----------|------|
-| 装饰器式因子注册 | ✅ 验证通过 | 极大提升可扩展性，用户自定义因子无需改核心代码 | 低（API 兼容重构） |
-| Polars 因子计算加速 | ✅ 验证通过 | 10~20 倍性能提升，大规模数据回测体验大幅改善 | 低（仅替换计算引擎层，接口不变） |
-| 表达式因子语言 | - 待验证 | 提升策略研究者易用性 | 中 |
+**测试结果: 全部通过**
 
----
+| 测试项 | 结果 | 说明 |
+|--------|------|------|
+| 滑动窗口管理 | PASS | 自动分割训练/验证窗口，purge日期间隔 |
+| 自适应重训练 | PASS | 2个训练窗口各生成模型，性能稳定 |
+| 采样器对比 | PASS | TPE和NSGA-III性能接近，均正常收敛 |
+| 预测置信度 | PASS | 可区分好/中/差模型质量 |
+| 模型过期检测 | PASS | 按配置周期正确判断过期 |
 
-## 六、优化建议（待用户确认）
-
-基于本次学习和验证，建议对 jingni-trader 进行以下优化：
-
-### 高优先级（推荐立即实施）
-
-1. **factor-engine 重构为装饰器式注册机制**
-   - 保持现有因子计算逻辑不变，仅改变组织方式
-   - 对原有硬编码因子逐个注册，兼容现有配置
-   - 用户可以在不修改引擎代码的情况下动态添加自定义因子
-   - 参考实现：[test_decorator_factor_api.py](./test_decorator_factor_api.py)
-
-2. **引入 Polars 作为可选计算后端**
-   - 渐进式迁移：检测 Polars 是否可用，可用则使用，否则回退到 Pandas
-   - 因子计算阶段使用 Polars 获得数量级性能提升
-   - 对结果输出保持 pandas DataFrame 格式，下游代码无需改动
-   - 验证数据显示 25 万行数据从 ~2.1s → ~0.1s，体验提升巨大
-
-### 中优先级（后续可做）
-
-3. **数据引擎引入 Polars 加速数据清洗**
-   - 数据清洗、缺失值处理、排序等操作也能获得明显加速
-
-4. **完善 Walk-forward 滚动验证支持**
-   - 参考 Qlib 的设计，增强模型训练阶段的样本外验证能力，减少过拟合
-
-5. **支持表达式风格因子定义**
-   - 如 `Rank(Ts_Mean(reversal_20d * volume_ratio, 10))`，让因子研究更便捷
+**置信度测试数据:**
+- 好模型: 0.838
+- 中等模型: 0.501
+- 差模型: 0.230
+- 模型漂移: 0.000 (误差持续增大)
 
 ---
 
-## 七、附录
+## 四、优化建议（待用户确认）
 
-### 测试环境信息
+### 建议1: 引入因子表达式引擎层 (factor-engine) — 推荐优先采纳
+
+在当前`skills/factor-engine/engine.py`中，因子计算为硬编码`groupby().pct_change()`等操作。建议新增一层表达式引擎，允许：
 
 ```
-Python version: 3.12.13
-pandas version: 2.2.x
-polars version: 1.23.x
-pyarrow installed: yes
-All tests passed: yes
-test_decorator_factor_api: 10/10 passed
-test_polars_performance: 11/11 passed
+# 当前方式 (硬编码)
+df['ret_20d'] = df.groupby('code')['close'].pct_change(20)
+
+# 优化后 (声明式)
+engine.register_expression("ret_20d", "PctChange($close, 20)")
 ```
 
-### 测试命令重现
+收益:
+- 因子定义与计算逻辑解耦
+- 支持从YAML/JSON配置文件热加载因子定义  
+- 新增因子无需修改引擎代码，仅注册即可
+- 自动缓存和依赖解析
 
-```bash
-cd /workspace
-python tests/study_2026/test_decorator_factor_api.py
-python tests/study_2026/test_polars_performance.py
-```
+### 建议2: data-engine引入Polars可选后端 — 推荐渐进采纳
+
+在`config.py`中添加 `DATA_BACKEND` 配置项，允许切换 pandas/polars。对于分组滚动计算（因子引擎核心操作），Polars提供**9.63x加速**。建议先从 data-engine 的ETL模块入手，逐步扩展到factor-engine。
+
+### 建议3: strategy-model-engine增加自适应重训练 — 推荐纳入规划
+
+当前模型训练为一次性，完成后不再更新。建议引入：
+- 定期重训练（每30/60/90天）
+- 性能监控（IC值持续下降触发重训练）
+- 模型版本管理（保留最近N个模型）
+- 预测置信度输出（`predict_with_confidence()`）
+
+### 建议4: 配置驱动工作流 — 可列入中长期规划
+
+借鉴Qlib的YAML配置方式，将整个量化研究流程从"手动调用"改为"配置声明"。降低使用门槛，提升可复现性。
 
 ---
 
-**报告撰写**: jingni-trader 量化学习任务  
-**保存位置**: `/workspace/tests/study_2026/LEARNING_REPORT.md`
+## 五、测试文件清单
+
+| 文件 | 说明 | 借鉴来源 |
+|------|------|---------|
+| `tests/study_2026/test_factor_expression_engine.py` | 因子表达式引擎验证 | Microsoft/qlib |
+| `tests/study_2026/test_polars_performance.py` | Polars vs Pandas性能对比 | QUANTAXIS |
+| `tests/study_2026/test_adaptive_ml_pipeline.py` | 自适应ML管道+置信度验证 | freqtrade/freqtrade |
+
+所有测试均可通过 `python3 tests/study_2026/test_*.py` 独立运行。
+
+---
+
+## 六、合规声明
+
+- 未执行任何 `git commit`、`git push`、`git merge` 操作
+- 所有验证代码仅存在于 `tests/study_2026/` 目录中
+- 未对主项目代码 (`skills/`、`scripts/`、`engine.py`) 进行任何修改
+- 待用户确认优化方案后，方可在 feature 分支中实施修改
