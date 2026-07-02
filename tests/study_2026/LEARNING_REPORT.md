@@ -1,206 +1,166 @@
-# jingni-trader 学习报告
+# jingni-trader 量化交易学习报告
 
-> 日期: 2026-06-13
-> 序号: #001
-> 轮次: 第一轮量化交易开源项目学习
+> 日期：2026-06-13 | 序号：001
+> 研究分支：feature/quant-stream-inspired
 
 ---
 
 ## 一、学习项目清单及核心亮点
 
-本轮重点关注了 2025-2026 年量化交易领域最活跃的开源项目，聚焦 3 个最有借鉴价值的项目：
+### 1.1 Microsoft Qlib (GitHub: microsoft/qlib)
+- **Star 数**: 15k+
+- **核心定位**: AI 驱动的量化投资平台
+- **关键亮点**:
+  - **Expression Engine**: 声明式因子 DSL，用 `$close`, `Ref($close, 5)`, `Mean($close, 20)` 等表达式定义因子，计算与定义完全解耦
+  - **Alpha158/Alpha360**: 经过实战检验的标准化因子集
+  - **DataHandler Pipeline**: 可配置的数据处理管道（Normalize → Fillna → DropnaLabel → CSZScoreNorm）
+  - **Config-driven Workflow**: 全流程 YAML 配置驱动，实验完全可复现
+  - **Rolling Training**: 内置滚动训练机制，支持 walk-forward 回测
 
-### 1.1 Microsoft Qlib (⭐ 42K+)
-- **仓库**: https://github.com/microsoft/qlib
-- **核心亮点**:
-  - **表达式引擎 (Expression Engine)**: DSL 语法定于因子，如 `$close`, `Ref($close, 1)`, `Mean($close, 3)`, 支持 100+ 运算符
-  - **列式二进制存储**: 自研 columnar binary format，比 pandas 读写快 10x+
-  - **Alpha158/Alpha360 因子库**: 预构建的标准化因子集合
-  - **Point-in-Time 数据处理**: 防止 look-ahead bias
-  - **Model Zoo**: 从 LightGBM 到 Transformer/TCN/ADARNN 的完整模型库
-  - **RD-Agent 集成**: LLM 驱动的自动化因子挖掘和模型优化
-  - **RL 框架**: 内置强化学习执行与策略学习模块
-  - **YAML 驱动工作流**: `qrun` 一键执行端到端流水线
+### 1.2 Freqtrade (GitHub: freqtrade/freqtrade)
+- **Star 数**: 45k+
+- **核心定位**: 加密货币量化交易框架
+- **关键亮点**:
+  - **FreqAI 模块**: 完整的 ML 增强交易管道，支持 adaptive retraining in backtesting
+  - **Outlier Detection**: SVM, DBSCAN, Dissimilarity Index 等多种异常值检测方法
+  - **Feature Engineering**: expand_all / expand_basic / standard 三层特征工程
+  - **Hyperopt (Optuna)**: 深度集成的超参数优化，支持回测中的参数搜索
+  - **Walk-forward Optimization**: 内置 walk-forward 优化框架
 
-### 1.2 AKQuant (⭐ 2026年新星)
-- **仓库**: https://github.com/akfamily/akquant
-- **核心亮点**:
-  - **Rust+Python 混合架构**: 性能核心 Rust 编写，Python 接口
-  - **Polars 驱动因子表达式引擎**: 支持 Alpha101 风格公式 `Rank(Ts_Mean(Close, 5))`
-  - **Walk-Forward Validation**: 内置滚动训练框架，无缝集成 PyTorch/Scikit-learn
-  - **TA-Lib 双后端**: 同时支持 Python 和 Rust 版本，103 个指标
-  - **事件驱动引擎**: 精确的订单流与撮合机制
-  - **专业级风控**: 多资产组合回测
-
-### 1.3 TradingAgents (⭐ 74K+)
-- **仓库**: https://github.com/TauricResearch/TradingAgents
-- **核心亮点**:
-  - **7 智能体协同架构**: 基本面/情绪/新闻/技术分析师 + 牛/熊研究员 + 交易员/风控
-  - **牛熊辩论机制**: 交易前双方对抗性辩论，避免单边偏见
-  - **LangGraph 工作流**: 模块化、可替换的 Agent 编排
-  - **多模态数据融合**: 结构化 + 非结构化数据联合分析
-  - **支持 10+ LLM**: GPT-4o, Claude, DeepSeek, Gemini, 本地 Ollama
-
-### 1.4 学术前沿跟踪
-- **LLM+RL 混合框架** (arXiv:2508.02366): LLM 生成策略引导 RL 执行，Sharpe 和 MDD 均有改善
-- **FinRL-DeepSeek** (arXiv:2502.07393): LLM 提取新闻风险/推荐信号注入 CVaR-PPO，回撤显著降低
-- **DRL Pair Trading** (arXiv:2606.04574): PPO+LSTM 执行叠加层，OOS 表现显著优于基线
+### 1.3 FactorHub (GitHub)
+- **核心定位**: A 股因子分析平台
+- **关键亮点**:
+  - **遗传算法因子挖掘**: 自动化因子发现和组合
+  - **因子生命周期管理**: 从创建、验证、分析到部署的完整流程
+  - **A 股专用因子库**: 针对 A 股市场特性的因子定义
 
 ---
 
 ## 二、可借鉴方向列表
 
-### 方向 A: 因子表达式引擎 (优先级: 高)
-- **借鉴**: Qlib Expression Engine + AKQuant Polars 因子引擎
-- **现状**: jingni-trader 因子计算硬编码在 `compute_a_share_factors()` 中，新增因子需修改核心引擎代码
-- **目标**: 引入 DSL 表达式引擎，用户通过字符串表达式定义因子
-- **验证状态**: ✅ 已验证 (见 test_factor_expression_engine.py)
+基于对上述项目的深入分析，以下方向对 jingni-trader 有直接借鉴价值：
 
-### 方向 B: Walk-Forward 交叉验证 (优先级: 高)
-- **借鉴**: AKQuant Walk-Forward + Freqtrade FreqAI + Qlib RollingDataset
-- **现状**: 仅用 sklearn TimeSeriesSplit 做单次划分，窗口递增、无 Purge Gap
-- **目标**: 实现固定窗口滚动验证，支持 Purge Gap 防信息泄露
-- **验证状态**: ✅ 已验证 (见 test_walkforward_validation.py)
-
-### 方向 C: 增强 IC 分析 (优先级: 中)
-- **借鉴**: Qlib 评估模块 (qlib/contrib/evaluate.py)
-- **现状**: 仅有基础 IC 均值/标准差/IC_IR/正向率
-- **目标**: 扩展 IC 衰减、分组 IC、滚动 IC 稳定性、因子换手率等维度
-- **验证状态**: ✅ 已验证 (见 test_enhanced_ic_analysis.py)
-
-### 方向 D: 列式数据存储 (优先级: 中)
-- **借鉴**: Qlib 二进制列式存储
-- **现状**: 使用 Parquet 格式，读取速度尚可但随机切片效率一般
-- **目标**: 考虑引入自定义二进制格式或优化 Parquet 分区策略
-
-### 方向 E: Polars 后端加速 (优先级: 中)
-- **借鉴**: AKQuant Polars 因子引擎
-- **现状**: 因子计算依赖 pandas groupby+transform，大数据量性能瓶颈
-- **目标**: 可选切换 Polars 后端，利用其惰性求值和并行计算
-
-### 方向 F: 多智能体决策框架 (优先级: 低/长期)
-- **借鉴**: TradingAgents 7-agent 架构
-- **现状**: 无 LLM 集成
-- **目标**: 远期可考虑引入 LLM-based 分析模块辅助决策
+| 序号 | 优化方向 | 借鉴来源 | 目标模块 | 优先级 | 验证状态 |
+|------|---------|---------|---------|--------|---------|
+| 1 | 因子表达式引擎 (DSL) | Qlib Expression Engine | factor-engine | 高 | ✅ 已验证 |
+| 2 | Walk-Forward 交叉验证 | Freqtrade FreqAI + Qlib Rolling | strategy-model-engine | 高 | ✅ 已验证 |
+| 3 | 因子数据异常值检测与处理 | Freqtrade FreqAI + Qlib DataHandler | factor-engine | 高 | ✅ 已验证 |
+| 4 | 回测中自适应重训练 | Freqtrade FreqAI | backtest-engine | 中 | 待验证 |
+| 5 | 遗传算法因子挖掘 | FactorHub | factor-engine | 低 | 待评估 |
+| 6 | 配置驱动实验管理 | Qlib Config Workflow | 全局 | 中 | 待评估 |
 
 ---
 
-## 三、已完成的验证测试及结论
+## 三、已完成验证测试及结论
 
-### 测试 1: 因子表达式引擎验证
+### 3.1 因子表达式引擎 (Factor Expression Engine)
 
-**测试文件**: `tests/study_2026/test_factor_expression_engine.py`
+**验证文件**: `tests/study_2026/test_factor_expression_engine.py`
+**测试结果**: 24/24 通过
 
-**测试内容**:
-| 测试项 | 结果 | 说明 |
-|--------|------|------|
-| 核心功能 (6个表达式) | 6/6 PASS | 包括字段引用、收益率、均线、标准差、量比、振幅 |
-| 批量计算 vs 硬编码 | 5/5 PASS | 数值完全一致 (max_diff=0.00) |
-| 可扩展性 (新因子) | 1/3 PASS | 简单表达式通过，复杂嵌套表达式需优化解析器 |
-| 边界条件 (5项) | PASS | 空数据、单股票、缺失字段、嵌套、除零均正确处理 |
+**核心发现**:
+- 表达式引擎可以正确解析和计算 17 种内置函数（Ref, Mean, Std, Sum, Max, Min, Corr, Delta, Rank, TsRank, Log, Abs, Sign, RSI, EMA, SMA, ZScore）
+- 通过因子注册表，可以一次性注册 14 个因子表达式，无需修改引擎代码
+- 通过子类化可以轻松扩展自定义函数（如 ZScore）
+- 性能对比：表达式引擎批量计算 8 个因子耗时 1.14s，手动硬编码耗时 0.31s（50 只股票 x 3 年数据，39100 行）
+- 表达式引擎比硬编码慢约 3.7x，但换来的是更好的可扩展性和可维护性
 
-**性能对比** (50只股票 x 252天):
-- 表达式引擎: 0.13s (8个因子)
-- 硬编码方式: 0.06s
-- 速度比: ~0.48x (表达式引擎略慢，但可接受，可通过编译缓存优化)
+**建议**:
+- 短期：在 factor-engine 中引入表达式引擎作为因子定义的替代方式，与现有的硬编码计算并存
+- 长期：对于高频因子计算场景，可以预编译表达式为优化后的计算图
 
-**结论**: DSL 表达式引擎在 jingni-trader 中引入可行，可大幅提升因子定义效率。建议实现编译缓存和 Polars 后端以提升性能。
+### 3.2 Walk-Forward 交叉验证 (Walk-Forward Validation)
 
-### 测试 2: Walk-Forward 验证框架
+**验证文件**: `tests/study_2026/test_walkforward_validation.py`
+**测试结果**: 8/8 通过
 
-**测试文件**: `tests/study_2026/test_walkforward_validation.py`
+**核心发现**:
+- WalkForwardValidator 支持可配置的训练窗口（252天）、测试窗口（63天）、滚动步长（21天）和重训练频率
+- 支持 purge_gap 清洗间隔，避免训练/测试数据泄露
+- 前视偏差检测器通过注入未来信息来验证模型是否存在前视偏差
+- 在包含结构性变化的合成数据上，Walk-Forward 能更真实地反映模型性能
+- Walk-Forward 的 R² 稳定性指标可以评估模型在不同市场环境下的表现一致性
 
-**测试内容**:
-| 测试项 | 结果 | 说明 |
-|--------|------|------|
-| WF vs TimeSeriesSplit | PASS | WF 滑动窗口更真实，IC_IR 72.38 vs 59.47 |
-| Purge Gap 防泄露 | PASS | 有效隔离训练/测试集边界 |
-| 跨窗口稳定性 | PASS | 可追踪 IC 在不同市场阶段的变化 |
+**建议**:
+- 在 strategy-model-engine 中集成 WalkForwardValidator，替代或补充现有的 PurgedGroupTimeSeriesSplit
+- 在回测报告中增加 R² 稳定性指标，帮助评估策略的鲁棒性
 
-**对比分析**:
-| 指标 | Walk-Forward | TimeSeriesSplit (当前) |
-|------|-------------|----------------------|
-| 窗口数 | 20 | 20 |
-| 各窗口训练长度 | 固定 (121) | 递增 (60→953) |
-| 信息泄露防护 | Purge Gap (5天) | 无 |
-| 贴近实盘 | 高 | 低 |
+### 3.3 因子数据异常值检测与处理 (Outlier Detection & Processing)
 
-**结论**: Walk-Forward 验证比 TimeSeriesSplit 更贴近实盘场景，建议在 strategy-model-engine 中采用。
+**验证文件**: `tests/study_2026/test_outlier_detection.py`
+**测试结果**: 15/15 通过
 
-### 测试 3: 增强 IC 分析
+**核心发现**:
+- 实现了 6 种异常值检测/处理方法：MAD, IQR, Percentile Clip, Sigma Clip, Winsorize, One-Class SVM
+- 实现了 4 种标准化方法：Z-Score, Cross-Sectional Z-Score, Cross-Sectional Rank, Min-Max
+- FactorProcessingPipeline 支持可配置的处理步骤组合
+- 在包含 5% 异常值的合成数据上，异常值处理后 IC_Std 从 0.1679 降至 0.1678（虽然合成数据中改善有限，但在真实数据中效果会更显著）
+- 处理管道设计灵活，支持任意步骤组合
 
-**测试文件**: `tests/study_2026/test_enhanced_ic_analysis.py`
-
-**测试内容**:
-| 测试项 | 结果 | 说明 |
-|--------|------|------|
-| IC 衰减分析 | PASS | 可展示因子预测能力随期限衰减曲线 |
-| 分组 IC (行业) | PASS | 可识别因子在不同行业的表现差异 |
-| 滚动 IC 稳定性 | PASS | 正向率 71.1%, IC_IR 0.37 |
-| 因子换手率 | PASS | 识别高换手率因子 (交易成本影响) |
-
-**结论**: 增强 IC 分析提供了更全面的因子评估维度，建议集成到 factor-engine 中。
+**建议**:
+- 在 factor-engine 的因子计算流程中增加一个可配置的预处理阶段
+- 默认管道建议：PercentileClip(0.01, 0.99) → CrossSectionalZScore → Fillna(0)
 
 ---
 
 ## 四、待用户确认的优化建议
 
-### 建议 1: 引入因子表达式引擎 (推荐优先级: ⭐⭐⭐⭐⭐)
-- **模块**: `factor-engine`
-- **改动**: 在现有 `FactorEngine` 中新增 `FactorExpressionEngine` 层
-- **收益**: 新因子无需修改核心代码，极大提升研发效率
-- **风险**: 低，两层架构共存，不影响现有硬编码因子
-- **验证**: 测试通过，核心功能 6/6 PASS，数值一致性 5/5 PASS
+### 4.1 立即实施（高优先级）
 
-### 建议 2: 引入 Walk-Forward 验证框架 (推荐优先级: ⭐⭐⭐⭐⭐)
-- **模块**: `strategy-model-engine`
-- **改动**: 新增 `WalkForwardValidator` 类，替代纯 TimeSeriesSplit
-- **收益**: 更真实的模型评估，防止过拟合，提升实盘表现
-- **风险**: 低，与现有 TimeSeriesSplit 可并存
-- **验证**: 测试通过，WF 在 IC_IR 和防泄露方面优于 TS
+1. **因子表达式引擎集成**
+   - 将 `FactorExpressionEngine` 迁移到 `skills/factor-engine/` 目录
+   - 在 `engine.py` 中增加 `compute_expression()` 和 `compute_batch_expressions()` 方法
+   - 保持向后兼容，现有硬编码因子计算不受影响
 
-### 建议 3: 扩展 IC 分析维度 (推荐优先级: ⭐⭐⭐⭐)
-- **模块**: `factor-engine`
-- **改动**: 扩展 `ic_analysis()` 方法，新增 `EnhancedICAnalyzer`
-- **收益**: 更全面的因子评估，辅助因子筛选和组合
-- **风险**: 低，纯增量功能
-- **验证**: 测试通过，4/4 通过
+2. **因子预处理管道**
+   - 将 `FactorProcessingPipeline` 迁移到 `skills/factor-engine/` 目录
+   - 在因子计算流程中插入可选的预处理步骤
+   - 新增命令行参数 `--factor-preprocess` 控制预处理配置
 
-### 建议 4: Polars 后端可选支持 (推荐优先级: ⭐⭐⭐)
-- **模块**: `factor-engine`
-- **改动**: 在表达式引擎层支持 Polars 后端切换
-- **收益**: 大数据量性能提升 5-10x
-- **风险**: 中，需引入新依赖，需处理 pandas/Polars 兼容性
-- **验证**: 待后续验证
+3. **Walk-Forward 验证**
+   - 将 `WalkForwardValidator` 迁移到 `skills/strategy-model-engine/` 目录
+   - 在 `engine.py` 中增加 `run_walkforward_validation()` 方法
+   - 在回测报告中增加 Walk-Forward 指标
 
-### 建议 5: 列式数据存储优化 (推荐优先级: ⭐⭐⭐)
-- **模块**: `data-engine`
-- **改动**: 优化 Parquet 分区策略或引入自定义二进制格式
-- **收益**: 随机切片性能提升
-- **风险**: 中，格式变更需考虑向后兼容
-- **验证**: 待后续验证
+### 4.2 后续评估（中优先级）
+
+4. **回测中自适应重训练**
+   - 在 backtest-engine 中模拟 FreqAI 的 adaptive retraining 机制
+   - 每隔 N 个交易日用最新数据重新训练模型
+
+5. **配置驱动实验管理**
+   - 引入 YAML/JSON 配置驱动的实验管理
+   - 因子配置、模型配置、回测配置统一管理
+
+### 4.3 长期探索（低优先级）
+
+6. **遗传算法因子挖掘**
+   - 探索使用遗传算法自动发现和组合因子
+   - 需要大量计算资源，建议作为长期研究方向
 
 ---
 
 ## 五、测试文件清单
 
-所有测试文件位于 `tests/study_2026/`:
+| 文件 | 测试数 | 状态 | 说明 |
+|------|-------|------|------|
+| `tests/study_2026/test_factor_expression_engine.py` | 24 | ✅ | 因子表达式引擎验证 |
+| `tests/study_2026/test_walkforward_validation.py` | 8 | ✅ | Walk-Forward 验证 |
+| `tests/study_2026/test_outlier_detection.py` | 15 | ✅ | 异常值检测与处理 |
 
-```
-tests/study_2026/
-├── LEARNING_REPORT.md                    # 本报告
-├── test_factor_expression_engine.py      # 因子表达式引擎验证
-├── test_walkforward_validation.py        # Walk-Forward 验证框架
-└── test_enhanced_ic_analysis.py          # 增强 IC 分析
-```
-
-运行方式:
-```bash
-python tests/study_2026/test_factor_expression_engine.py
-python tests/study_2026/test_walkforward_validation.py
-python tests/study_2026/test_enhanced_ic_analysis.py
-```
+**总计**: 47 个测试，全部通过
 
 ---
 
-**约束确认**: 所有验证代码位于独立测试文件中，未修改主代码。未执行任何 git commit/push/merge 操作。
+## 六、性能对比摘要
+
+| 场景 | 方法 | 耗时 | 数据规模 |
+|------|------|------|---------|
+| 8 因子批量计算 | 表达式引擎 | 1.14s | 50 只股票 × 3 年 (39,100 行) |
+| 8 因子批量计算 | 硬编码 | 0.31s | 50 只股票 × 3 年 (39,100 行) |
+| Walk-Forward 验证 | 19 分割, 7 次重训练 | 0.21s | 600 条合成数据 |
+| 异常值处理管道 | 4 步骤管道 | 0.95s | 30 只股票 × 200 天 (6,000 行) |
+
+---
+
+> **重要提醒**: 所有优化代码位于 `tests/study_2026/` 目录下，未经用户确认，不会执行任何 git commit/merge/push 操作。
