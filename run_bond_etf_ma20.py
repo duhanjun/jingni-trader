@@ -92,7 +92,14 @@ def _register_scripts_package(skill_scripts_path: str):
                     )
                     pmod = importlib.util.module_from_spec(pspec)
                     sys.modules[parent_pkg] = pmod
-                    pspec.loader.exec_module(pmod)
+                    try:
+                        pspec.loader.exec_module(pmod)
+                    except Exception:
+                        # 父包 __init__ 执行失败（如内部子模块循环导入）：
+                        # 移除半成品父包，允许后续按需重新导入时干净重来。
+                        sys.modules.pop(parent_pkg, None)
+                        if parent_dir in getattr(pmod, '__path__', []) or True:
+                            pass
 
         # 注册当前目录下的所有 .py 文件
         for f in files:
@@ -107,9 +114,12 @@ def _register_scripts_package(skill_scripts_path: str):
                     fmod = importlib.util.module_from_spec(fspec)
                     sys.modules[full_name] = fmod
                     fspec.loader.exec_module(fmod)
-                except Exception as e:
-                    # 容错：某些模块可能因为依赖问题加载失败
-                    pass
+                except Exception:
+                    # 容错：某些模块可能因依赖/循环导入暂时加载失败。
+                    # 关键：必须移除执行到一半的半成品模块，否则它残留在
+                    # sys.modules 中会导致后续对该模块的正常导入拿到不完整对象
+                    # （例如循环导入场景下 __init__ 取到未定义好的符号而报错）。
+                    sys.modules.pop(full_name, None)
 
 
 def _unregister_skill_modules():
