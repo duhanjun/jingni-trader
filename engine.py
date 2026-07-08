@@ -22,13 +22,26 @@ from scripts.archive import RunArchiver
 
 
 os.makedirs(LOG_DIR, exist_ok=True)
+# GAP-1 修复：Windows zh_CN(GBK) 控制台默认编码下，含中文/非 ASCII 字形的
+# 日志消息会抛 UnicodeEncodeError 并中断主流程。统一将 stderr/stdout 设为 utf-8，
+# FileHandler 显式指定 utf-8，保证跨平台不乱码、不崩。
+try:
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+_handlers = [
+    logging.FileHandler(
+        os.path.join(LOG_DIR, f"master_{datetime.now():%Y%m%d}.log"),
+        encoding="utf-8", errors="replace"
+    ),
+    # StreamHandler 不接受 encoding 参数，依赖已 reconfigure 的 stderr
+    logging.StreamHandler(sys.stderr),
+]
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    handlers=[
-        logging.FileHandler(os.path.join(LOG_DIR, f"master_{datetime.now():%Y%m%d}.log")),
-        logging.StreamHandler()
-    ]
+    handlers=_handlers,
 )
 logger = logging.getLogger("jingnitrader")
 

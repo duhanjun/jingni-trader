@@ -113,6 +113,24 @@ GM_TOKEN: Optional[str] = os.environ.get("GM_TOKEN")
 ALLOW_SYNTHETIC_FALLBACK: bool = os.environ.get("ALLOW_SYNTHETIC_FALLBACK", "true").lower() == "true"
 
 
+# ── 数据源依赖自动安装 ─────────────────────────
+# 当某数据源适配器所需的第三方库未安装时，DataEngine 是否先尝试
+# 自动 pip install 再使用，而不是直接跳过该数据源（默认开启）。
+# 设为 false 可关闭（保留旧行为：缺依赖即跳过）。
+AUTO_INSTALL_BACKENDS: bool = os.environ.get("AUTO_INSTALL_BACKENDS", "true").lower() == "true"
+
+# 后端名 -> 需要的 pip 包名（用于自动安装；空列表表示无第三方依赖）
+BACKEND_PIP_PACKAGES: Dict[str, List[str]] = {
+    "tushare":  ["tushare"],
+    "baostock": ["baostock"],
+    "akshare":  ["akshare"],
+    "websearch": [],
+    "xtquant":  ["xtquant"],
+    "gm":       ["gm"],
+    "tdxquant": ["tdxquant", "pytdx"],
+}
+
+
 def notify_supported_backends() -> None:
     """
     首次使用时提示用户：系统支持的数据源全景 + 降级条件
@@ -133,7 +151,7 @@ def notify_supported_backends() -> None:
     for name in PAID_OR_SPECIAL_BACKENDS:
         logger.info(f"  • {name}: {PAID_OR_SPECIAL_DESCRIPTIONS[name]}")
     logger.info("")
-    logger.info(f"合成数据 fallback: {'✓ 启用' if ALLOW_SYNTHETIC_FALLBACK else '✗ 禁用（失败会抛异常）'}")
+    logger.info(f"合成数据 fallback: {'[OK] 启用' if ALLOW_SYNTHETIC_FALLBACK else '[X] 禁用（失败会抛异常）'}")
     logger.info("")
     logger.info("启用方式：export DATA_BACKENDS=tushare,xtquant,gm,tdxquant,baostock,akshare,websearch")
     logger.info("=" * 60)

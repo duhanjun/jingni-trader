@@ -103,6 +103,22 @@ python3 engine.py -i "优化当前组合，最大回撤控制在15%以内"
 
 **输出产物**：`cleaned_data.parquet`
 
+**数据源依赖自动安装**：
+
+当某数据源适配器所需的第三方库尚未安装时，data-engine 不会直接跳过该数据源，而是先尝试用当前 Python 解释器自动安装依赖，安装成功后再加载并使用该数据源；仅当自动安装失败（如网络受限）时才会按降级链跳到下一个数据源。
+
+- 开关：`AUTO_INSTALL_BACKENDS`（默认 `true`）。设为 `false` 可恢复旧行为（缺依赖即跳过）。
+- 后端与 pip 包映射（见 `skills/data-engine/scripts/config.py` 的 `BACKEND_PIP_PACKAGES`）：
+  - `tushare → tushare`
+  - `baostock → baostock`
+  - `akshare → akshare`
+  - `xtquant → xtquant`
+  - `gm → gm`
+  - `tdxquant → tdxquant, pytdx`
+  - `websearch` 无第三方依赖
+- 自动安装结果会被缓存（`_INSTALL_CACHE`），避免在同一次运行的降级链里重复安装。
+- 注意：`xtquant` / `gm` / `tdxquant` 即便 pip 包装好，仍需本地客户端或 Token 才能真正取到数据（属于运行时环境依赖，非安装问题）。
+
 ### 2. 因子计算引擎 (factor-engine)
 
 **职责**：计算 Alpha 因子、技术指标，完成因子 IC 分析和预筛选。
@@ -124,9 +140,12 @@ python3 engine.py -i "优化当前组合，最大回撤控制在15%以内"
 **职责**：在历史数据上验证策略效果，计算收益率、夏普比、最大回撤等指标。
 
 **支持回测框架**：
-- RQAlpha
-- Backtrader
-- 掘金量化（gm）
+- 内置原生回测（native）— ✅ 生产可用
+- RQAlpha — ⚠️ 预留/示例桩（仅返回模拟或空实现，非真实回测结果）
+- Backtrader — ⚠️ 预留/示例桩（仅返回模拟或空实现，非真实回测结果）
+- 掘金量化（gm）— ⚠️ 预留/示例桩（需本地 gm 客户端与 Token，未接入真实回测引擎）
+
+> 生产可用状态（GAP-2/3 标注）：**仅 `backtest=native` 为真实回测实现**；rqalpha / backtrader / gm 适配器当前为预留/示例桩，运行它们不会产出真实历史回测结论，请勿据此下单或做投资决策。
 
 **输出产物**：`backtest_result.json`
 
@@ -141,9 +160,11 @@ python3 engine.py -i "优化当前组合，最大回撤控制在15%以内"
 **职责**：对接券商接口，执行交易指令，实时监控仓位和盈亏。
 
 **支持交易接口**：
-- 模拟交易（paper）
-- xtquant（需券商渠道）
-- 掘金量化（gm）
+- 模拟交易（paper）— ✅ 生产可用
+- xtquant（需券商渠道）— ⚠️ 预留/示例桩（需本地券商客户端与 Token，未接入真实交易通道）
+- 掘金量化（gm）— ⚠️ 预留/示例桩（需本地 gm 客户端与 Token，未接入真实交易通道）
+
+> 生产可用状态（GAP-2/3 标注）：**仅 `execution=paper`（模拟交易）为真实可用**；xtquant / gm 执行接口当前为预留/示例桩，不连接真实券商通道，请勿用于实盘下单。
 
 **输出产物**：`trade_log.json`
 
@@ -180,6 +201,21 @@ risk:
   max_position: 0.05
   max_loss_per_day: 0.02
 ```
+
+### 环境变量
+
+部分行为通过环境变量控制（均为可选，未设置时使用默认值）：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `DATA_BACKENDS` | `tushare,baostock,akshare,websearch` | 数据降级链顺序 |
+| `DATA_BACKEND` | 无 | 单源模式（不降级） |
+| `TUSHARE_TOKEN` / `GM_TOKEN` | 无 | API 令牌 |
+| `ADJUST_MODE` | `hfq` | 复权方式（前复权 `qfq` / 后复权 `hfq`） |
+| `ALLOW_SYNTHETIC_FALLBACK` | `true` | 全部数据源失败时生成模拟数据兜底 |
+| `AUTO_INSTALL_BACKENDS` | `true` | 数据源依赖缺失时自动 `pip install` 后重试 |
+| `DATA_FORMAT` | `parquet` | 数据落盘格式（csv/sql） |
+| `DATA_MAX_WORKERS` | `4` | 并行下载线程数 |
 
 ## Context 对象
 

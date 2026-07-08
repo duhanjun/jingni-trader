@@ -15,11 +15,18 @@ import logging
 import importlib.util
 import importlib
 import types
+import unittest.mock as mock
 
 # 设置 sys.path 让 from scripts.xxx 能解析
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
+
+# Windows 控制台默认 GBK，无法编码 ✓ 等字符；统一用 utf-8 输出
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 
 
 def _register_scripts_package(skill_scripts_path: str):
@@ -322,6 +329,64 @@ def test_full_fallback_chain():
         _ADAPTER_REGISTRY.update(original)
 
 
+def test_auto_install_config():
+    """测试 6：自动安装配置项"""
+    print("\n=== 测试 6: 自动安装配置项 ===")
+    assert config.AUTO_INSTALL_BACKENDS is True, "AUTO_INSTALL_BACKENDS 默认应为 True"
+    expected = {"tushare", "baostock", "akshare", "websearch", "xtquant", "gm", "tdxquant"}
+    assert expected.issubset(set(config.BACKEND_PIP_PACKAGES)), \
+        "BACKEND_PIP_PACKAGES 应覆盖所有后端"
+    assert config.BACKEND_PIP_PACKAGES["websearch"] == [], "websearch 应无第三方依赖"
+    print("  ✓ 配置项存在，默认开启，后端映射完整")
+
+
+def test_auto_install_triggered_and_succeeds():
+    """测试 7：缺依赖时触发 pip install 且安装成功后可用（mock）"""
+    print("\n=== 测试 7: 自动安装被触发且成功 ===")
+    engine_mod._INSTALL_CACHE.clear()
+    real_import = engine_mod.importlib.import_module
+    state = {"first": True}
+
+    def fake_import(name, *a, **k):
+        # 第一次检查 baostock 时模拟「未安装」，之后真实导入（模拟安装成功）
+        if name == "baostock" and state["first"]:
+            state["first"] = False
+            raise ImportError("simulated not installed")
+        return real_import(name)
+
+    with mock.patch.object(engine_mod, "_pip_install", return_value=True) as pip_mock, \
+         mock.patch.object(engine_mod.importlib, "import_module", side_effect=fake_import):
+        result = engine_mod._ensure_backend_installed("baostock")
+    assert result is True, "安装成功后应返回 True"
+    assert pip_mock.called, "缺依赖时应触发自动安装(pip install)"
+    print("  ✓ 缺依赖时触发 pip install 且安装成功后返回可用")
+
+
+def test_auto_install_failure_skips():
+    """测试 8：自动安装失败时该数据源被跳过（mock）"""
+    print("\n=== 测试 8: 自动安装失败则跳过 ===")
+    engine_mod._INSTALL_CACHE.clear()
+    with mock.patch.object(engine_mod, "_pip_install", return_value=False), \
+         mock.patch.object(engine_mod.importlib, "import_module", side_effect=ImportError("no")):
+        result = engine_mod._ensure_backend_installed("baostock")
+    assert result is False, "安装失败应返回 False（跳过该源）"
+    print("  ✓ 安装失败时返回 False（该数据源被跳过）")
+
+
+def test_load_adapter_raises_when_install_fails():
+    """测试 9：自动安装失败时 _load_adapter 抛出 DataSourceError（mock）"""
+    print("\n=== 测试 9: _load_adapter 安装失败抛错 ===")
+    engine_mod._INSTALL_CACHE.clear()
+    with mock.patch.object(engine_mod, "AUTO_INSTALL_BACKENDS", True), \
+         mock.patch.object(engine_mod, "_ensure_backend_installed", return_value=False):
+        try:
+            engine_mod._load_adapter("baostock")
+        except errors.DataSourceError:
+            print("  ✓ 自动安装失败时 _load_adapter 抛出 DataSourceError")
+            return
+    raise AssertionError("_ensure_backend_installed=False 时应抛出 DataSourceError")
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s: %(message)s')
 
@@ -330,5 +395,9 @@ if __name__ == "__main__":
     test_should_fallback()
     test_synthetic_data()
     test_full_fallback_chain()
+    test_auto_install_config()
+    test_auto_install_triggered_and_succeeds()
+    test_auto_install_failure_skips()
+    test_load_adapter_raises_when_install_fails()
 
     print("\n🎉 全部测试通过")

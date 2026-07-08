@@ -81,7 +81,7 @@ class BaostockAdapter(BaseDataProvider):
                 continue
             df = pd.DataFrame(data, columns=rs.fields)
             # 类型转换
-            numeric_cols = ['open', 'high', 'low', 'close', 'preclose', 'volume', 'amount', 'turn']
+            numeric_cols = ['open', 'high', 'low', 'close', 'preclose', 'volume', 'amount', 'turn', 'isST']
             for col in numeric_cols:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
             df['code'] = code

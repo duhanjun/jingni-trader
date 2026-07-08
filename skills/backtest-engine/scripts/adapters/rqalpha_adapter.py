@@ -113,7 +113,7 @@ import pandas as pd
 import json
 
 # 预加载信号
-SIGNALS = pd.DataFrame(json.loads('''{json.dumps(signals_json[:1000])}'''))  # 限制大小
+SIGNALS = pd.DataFrame()  # 在 init() 中动态设置
 
 def init(context):
     context.signal_pos = 0

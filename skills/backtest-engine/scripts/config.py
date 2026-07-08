@@ -4,8 +4,8 @@
 import os
 
 # ── 回测后端选择 ──────────────────────────
-BACKTEST_BACKEND = os.environ.get("BACKTEST_BACKEND", "rqalpha")
-# 可选: rqalpha, backtrader, gm
+BACKTEST_BACKEND = os.environ.get("BACKTEST_BACKEND", "native")
+# 可选: rqalpha, backtrader, gm, native
 
 # ── 回测结果存储目录 ──────────────────────
 BACKTEST_DIR = os.environ.get("BACKTEST_DIR", "./workspace/backtest_results")

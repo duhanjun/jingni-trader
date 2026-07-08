@@ -15,7 +15,9 @@ A股数据引擎主逻辑
 """
 import os
 import sys
+import subprocess
 import logging
+import importlib
 from typing import List, Optional, Dict, Any, Callable
 
 # 注意：不要在这里 sys.path.insert，会破坏 from scripts.xxx 的包导入
@@ -28,6 +30,7 @@ from scripts.config import (
     DATA_FORMAT, ADJUST_MODE, CACHE_DIR, MAX_MISSING_RATIO,
     DEFAULT_DATA_SOURCES, SUPPORTED_BACKENDS, PAID_OR_SPECIAL_BACKENDS,
     DATA_FALLBACK_RULES, ALLOW_SYNTHETIC_FALLBACK,
+    AUTO_INSTALL_BACKENDS, BACKEND_PIP_PACKAGES,
     notify_supported_backends,
 )
 from scripts.base.base_data_provider import BaseDataProvider
@@ -57,7 +60,11 @@ _TRIGGERING_ERRORS = FALLBACK_TRIGGERING_ERRORS
 
 
 def _load_adapter(backend: str, **extra_kwargs) -> BaseDataProvider:
-    """动态加载指定数据源的适配器"""
+    """动态加载指定数据源的适配器
+
+    若适配器所需的第三方库未安装，且 AUTO_INSTALL_BACKENDS 开启，
+    会先尝试 pip install 再加载；安装失败才判定该数据源不可用。
+    """
     if backend not in _ADAPTER_REGISTRY:
         raise ValueError(
             f"不支持的数据源: {backend}。"
@@ -66,7 +73,14 @@ def _load_adapter(backend: str, **extra_kwargs) -> BaseDataProvider:
     module_path, class_name, default_kwargs = _ADAPTER_REGISTRY[backend]
     # 合并默认参数和传入参数
     merged_kwargs = {**default_kwargs, **extra_kwargs}
-    import importlib
+
+    # 缺失依赖：先尝试自动安装，再决定是否可用
+    if AUTO_INSTALL_BACKENDS and not _ensure_backend_installed(backend):
+        raise DataSourceError(
+            backend,
+            f"数据源 {backend} 所需的依赖无法自动安装，已跳过该数据源"
+        )
+
     try:
         mod = importlib.import_module(module_path)
     except ImportError as e:
@@ -75,6 +89,67 @@ def _load_adapter(backend: str, **extra_kwargs) -> BaseDataProvider:
     if cls is None:
         raise DataSourceError(backend, f"适配器 {class_name} 不存在")
     return cls(**merged_kwargs)
+
+
+# 已尝试过自动安装的数据源缓存，避免重复安装
+_INSTALL_CACHE: Dict[str, bool] = {}
+
+
+def _pip_install(pkg: str) -> bool:
+    """通过当前解释器执行 pip install，返回是否成功。"""
+    try:
+        logger.info(f"检测到依赖缺失，尝试自动安装: pip install {pkg}")
+        proc = subprocess.run(
+            [sys.executable, "-m", "pip", "install", pkg],
+            capture_output=True, text=True, timeout=600,
+        )
+        if proc.returncode != 0:
+            logger.warning(f"pip install {pkg} 失败 (returncode={proc.returncode}):\n{proc.stderr[-800:]}")
+            return False
+        logger.info(f"pip install {pkg} 成功")
+        return True
+    except Exception as e:
+        logger.warning(f"pip install {pkg} 执行异常: {e}")
+        return False
+
+
+def _ensure_backend_installed(backend: str) -> bool:
+    """确保某后端所需第三方库已安装；未安装则尝试自动 pip install。
+
+    返回 True 表示依赖已就绪（可继续加载适配器），
+    False 表示自动安装失败（该数据源应被跳过）。
+    """
+    if backend in _INSTALL_CACHE:
+        return _INSTALL_CACHE[backend]
+
+    pkgs = BACKEND_PIP_PACKAGES.get(backend, [])
+    if not pkgs:
+        # 无第三方依赖（如 websearch）
+        _INSTALL_CACHE[backend] = True
+        return True
+
+    ready = True
+    for pkg in pkgs:
+        try:
+            importlib.import_module(pkg)
+            continue  # 已安装
+        except Exception:
+            pass
+        # 未安装 -> 尝试安装
+        if not _pip_install(pkg):
+            ready = False
+            break
+        # 安装后再次确认可导入
+        try:
+            importlib.import_module(pkg)
+        except Exception:
+            ready = False
+            break
+
+    _INSTALL_CACHE[backend] = ready
+    if not ready:
+        logger.warning(f"数据源 {backend} 依赖自动安装失败，将跳过该数据源")
+    return ready
 
 
 logger = logging.getLogger("data-engine")
@@ -121,8 +196,13 @@ class DataEngine:
         self.is_synthetic = False
 
         # 首次初始化时打印支持的数据源全景
+        # GAP-1 修复：日志打印（含非 ASCII 字形/中文）在 GBK 控制台可能抛
+        # UnicodeEncodeError；此处兜底，避免日志编码失败中断 DataEngine 初始化。
         if not _NOTIFIED:
-            notify_supported_backends()
+            try:
+                notify_supported_backends()
+            except UnicodeEncodeError as e:
+                logger.warning(f"数据源全景提示打印被跳过（日志编码异常）: {e}")
             _NOTIFIED = True
 
     # ------------------------------------------------------------------
