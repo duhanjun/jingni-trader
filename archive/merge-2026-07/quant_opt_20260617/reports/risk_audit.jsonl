@@ -1,2 +1,0 @@
-{"timestamp": "2026-06-17T20:17:09.054615", "kind": "DENY", "reason": "DAILY_LOSS", "detail": "日亏 -5.00% 超过阈值 -3.00%", "trading_state": "ACTIVE"}
-{"timestamp": "2026-06-17T20:17:09.054749", "kind": "DENY", "reason": "SINGLE_ORDER_SIZE", "detail": "单笔金额 78000 超过上限 20000", "trading_state": "ACTIVE"}

@@ -1,9 +1,0 @@
-__pycache__/
-*.pyc
-.pytest_cache/
-.coverage
-htmlcov/
-*.db
-*.log
-.venv/
-.venv-*

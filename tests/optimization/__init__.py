@@ -1,1 +1,0 @@
-# Optimization verification tests for jingni-trader
