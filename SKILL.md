@@ -138,19 +138,23 @@ workspace/archives/20260529_143025/
 
 | 字段名 | 类型 | 说明 |
 |--------|------|------|
-| task_id | str | 当前任务ID |
+| task_id | str | 当前任务ID（YYYYMMDDHHMMSS） |
+| session_id | str | 会话ID |
 | user_intent | str | 用户原始意图 |
 | current_stage | str | 当前所处阶段 |
 | target_stages | List[str] | 目标阶段列表 |
-| stock_pool | List[str] | 股票池（股票代码列表） |
+| stock_pool | List[str] | 股票池（股票代码列表，空列表=全市场） |
+| benchmark | str | 基准指数代码（默认 000300.SH） |
 | start_date | str | 开始日期 |
 | end_date | str | 结束日期 |
+| strategy_name | str | 策略名称 |
+| strategy_params | Dict[str, Any] | 策略参数字典 |
 | artifacts | Dict[str, str] | 已完成阶段产物路径 |
-| metadata | Dict[str, Any] | 各阶段元数据 |
-| errors | List[str] | 错误记录 |
 | external_data | Dict[str, Any] | 系统内置工具传入的外部数据 |
 | run_dir | str | 当前运行归档目录路径 |
 | step_dirs | Dict[str, str] | 各步骤归档子目录路径 |
+| metadata | Dict[str, Any] | 各阶段元数据 |
+| errors | List[str] | 错误记录 |
 
 ## 使用示例
 
