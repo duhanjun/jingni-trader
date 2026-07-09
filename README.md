@@ -35,16 +35,7 @@ A股量化交易全流程智能调度系统。基于大语言模型的量化投�
 ### 安装依赖
 
 ```bash
-# 方式一：使用安装脚本
-bash install.sh
-
-# 方式二：手动安装依赖
-pip install tushare baostock akshare pandas numpy
-pip install pandas-ta talib scipy statsmodels
-pip install lightgbm scikit-learn
-pip install rqalpha backtrader
-pip install PyPortfolioOpt riskfolio-lib
-pip install quantstats plotly matplotlib
+pip install -r requirements.txt
 ```
 
 ### 运行示例
@@ -65,26 +56,23 @@ python3 engine.py -i "优化当前组合，最大回撤控制在15%以内"
 ```
 ├── engine.py                    # 主调度引擎
 ├── SKILL.md                     # 主技能描述文件
+├── requirements.txt             # Python 依赖
 ├── scripts/
-│   ├── context.py            # 上下文对象
-│   └── config.py             # 配置
+│   ├── __init__.py
+│   ├── context.py              # 上下文对象
+│   ├── config.py               # 全局配置
+│   └── archive.py              # 运行归档
 ├── skills/                      # 子技能目录
-│   ├── data-engine/           # 数据采集引擎
-│   ├── factor-engine/         # 因子计算引擎
-│   ├── strategy-model-engine/ # 模型训练引擎
-│   ├── backtest-engine/       # 回测引擎
-│   ├── portfolio-risk-engine/ # 组合优化引擎
-│   ├── execution-monitor-engine/  # 执行监控引擎
-│   └── reports-engine/        # 报告生成引擎
+│   ├── data-engine/            # 数据采集引擎
+│   ├── factor-engine/          # 因子计算引擎
+│   ├── strategy-model-engine/  # 模型训练引擎
+│   ├── backtest-engine/        # 回测引擎
+│   ├── portfolio-risk-engine/  # 组合优化引擎
+│   ├── execution-monitor-engine/ # 执行监控引擎
+│   └── reports-engine/         # 报告生成引擎
 ├── references/                  # 参考文档
-├── workspace/                   # 工作目录
-│   ├── data/                  # 清洗后数据
-│   ├── factors/               # 因子数据
-│   ├── models/                # 训练模型
-│   ├── backtest_results/      # 回测结果
-│   ├── portfolio/             # 组合配置
-│   └── reports/               # 生成报告
-├── install.sh                   # 安装脚本
+├── tests/                        # 集成测试
+│   └── test_integration_e2e.py
 └── README.md
 ```
 
@@ -176,38 +164,13 @@ python3 engine.py -i "优化当前组合，最大回撤控制在15%以内"
 
 ## 配置说明
 
-配置文件位于 `~/.quant-trading/config.yaml`，示例：
-
-```yaml
-# 数据源配置
-data_source:
-  default: "tushare"
-  tushare:
-    token: "your_token_here"
-
-# 回测配置
-backtest:
-  default: "rqalpha"
-  commission: 0.0003
-  slippage: 0.0001
-
-# 执行配置
-execution:
-  default: "xtquant"
-  mode: "paper"
-
-# 风控配置
-risk:
-  max_position: 0.05
-  max_loss_per_day: 0.02
-```
+项目通过环境变量进行配置，无需额外配置文件。
 
 ### 环境变量
 
-部分行为通过环境变量控制（均为可选，未设置时使用默认值）：
-
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
+| `QUANT_WORK_DIR` | `./workspace` | 工作目录（数据、产物、日志的根目录） |
 | `DATA_BACKENDS` | `tushare,baostock,akshare,websearch` | 数据降级链顺序 |
 | `DATA_BACKEND` | 无 | 单源模式（不降级） |
 | `TUSHARE_TOKEN` / `GM_TOKEN` | 无 | API 令牌 |
@@ -216,24 +179,48 @@ risk:
 | `AUTO_INSTALL_BACKENDS` | `true` | 数据源依赖缺失时自动 `pip install` 后重试 |
 | `DATA_FORMAT` | `parquet` | 数据落盘格式（csv/sql） |
 | `DATA_MAX_WORKERS` | `4` | 并行下载线程数 |
+| `BACKTEST_BACKEND` | `native` | 回测后端 |
+| `FACTOR_BACKEND` | `pandas_ta` | 因子计算后端 |
+| `TRADE_BACKEND` | `xtquant` | 交易后端 |
+| `LOG_LEVEL` | `INFO` | 日志级别 |
 
 ## Context 对象
 
-各引擎通过 Context 对象共享状态，包含：
+各引擎通过 Context 对象共享状态，包含以下字段：
 
 ```python
 @dataclass
 class Context:
-    task_id: str                    # 任务ID
-    user_intent: str                # 用户原始意图
-    current_stage: str              # 当前阶段
-    target_stages: List[str]       # 目标阶段列表
-    stock_pool: List[str]          # 股票池
-    start_date: str                # 开始日期
-    end_date: str                  # 结束日期
-    artifacts: Dict[str, str]      # 各阶段产物路径
-    metadata: Dict[str, Any]        # 各阶段元数据
-    errors: List[str]              # 错误记录
+    # 任务标识
+    task_id: str                     # 任务ID（YYYYMMDDHHMMSS）
+    session_id: str                  # 会话ID
+
+    # 用户意图
+    user_intent: str                 # 用户原始意图
+    current_stage: str               # 当前阶段
+    target_stages: List[str]         # 目标阶段列表
+
+    # 股票与时间
+    stock_pool: List[str]            # 股票池（空列表=全市场）
+    benchmark: str                   # 基准指数（默认 000300.SH）
+    start_date: str                  # 开始日期
+    end_date: str                    # 结束日期
+
+    # 策略参数
+    strategy_name: str               # 策略名称
+    strategy_params: Dict[str, Any]  # 策略参数字典
+
+    # 产物与外部数据
+    artifacts: Dict[str, str]         # 各阶段产物路径
+    external_data: Dict[str, Any]    # 系统内置工具传入的外部数据
+
+    # 运行归档
+    run_dir: str                     # 运行归档目录路径
+    step_dirs: Dict[str, str]        # 各步骤归档子目录路径
+
+    # 元信息与错误
+    metadata: Dict[str, Any]         # 各阶段元数据
+    errors: List[str]                # 错误记录
 ```
 
 ## 开发指南
@@ -254,13 +241,13 @@ class Context:
 
 ## 技术栈
 
-- **数据处理**：pandas, numpy, pyarrow
+- **数据处理**：pandas, numpy, scipy, pyarrow
 - **数据源**：tushare, baostock, akshare
 - **因子计算**：pandas-ta, TA-Lib
 - **机器学习**：lightgbm, catboost, scikit-learn
-- **回测框架**：rqalpha, backtrader
-- **组合优化**：PyPortfolioOpt, riskfolio-lib
-- **可视化**：quantstats, plotly, matplotlib
+- **回测框架**：native（内置原生回测）、vectorbt（可选）
+- **组合优化**：PyPortfolioOpt, riskfolio-lib, cvxpy
+- **可视化**：plotly, matplotlib, quantstats
 
 ## 许可证
 
