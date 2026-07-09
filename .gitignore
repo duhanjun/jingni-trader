@@ -33,6 +33,9 @@ jingnitrader/workspace/
 # Trae IDE 规格驱动开发目录（设计文档，非运行代码，不纳入版本库）
 .trae/
 
+# CodeBuddy IDE 自动生成的 AI 上下文文档（非运行代码，不纳入版本库）
+CODEBUDDY.md
+
 # 合并 97 个分支时带入的独立项目（非本仓库代码，已从追踪中移除，仅留作参考）
 **/quantitative-trading-skills/
 
