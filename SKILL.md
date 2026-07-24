@@ -49,6 +49,7 @@ included_skills:
   - skills/portfolio-risk-engine
   - skills/execution-monitor-engine
   - skills/reports-engine
+  - skills/jingni-datafeed
 trigger_keywords:
   - 量化
   - 回测
@@ -200,6 +201,23 @@ python engine.py -i "生成上个月实盘绩效报告"
 | PORTFOLIO | portfolio-risk-engine |
 | EXECUTION | execution-monitor-engine |
 | REPORT | reports-engine |
+
+## jingni-datafeed 自动部署
+
+jingni-trader 可选依赖 `jingni-datafeed`（惊泥因子库 datafeed 服务），该子 skill 独立维护在 [duhanjun/jingni-datafeed](https://github.com/duhanjun/jingni-datafeed)。
+
+**启动时自动检测**：MasterEngine 实例化时自动检查 `skills/jingni-datafeed/` 目录：
+- **目录不存在** → 自动从 GitHub 克隆（`git clone --depth 1`），用户无需手动操作
+- **目录已存在** → 运行正常的版本检查（只检测落后、不自动修改文件）
+
+自动克隆失败时**不会阻断主流程**，仅输出警告日志。如需手动安装：
+
+```bash
+cd jingni-trader
+git clone https://github.com/duhanjun/jingni-datafeed.git skills/jingni-datafeed
+cp skills/jingni-datafeed/.env.example skills/jingni-datafeed/.env
+# 编辑 skills/jingni-datafeed/.env 填入 JINGNI_URL / JINGNI_TOKEN
+```
 
 ## 里程碑检查点
 

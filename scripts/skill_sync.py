@@ -1,8 +1,9 @@
-"""skill 版本检查工具（只检测、不自动修改）。
+"""skill 版本检查与自动部署工具。
 
 设计原则：
-- 安全第一：本模块只查 GitHub 最新 commit 并与本地版本比对，**永不修改用户文件**
-- 检测到落后时输出提示信息（INFO 日志），告知用户手动执行 git pull 或重新下载
+- 安全第一：版本检查只查 GitHub 最新 commit 并与本地版本比对，**永不修改用户文件**
+- 自动部署：若子 skill 目录不存在（全新安装），自动从 GitHub 克隆（greenfield 操作，无用户数据风险）
+- 检测到落后时输出提示信息（INFO 日志），告知用户手动执行 git pull
 - 失败静默降级（debug 日志），不阻断主流程
 - 24h 内只查一次（靠 skill-sync.yml 的 last_check 缓存）
 
@@ -265,6 +266,111 @@ def sync_all(skill_root: str, force: bool = False) -> Dict[str, Any]:
         # 任何异常都静默降级，不阻断主流程
         logger.debug(f"sync_all 异常: {e}")
         return {"status": "failed", "message": str(e)}
+
+
+# ============================================================================
+# 子 skill 自动部署：缺失时从 GitHub 克隆
+# ============================================================================
+
+# 子 skill 依赖声明（skill 目录 → GitHub 仓库）
+_SUBSKILL_DEPENDENCIES = {
+    "jingni-datafeed": "duhanjun/jingni-datafeed",
+}
+
+
+def ensure_skill(project_root: str, skill_name: str) -> Dict[str, Any]:
+    """确保子 skill 目录存在，不存在则从 GitHub 自动克隆。
+
+    与版本检查不同：版本检查是对已有代码做"只检测不修改"，
+    而本函数是 greenfield 操作——目录不存在时从零创建，无用户数据风险。
+
+    Args:
+        project_root: jingni-trader 项目根目录
+        skill_name: 子 skill 名（如 "jingni-datafeed"），
+                    对应 skills/{skill_name}/ 目录
+
+    Returns:
+        {"status": "ok" | "cloned" | "skipped" | "failed", "message": str}
+    """
+    repo = _SUBSKILL_DEPENDENCIES.get(skill_name)
+    if not repo:
+        return {"status": "skipped", "message": f"未知子 skill: {skill_name}"}
+
+    skill_dir = os.path.join(project_root, "skills", skill_name)
+    branch = "main"
+
+    # 目录已存在 → 运行正常的版本检查（只检测、不修改）
+    if os.path.exists(skill_dir):
+        if os.path.exists(os.path.join(skill_dir, "skill-sync.yml")):
+            try:
+                result = _check_one(skill_dir)
+                return result
+            except Exception as e:
+                logger.debug(f"版本检查失败: {e}")
+                return {"status": "ok", "message": f"{skill_name} 已存在（版本检查失败）"}
+        return {"status": "ok", "message": f"{skill_name} 已存在"}
+
+    # 目录不存在 → 自动从 GitHub 克隆
+    clone_url = f"https://github.com/{repo}.git"
+    logger.info(f"检测到 {skill_name} 未安装，正在从 GitHub 自动克隆: {clone_url}")
+
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "clone", "--depth", "1", "--branch", branch, clone_url, skill_dir],
+            capture_output=True, text=True, timeout=120,
+            cwd=os.path.join(project_root, "skills"),
+        )
+        if result.returncode != 0:
+            err = result.stderr.strip()[:300]
+            logger.warning(f"自动克隆 {skill_name} 失败: {err}")
+            return {
+                "status": "failed",
+                "message": f"克隆失败，请手动执行: git clone {clone_url} skills/{skill_name}",
+            }
+
+        # 克隆成功后写入 local_commit 到 skill-sync.yml
+        _update_local_commit_after_clone(skill_dir, repo, branch)
+        logger.info(f"{skill_name} 自动克隆成功: {skill_dir}")
+        return {
+            "status": "cloned",
+            "message": f"{skill_name} 已从 {repo} 自动克隆到 skills/{skill_name}",
+        }
+    except FileNotFoundError:
+        logger.debug("git 命令不可用，跳过自动克隆")
+        return {
+            "status": "failed",
+            "message": f"git 不可用，请手动克隆: git clone {clone_url} skills/{skill_name}",
+        }
+    except Exception as e:
+        logger.debug(f"自动克隆异常: {e}")
+        return {
+            "status": "failed",
+            "message": f"自动克隆失败，请手动执行: git clone {clone_url} skills/{skill_name}",
+        }
+
+
+def _update_local_commit_after_clone(skill_dir: str, repo: str, branch: str) -> None:
+    """克隆成功后，更新 skill-sync.yml 的 local_commit 为当前 HEAD SHA。"""
+    meta_path = os.path.join(skill_dir, "skill-sync.yml")
+    if not os.path.exists(meta_path):
+        return
+    remote = _check_remote_latest(repo, branch)
+    if not remote:
+        return
+    sha, date = remote
+    try:
+        if yaml is None:
+            return
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = yaml.safe_load(f) or {}
+        meta["local_commit"] = sha
+        meta["local_commit_date"] = date
+        meta["last_check"] = datetime.now(timezone.utc).isoformat()
+        with open(meta_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(meta, f, allow_unicode=True, sort_keys=False)
+    except Exception as e:
+        logger.debug(f"写入 local_commit 失败: {e}")
 
 
 # ============================================================================

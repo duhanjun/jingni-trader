@@ -128,8 +128,14 @@ class MasterEngine:
         # 本调用只检查、不修改任何文件（详见 scripts/skill_sync.py）
         # 失败/网络异常/24h 内已检查 均静默跳过，不阻断主流程（用户无感）
         try:
-            from scripts.skill_sync import sync_all
-            sync_all(os.path.dirname(os.path.abspath(__file__)))
+            from scripts.skill_sync import sync_all, ensure_skill
+            project_root = os.path.dirname(os.path.abspath(__file__))
+            sync_all(project_root)
+
+            # 自动部署 jingni-datafeed：若 skills/jingni-datafeed/ 不存在则从 GitHub 克隆
+            # 这是 greenfield 操作（从零创建），无用户数据风险
+            # 已存在时退化为正常的版本检查（只检测不修改）
+            ensure_skill(project_root, "jingni-datafeed")
         except Exception as e:
             logger.debug(f"skill 版本检查跳过: {e}")
 
