@@ -34,3 +34,7 @@ workspace/
 # CodeBuddy IDE 自动生成的 AI 上下文文档（非运行代码，不纳入版本库）
 CODEBUDDY.md
 
+# jingni-datafeed 作为独立 GitHub 仓库管理（duhanjun/jingni-datafeed）
+# 不在 jingni-trader 仓库中重复跟踪，保持两个仓库完全独立
+skills/jingni-datafeed/
+

@@ -124,6 +124,15 @@ class MasterEngine:
         self._loaded_skills: Dict[str, Any] = {}
         self.archiver: Optional[RunArchiver] = None
 
+        # 版本检查：每次实例化时检查 GitHub 是否有新版本，落后则输出提示
+        # 本调用只检查、不修改任何文件（详见 scripts/skill_sync.py）
+        # 失败/网络异常/24h 内已检查 均静默跳过，不阻断主流程（用户无感）
+        try:
+            from scripts.skill_sync import sync_all
+            sync_all(os.path.dirname(os.path.abspath(__file__)))
+        except Exception as e:
+            logger.debug(f"skill 版本检查跳过: {e}")
+
     def parse_intent(self, user_input: str) -> Context:
         """解析用户自然语言，提取任务参数，生成 Context"""
         ctx = Context(
@@ -173,7 +182,21 @@ class MasterEngine:
             ctx.start_date = "2019-01-01"
             ctx.end_date = "2024-12-31"
 
-        logger.info(f"意图解析完成: 目标阶段={target_stages}, 股票池={ctx.stock_pool or '全市场'}")
+        # JINGNI_URL gate: 若配置了惊泥因子库凭证且用户明确要求从因子库取数，
+        # 则在 metadata 中标记 factor_source=jingni，factor-engine 据此走 jingni-datafeed 路径。
+        jingni_configured = bool(os.environ.get("JINGNI_URL")) and bool(os.environ.get("JINGNI_TOKEN"))
+        jingni_keywords = ["jingni", "惊泥", "因子库", "factor_store", "factor-store", "已沉淀"]
+        wants_jingni = any(kw in input_lower for kw in jingni_keywords)
+        if jingni_configured and wants_jingni and "FACTOR" in target_stages:
+            ctx.metadata["factor_source"] = "jingni"
+            logger.info("检测到惊泥因子库配置且用户明确要求从因子库取数 → FACTOR 阶段将走 jingni-datafeed 路径")
+        elif jingni_configured and "FACTOR" in target_stages:
+            # 配置就绪但未明确要求 → 默认仍走本地计算路径，factor-engine 内部按需自行 fallback
+            ctx.metadata["factor_source"] = "auto"
+        else:
+            ctx.metadata["factor_source"] = "local"
+
+        logger.info(f"意图解析完成: 目标阶段={target_stages}, 股票池={ctx.stock_pool or '全市场'}, factor_source={ctx.metadata.get('factor_source')}")
         self.ctx = ctx
         return ctx
 

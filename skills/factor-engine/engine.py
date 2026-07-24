@@ -408,6 +408,58 @@ class FactorEngine:
         return weights
 
 
+def _try_load_factor_from_datafeed(ctx) -> Optional[pd.DataFrame]:
+    """尝试从jingni-datafeed(惊泥因子库)加载已沉淀的因子数据。
+
+    返回 None 表示未启用或取数失败，调用方应回退到本地计算路径。
+    """
+    factor_source = ctx.metadata.get("factor_source", "local")
+    if factor_source == "local":
+        return None
+
+    if not (os.environ.get("JINGNI_URL") and os.environ.get("JINGNI_TOKEN")):
+        return None
+
+    try:
+        datafeed_scripts = os.path.normpath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "..", "jingni-datafeed", "scripts"
+        ))
+        if datafeed_scripts not in sys.path:
+            sys.path.insert(0, datafeed_scripts)
+
+        from jingni_client import JingniClient
+        from config import JingniConfig
+
+        client = JingniClient(JingniConfig.from_env())
+        uid = os.environ.get("JINGNI_DEFAULT_DATASOURCE_UID", "factor-store")
+
+        start = (ctx.start_date or "").replace("-", "")
+        end = (ctx.end_date or "").replace("-", "")
+        sql = (
+            "SELECT ts_code AS code, trade_date AS date, factor_name, factor_value "
+            "FROM factor_daily "
+            f"WHERE trade_date BETWEEN '{start}' AND '{end}'"
+        )
+        if ctx.stock_pool:
+            codes = ",".join(f"'{c}'" for c in ctx.stock_pool)
+            sql += f" AND ts_code IN ({codes})"
+
+        result = client.query_sql(uid=uid, raw_sql=sql, format="table")
+        rows = result.to_table()
+        if not rows:
+            return None
+
+        df = pd.DataFrame(rows)
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df["factor_value"] = pd.to_numeric(df["factor_value"], errors="coerce")
+        logger.info(f"从惊泥因子库加载 {len(df)} 行因子数据")
+        return df
+    except Exception as e:
+        logger.warning(f"从jingni-datafeed取因子数据失败，将回退到本地计算: {e}")
+        return None
+
+
 def run(ctx) -> Dict[str, Any]:
     """
     a-share-factor-engine 的 run 函数
@@ -444,6 +496,26 @@ def run(ctx) -> Dict[str, Any]:
                 "error": ""
             }
 
+        # 优先尝试从惊泥因子库取数（factor_source=jingni/auto 时）
+        datafeed_df = _try_load_factor_from_datafeed(ctx)
+
+        if datafeed_df is not None:
+            # 走 jingni-datafeed 路径
+            os.makedirs(FACTOR_DIR, exist_ok=True)
+            output_path = os.path.join(FACTOR_DIR, "factor_data.parquet")
+            datafeed_df.to_parquet(output_path, index=False)
+            return {
+                "success": True,
+                "artifact_path": output_path,
+                "metadata": {
+                    "factor_source": "jingni",
+                    "rows": len(datafeed_df),
+                    "source": "jingni-datafeed",
+                },
+                "error": ""
+            }
+
+        # 回退到本地计算路径
         df = pd.read_parquet(data_path)
         if df.empty:
             return {"success": False, "artifact_path": "", "metadata": {}, "error": "数据为空"}

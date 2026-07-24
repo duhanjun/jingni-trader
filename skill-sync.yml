@@ -1,0 +1,14 @@
+repo: duhanjun/jingni-trader
+branch: main
+local_commit: ''
+local_commit_date: ''
+last_check: '2026-07-24T07:23:31.832052+00:00'
+update_policy: auto
+check_interval_hours: 24
+protected_paths:
+- workspace/
+- .env
+- skills/jingni-datafeed
+- logs/
+- .pytest_cache/
+- __pycache__/
