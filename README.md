@@ -71,8 +71,19 @@ python3 engine.py -i "优化当前组合，最大回撤控制在15%以内"
 │   ├── execution-monitor-engine/ # 执行监控引擎
 │   └── reports-engine/         # 报告生成引擎
 ├── references/                  # 参考文档
-├── tests/                        # 集成测试
-│   └── test_integration_e2e.py
+├── tests/                        # 测试套件（按子 Skill 边界组织）
+│   ├── conftest.py              # 全局 fixture 与 sys.path 配置
+│   ├── pytest.ini               # 标记配置（contract/unit/integration）
+│   ├── fixtures/                # 共享合成数据与构造器
+│   ├── master/                  # 主调度器测试
+│   ├── data_engine/             # 各子 Skill 单元/契约测试
+│   ├── factor_engine/
+│   ├── strategy_model_engine/
+│   ├── backtest_engine/
+│   ├── portfolio_risk_engine/
+│   ├── execution_monitor_engine/
+│   ├── reports_engine/
+│   └── integration/             # 跨 Skill 全链路集成测试
 └── README.md
 ```
 

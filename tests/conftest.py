@@ -1,23 +1,35 @@
-"""pytest 统一路径处理与依赖 mock。
+"""pytest 全局配置与共享 fixture。
 
-将项目根目录加入 sys.path，使 tests/ 下的测试脚本能直接
-`import engine`（主调度器）或通过相对路径解析 `scripts` 包。
+本文件位于 tests/ 根目录，pytest 启动时会自动加载。
 
-同时 mock 掉 factor-engine 依赖的重量级第三方库（sklearn/talib/pandas_ta）。
+职责：
+1. 把项目根加入 sys.path，使 `import engine` / `from scripts.*` 可解析
+2. 把 jingni-datafeed scripts 目录加入 sys.path（JingniClient 等模块依赖）
+3. 把 tests/fixtures/ 目录加入 sys.path，使各子目录测试可 `import synthetic_data` 等
+4. 在每个测试前后保存/恢复 sys.modules['scripts'] 缓存，防止子技能切换 scripts 包时污染
+5. mock 掉重量级第三方依赖（sklearn 子模块 / talib / pandas_ta），使测试无需真实安装
+6. 显式加载 factor-engine/engine.py 为 `factor_engine_engine` 模块，避免与主调度器 engine.py 同名冲突
 
-factor-engine/engine.py 与主调度器 engine.py 同名且都依赖 `scripts.config`，
-为避免 import 冲突，用 importlib 显式加载 factor-engine/engine.py 为
-`factor_engine_engine` 模块。加载时临时让 factor-engine 的 scripts 包接管，
-加载完后恢复原始 scripts 缓存，使后续主调度器的 import 不受影响。
-
-关键隔离：MasterEngine.execute_stage 会在运行期把 sys.modules['scripts']
-切换为各子技能的 scripts 包（如 factor-engine/reports-engine），导致
-后续 `from scripts.context import Context` 解析到错误的包。下面通过 autouse
-fixture 在每个测试前后保存/恢复 scripts 相关缓存，杜绝测试间污染。
+目录结构约定（按子 Skill 边界组织）：
+    tests/
+    ├── conftest.py            ← 本文件（全局）
+    ├── pytest.ini             ← 标记配置
+    ├── fixtures/              ← 共享测试数据与构造器
+    │   ├── synthetic_data.py
+    │   ├── mock_datafeed.py
+    │   └── sample_contexts.py
+    ├── master/                ← 主调度器测试
+    ├── data_engine/
+    ├── factor_engine/
+    ├── strategy_model_engine/
+    ├── backtest_engine/
+    ├── portfolio_risk_engine/
+    ├── execution_monitor_engine/
+    ├── reports_engine/
+    └── integration/          ← 跨 skill 全链路
 """
 import os
 import sys
-import copy
 import importlib.util
 from unittest import mock
 
@@ -31,6 +43,11 @@ if ROOT not in sys.path:
 DATAFEED_SCRIPTS = os.path.join(ROOT, "skills", "jingni-datafeed", "scripts")
 if DATAFEED_SCRIPTS not in sys.path:
     sys.path.insert(0, DATAFEED_SCRIPTS)
+
+# tests/fixtures/ 目录加入 sys.path，使各子目录测试可 `import synthetic_data` 等
+FIXTURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+if FIXTURES_DIR not in sys.path:
+    sys.path.insert(0, FIXTURES_DIR)
 
 # 主调度器的 scripts 目录，用于在每个测试前重置 sys.modules['scripts']
 MASTER_SCRIPTS_DIR = os.path.join(ROOT, "scripts")
@@ -84,7 +101,11 @@ def _isolate_scripts_module():
                 sys.modules[k] = v
 
 # Mock 重量级第三方依赖，使 factor-engine.engine 可在无 sklearn/talib 环境下 import
-for _mod_name in ("sklearn", "sklearn.linear_model", "talib", "pandas_ta"):
+# strategy-model-engine 顶层有 `from sklearn.ensemble import ...`，需拆成多个子模块
+for _mod_name in (
+    "sklearn", "sklearn.linear_model", "sklearn.ensemble",
+    "sklearn.model_selection", "talib", "pandas_ta",
+):
     if _mod_name not in sys.modules:
         sys.modules[_mod_name] = mock.MagicMock()
 

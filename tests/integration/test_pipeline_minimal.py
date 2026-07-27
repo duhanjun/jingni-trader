@@ -1,35 +1,25 @@
-"""
-jingni-trader 端到端集成测试（GAP-5）
+"""最小回测链路端到端测试（DATA → FACTOR → BACKTEST → REPORT）。
 
-打通 MasterEngine.run_pipeline 全链路，断言 DATA → FACTOR → BACKTEST → REPORT
-四个阶段均产出约定产物（复用 engine.EXPECTED_ARTIFACTS 思路）。
+来源：原 test_integration_e2e.py（1 用例）。
+
+覆盖：
+- MasterEngine.run_pipeline 全链路打通 4 个阶段
+- 4 个约定产物文件在磁盘上存在
+- Windows GBK 控制台不因日志编码崩溃
 
 设计要点：
-- 不硬编码 /workspace 绝对路径；以仓库根（本文件所在 tests/ 的父目录）为 ROOT。
-- 使用临时 QUANT_WORK_DIR，避免污染真实归档目录。
-- 开启 ALLOW_SYNTHETIC_FALLBACK=true，使数据源全失败时仍能以合成数据跑完流程，
-  验证整条管道在"无外部依赖"条件下的可达成性（与 test_engine_v3 的降级链验证互补）。
-- Windows GBK 控制台下统一用 utf-8 输出，避免非 ASCII 日志触发 UnicodeEncodeError。
-- 仅触发 DATA/FACTOR/BACKTEST/REPORT 四个阶段（意图不含 模型/组合/实盘 关键词），
-  契合回测类需求的最小链路。
+- 不依赖任何外部数据源/网络，注入合成 OHLCV 数据
+- 使用临时 QUANT_WORK_DIR，避免污染真实归档目录
+- 开启 ALLOW_SYNTHETIC_FALLBACK=true，验证无外部依赖时仍能跑完整个管道
 """
-
 import os
 import sys
 import tempfile
 import shutil
 
-# 仓库根（tests/ 的父目录），保证 `from scripts.xxx` 与 `import engine` 可解析
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
+import pytest
 
-# Windows 控制台默认 GBK，无法编码非 ASCII 日志字符；统一用 utf-8 输出（GAP-1 同源修复）
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 # 测试前后环境清理（避免影响其它测试 / 真实运行）
