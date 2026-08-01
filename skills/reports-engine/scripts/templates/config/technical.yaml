@@ -1,0 +1,59 @@
+# 技术分析报告模板
+# 固定章节：行情数据、深度解读、风险提示
+# 因子组合：用户可自定义，每个分组渲染为一个章节
+template_id: technical
+template_name: 技术分析报告
+analyst_type: technical
+
+fixed_sections:
+  market_data:
+    kline_indicators: [vol, macd, rsi, kdj, boll, wr, cci, obv]
+    ma_periods: [5, 10, 20, 60]
+    show_support_resistance: false
+  deep_analysis:
+    analyst_type: technical
+  risk_warning:
+    source_factors: [volatility_20d, volume_ratio, money_flow_20d]
+
+factor_groups:
+  - id: multi_timeframe
+    title: 多周期趋势分析
+    factors: [ma5, ma10, ma20, ma60, macd_dif, macd_dea, macd_hist]
+    render_as: indicator_panel
+    analysis_hint: 日/周/月线趋势共振与背离
+
+  - id: momentum_indicators
+    title: 动量与震荡指标
+    factors: [rsi_14, kdj_k, kdj_d, kdj_j, wr, cci]
+    render_as: indicator_panel
+    analysis_hint: 超买超卖与金叉死叉
+
+  - id: volume_price
+    title: 量价关系
+    factors: [volume_20d, volume_ratio, turnover_20d, turnover_change, obv]
+    render_as: metric_grid
+    analysis_hint: 量价配合度
+
+  - id: bollinger
+    title: 布林带分析
+    factors: [boll_ub, boll_mid, boll_lb]
+    render_as: band_chart
+    analysis_hint: 通道宽度与价格位置
+
+  - id: capital_flow
+    title: 资金面分析
+    factors: [main_net_inflow, main_net_inflow_5d, north_net_inflow]
+    render_as: flow_table
+    analysis_hint: 主力与北向资金动向
+
+  - id: patterns
+    title: K线形态识别
+    factors: [cdll_pattern_count, cdll_dominant_signal]
+    render_as: pattern_list
+    analysis_hint: 近期K线形态信号
+
+  - id: dragon_tiger
+    title: 龙虎榜
+    factors: [lhb_count_5d, lhb_net_buy]
+    render_as: event_list
+    analysis_hint: 机构席位与营业部动向

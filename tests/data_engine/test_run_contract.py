@@ -205,6 +205,77 @@ class TestDataEngineRunContract:
         for field in ("success", "artifact_path", "metadata", "error"):
             assert field in result, f"result 缺少必需字段: {field}"
 
+    def test_ctx_data_sources_overrides_env_var(self, tmp_path, monkeypatch):
+        """ctx.data_sources 应覆盖环境变量 DATA_BACKENDS 的优先级。
+
+        方案 D 核心契约：
+        - ctx.data_sources 非空 → DataEngine 用 ctx 指定的链
+        - ctx.data_sources 为 None → DataEngine 走环境变量 DATA_BACKENDS
+        """
+        monkeypatch.setenv("QUANT_DATA_DIR", str(tmp_path))
+        # 环境变量指定的链
+        monkeypatch.setenv("DATA_BACKENDS", "baostock,akshare,websearch")
+
+        data_engine_mod = _load_data_engine_module()
+        external_data = _make_synthetic_external_data()
+
+        # ── 场景 1: ctx.data_sources 非空 → 用 ctx 指定的链
+        ctx = _make_ctx(external_data=external_data)
+        ctx.data_sources = ["websearch", "tushare"]  # 自定义优先级
+
+        captured = {}
+
+        def fake_init(self, *args, **kwargs):
+            captured["data_sources"] = kwargs.get("data_sources")
+            self.web_search_fn = kwargs.get("web_search_fn")
+            self.data_sources = kwargs.get("data_sources") or []
+            self.backend = "external"
+            self.is_synthetic = False
+
+        def fake_fetch(self, *args, **kwargs):
+            return external_data["daily"]
+
+        def fake_save(self, df, path):
+            df.to_parquet(path, index=False)
+
+        with mock.patch.object(data_engine_mod, "DataEngine") as MockEngine:
+            MockEngine.side_effect = lambda *a, **kw: type(
+                "E", (), {
+                    "__init__": fake_init,
+                    "fetch_and_clean": fake_fetch,
+                    "save_data": fake_save,
+                    "backend": "external",
+                    "is_synthetic": False,
+                    "data_sources": kw.get("data_sources"),
+                }
+            )(*a, **kw)
+            data_engine_mod.run(ctx)
+
+        assert captured["data_sources"] == ["websearch", "tushare"], \
+            "ctx.data_sources 非空时应优先使用 ctx 指定的链"
+
+        # ── 场景 2: ctx.data_sources 为 None → 走环境变量 DATA_BACKENDS
+        ctx2 = _make_ctx(external_data=external_data)
+        ctx2.data_sources = None
+        captured.clear()
+
+        with mock.patch.object(data_engine_mod, "DataEngine") as MockEngine2:
+            MockEngine2.side_effect = lambda *a, **kw: type(
+                "E", (), {
+                    "__init__": fake_init,
+                    "fetch_and_clean": fake_fetch,
+                    "save_data": fake_save,
+                    "backend": "external",
+                    "is_synthetic": False,
+                    "data_sources": kw.get("data_sources"),
+                }
+            )(*a, **kw)
+            data_engine_mod.run(ctx2)
+
+        # data_sources=None → DataEngine.__init__ 内部 fallback 到 DEFAULT_DATA_SOURCES（环境变量解析结果）
+        assert captured["data_sources"] is None, \
+            "ctx.data_sources=None 时 run() 应传 None 给 DataEngine，由其内部走环境变量降级"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

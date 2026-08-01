@@ -3,7 +3,8 @@
 """
 import os
 
-REPORT_DIR = os.environ.get("REPORT_DIR", "./workspace/reports")
+_WORK_DIR = os.environ.get("QUANT_WORK_DIR", "./workspace")
+REPORT_DIR = os.environ.get("REPORT_DIR", os.path.join(_WORK_DIR, "reports"))
 REPORT_TITLE = os.environ.get("REPORT_TITLE", "A股量化策略绩效报告")
 REPORT_FORMAT = os.environ.get("REPORT_FORMAT", "html")
 INDUSTRY_STANDARD = os.environ.get("INDUSTRY_STANDARD", "sw")

@@ -163,16 +163,170 @@ class TestParseIntentKeywords:
         assert ctx.stock_pool == []
 
     def test_date_range_3y(self):
-        """'近3年' → 时间范围正确"""
+        """'近3年' → 时间范围为从今天起往前3年"""
+        from datetime import date as _date
         ctx = self._make_engine().parse_intent("近3年回测")
-        assert ctx.start_date == "2021-01-01"
-        assert ctx.end_date == "2024-12-31"
+        today = _date.today()
+        expected_start = today.replace(year=today.year - 3).strftime("%Y-%m-%d")
+        assert ctx.start_date == expected_start
+        assert ctx.end_date == today.strftime("%Y-%m-%d")
 
     def test_date_range_5y(self):
-        """'近5年' → 时间范围正确"""
+        """'近5年' → 时间范围为从今天起往前5年"""
+        from datetime import date as _date
         ctx = self._make_engine().parse_intent("近5年回测")
-        assert ctx.start_date == "2019-01-01"
-        assert ctx.end_date == "2024-12-31"
+        today = _date.today()
+        expected_start = today.replace(year=today.year - 5).strftime("%Y-%m-%d")
+        assert ctx.start_date == expected_start
+        assert ctx.end_date == today.strftime("%Y-%m-%d")
+
+    def test_date_range_default_5y(self):
+        """未指定时间 → 默认取最近5年"""
+        from datetime import date as _date
+        ctx = self._make_engine().parse_intent("回测")
+        today = _date.today()
+        expected_start = today.replace(year=today.year - 5).strftime("%Y-%m-%d")
+        assert ctx.start_date == expected_start
+        assert ctx.end_date == today.strftime("%Y-%m-%d")
+
+
+# ============================================================================
+# Part 3: 数据源优先级意图解析（方案 D）
+# ============================================================================
+
+class TestParseDataSourcesIntent:
+    """验证 MasterEngine._parse_data_sources_intent 与 parse_intent 的数据源优先级解析。
+
+    方案 D 契约：
+    - 用户明确指定数据源 → ctx.data_sources 非空，覆盖环境变量 DATA_BACKENDS
+    - 未指定 → ctx.data_sources 保持 None，由 data-engine 走环境变量 → 默认值
+    """
+
+    def _make_engine(self):
+        import engine
+        return engine.MasterEngine()
+
+    def test_single_source_wind(self):
+        """'用 wind 取数据' → ['wind', ...默认链兜底(不含 tushare)]"""
+        ctx = self._make_engine().parse_intent("用 wind 取数据")
+        assert ctx.data_sources is not None
+        assert ctx.data_sources[0] == "wind"
+        # 用户只指定了 wind，后面应自动追加默认免费降级链（baostock/akshare/websearch）
+        assert "baostock" in ctx.data_sources
+        assert "websearch" in ctx.data_sources
+        # tushare 是 opt-in 源，不在默认兜底链里，用户没明确说就不应出现
+        assert "tushare" not in ctx.data_sources
+
+    def test_single_source_ifind(self):
+        """'优先用 ifind' → ['ifind', ...默认链兜底]"""
+        ctx = self._make_engine().parse_intent("优先用 ifind")
+        assert ctx.data_sources is not None
+        assert ctx.data_sources[0] == "ifind"
+
+    def test_chinese_name_wind(self):
+        """'用万得取数据' → 万得 → wind"""
+        ctx = self._make_engine().parse_intent("用万得取数据")
+        assert ctx.data_sources is not None
+        assert ctx.data_sources[0] == "wind"
+
+    def test_chinese_name_ifind(self):
+        """'用同花顺取数据' → 同花顺 → ifind"""
+        ctx = self._make_engine().parse_intent("用同花顺取数据")
+        assert ctx.data_sources is not None
+        assert ctx.data_sources[0] == "ifind"
+
+    def test_multiple_sources_in_order(self):
+        """'优先用 ifind，失败用 tushare' → 顺序为 ['ifind', 'tushare', ...]"""
+        ctx = self._make_engine().parse_intent("优先用 ifind，失败用 tushare")
+        assert ctx.data_sources is not None
+        # ifind 在 tushare 之前出现
+        assert ctx.data_sources.index("ifind") < ctx.data_sources.index("tushare")
+        assert ctx.data_sources[0] == "ifind"
+
+    def test_multiple_sources_no_dup(self):
+        """'用 baostock 和 akshare' → 去重后顺序为 ['baostock', 'akshare', ...]"""
+        ctx = self._make_engine().parse_intent("用 baostock 和 akshare")
+        assert ctx.data_sources is not None
+        assert ctx.data_sources.count("baostock") == 1
+        assert ctx.data_sources.count("akshare") == 1
+        assert ctx.data_sources.index("baostock") < ctx.data_sources.index("akshare")
+
+    def test_no_verb_no_match(self):
+        """'今天天气真好' → 无动作动词 → None"""
+        ctx = self._make_engine().parse_intent("今天天气真好")
+        assert ctx.data_sources is None
+
+    def test_verb_but_no_source_name(self):
+        """'用 momentum 因子做回测' → 有'用'但无数据源名 → None"""
+        ctx = self._make_engine().parse_intent("用 momentum 因子做回测")
+        assert ctx.data_sources is None
+
+    def test_source_name_but_no_verb(self):
+        """'wind 数据源说明' → 有数据源名但无动作动词 → None"""
+        ctx = self._make_engine().parse_intent("wind 数据源说明")
+        assert ctx.data_sources is None
+
+    def test_default_chain_unchanged_when_no_intent(self):
+        """未指定数据源 → ctx.data_sources 保持 None（由 data-engine 走环境变量/默认值）"""
+        ctx = self._make_engine().parse_intent("用近3年因子做回测")
+        assert ctx.data_sources is None
+
+    def test_english_verb_use(self):
+        """'use wind for data' → 英文动词 use 也能触发"""
+        ctx = self._make_engine().parse_intent("use wind for data")
+        assert ctx.data_sources is not None
+        assert ctx.data_sources[0] == "wind"
+
+    def test_switch_verb(self):
+        """'切换到 baostock' → 切换动词触发"""
+        ctx = self._make_engine().parse_intent("切换到 baostock")
+        assert ctx.data_sources is not None
+        assert ctx.data_sources[0] == "baostock"
+
+    def test_tushare_opt_in_explicit(self):
+        """'用 tushare 取数据' → tushare 作为 opt-in 源被用户明确启用,进入链首"""
+        ctx = self._make_engine().parse_intent("用 tushare 取数据")
+        assert ctx.data_sources is not None
+        assert ctx.data_sources[0] == "tushare"
+        # tushare 是 opt-in 源,只有用户明确说才进入链
+        # 默认兜底链 baostock/akshare/websearch 仍应追加在后面
+        assert "baostock" in ctx.data_sources
+
+    def test_default_chain_excludes_opt_in_sources(self):
+        """未指定数据源时 ctx.data_sources 为 None,由 data-engine 走默认链(不含 tushare)"""
+        ctx = self._make_engine().parse_intent("用近3年因子做回测")
+        assert ctx.data_sources is None
+        # 验证 data-engine 的默认链确实不含 tushare
+        import sys
+        import importlib.util as ilu
+        saved_scripts = {k: v for k, v in sys.modules.items() if k == "scripts" or k.startswith("scripts.")}
+        for k in list(sys.modules.keys()):
+            if k == "scripts" or k.startswith("scripts."):
+                sys.modules.pop(k, None)
+        scripts_dir = r"d:\codebuddy\jingni-trader\skills\data-engine\scripts"
+        init_py = scripts_dir + r"\__init__.py"
+        try:
+            spec = ilu.spec_from_file_location("scripts", init_py, submodule_search_locations=[scripts_dir])
+            pkg = ilu.module_from_spec(spec)
+            sys.modules["scripts"] = pkg
+            spec.loader.exec_module(pkg)
+            from scripts.config import DEFAULT_DATA_SOURCES, PAID_OR_SPECIAL_BACKENDS
+            assert "tushare" not in DEFAULT_DATA_SOURCES, "tushare 不应在默认链里"
+            assert "tushare" in PAID_OR_SPECIAL_BACKENDS, "tushare 应在 opt-in 源列表里"
+        finally:
+            for k in list(sys.modules.keys()):
+                if k == "scripts" or k.startswith("scripts."):
+                    sys.modules.pop(k, None)
+            for k, v in saved_scripts.items():
+                sys.modules[k] = v
+
+    def test_does_not_break_target_stages(self):
+        """数据源意图解析不影响 target_stages 的正常解析"""
+        ctx = self._make_engine().parse_intent("用 wind 取数据做近3年回测")
+        assert ctx.data_sources is not None
+        assert ctx.data_sources[0] == "wind"
+        assert "DATA" in ctx.target_stages
+        assert "BACKTEST" in ctx.target_stages
 
 
 if __name__ == "__main__":

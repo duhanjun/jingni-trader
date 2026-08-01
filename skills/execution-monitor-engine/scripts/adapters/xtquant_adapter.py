@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Any
 import pandas as pd
 
 from ..base.base_executor import BaseExecutor
-from ..config import XTP_ACCOUNT
+from ..config import XTQUANT_ACCOUNT, XTQUANT_PATH
 
 
 class XtQuantExecutor(BaseExecutor):
@@ -16,8 +16,14 @@ class XtQuantExecutor(BaseExecutor):
     def __init__(self):
         self._logger = logging.getLogger(self.__class__.__name__)
         self._connected = False
+        self._available = False  # 是否可用(已连接且订阅成功)
         self._xt_trader = None
         self._acc = None
+
+    @property
+    def available(self) -> bool:
+        """执行器是否可用(已连接)"""
+        return self._available
 
     def connect(self, path: str = "", session_id: int = 0) -> bool:
         """
@@ -26,18 +32,29 @@ class XtQuantExecutor(BaseExecutor):
         参数:
             path: miniQMT安装目录下的userdata_mini路径
             session_id: 会话ID，默认0
+
+        返回:
+            连接成功返回True,失败返回False(不抛异常)
         """
+        # 使用传入 path 或 config XTQUANT_PATH
+        path = path or XTQUANT_PATH
         try:
             from xtquant import xtdata
             xtdata.connect()
         except ImportError:
-            raise ImportError("xtquant 未安装，请先安装迅投miniQMT SDK")
+            self._logger.error("xtquant 未安装")
+            self._available = False
+            return False
+        except Exception as e:
+            self._logger.error(f"xtdata 连接失败: {e}")
+            self._available = False
+            return False
 
         try:
             from xtquant.xttrader import XtQuantTrader
             from xtquant.xttype import StockAccount
             self._xt_trader = XtQuantTrader(path, session_id)
-            account_id = XTP_ACCOUNT or ""
+            account_id = XTQUANT_ACCOUNT or ""
             self._acc = StockAccount(account_id, "STOCK")
             callback = _XtQuantCallback(self._logger)
             self._xt_trader.register_callback(callback)
@@ -45,34 +62,39 @@ class XtQuantExecutor(BaseExecutor):
             connect_result = self._xt_trader.connect()
             if connect_result != 0:
                 self._logger.error(f"连接交易终端失败，错误码: {connect_result}")
+                self._available = False
                 return False
             subscribe_result = self._xt_trader.subscribe(self._acc)
             if subscribe_result != 0:
                 self._logger.error(f"订阅账户失败，错误码: {subscribe_result}")
+                self._available = False
                 return False
             self._connected = True
+            self._available = True
             self._logger.info("miniQMT交易终端连接成功")
             return True
         except Exception as e:
             self._logger.error(f"连接miniQMT失败: {e}")
+            self._available = False
             return False
 
-    def _ensure_connected(self):
-        if not self._connected:
-            raise ConnectionError("miniQMT 未连接，请先调用 connect()")
+    def _ensure_connected(self) -> bool:
+        """检查连接状态,返回bool不抛异常"""
+        return self._connected and self._available
 
     def query_account(self) -> Dict[str, Any]:
         """查询账户资产信息"""
-        self._ensure_connected()
+        if not self._ensure_connected():
+            return {}
         try:
             asset = self._xt_trader.query_stock_asset(self._acc)
             if asset is None:
                 return {}
             return {
                 "total_assets": float(getattr(asset, "total_asset", 0)),
-                "available_cash": float(getattr(asset, "available_cash", 0)),
+                "available_cash": float(getattr(asset, "cash", 0)),
                 "market_value": float(getattr(asset, "market_value", 0)),
-                "frozen_cash": float(getattr(asset, "frozen", 0)),
+                "frozen_cash": float(getattr(asset, "frozen_cash", 0)),
                 "account_id": self._acc.account_id if self._acc else "",
             }
         except Exception as e:
@@ -98,9 +120,10 @@ class XtQuantExecutor(BaseExecutor):
             order_type: limit / market
 
         返回:
-            订单信息
+            订单信息字典(含 success 字段)
         """
-        self._ensure_connected()
+        if not self._ensure_connected():
+            return {"success": False, "error": "miniQMT 未连接"}
         try:
             from xtquant.xtconstant import STOCK_BUY, STOCK_SELL, FIX_PRICE, LATEST_PRICE
 
@@ -121,6 +144,7 @@ class XtQuantExecutor(BaseExecutor):
             )
 
             return {
+                "success": True,
                 "order_id": str(seq),
                 "code": code,
                 "side": side,
@@ -130,26 +154,29 @@ class XtQuantExecutor(BaseExecutor):
             }
         except Exception as e:
             self._logger.error(f"发送订单失败 {code} {side}: {e}")
-            return {"error": str(e), "code": code, "side": side}
+            return {"success": False, "error": str(e), "code": code, "side": side}
 
     def cancel_order(self, order_id: str) -> Dict[str, Any]:
         """撤单"""
-        self._ensure_connected()
+        if not self._ensure_connected():
+            return {"success": False, "error": "miniQMT 未连接", "order_id": order_id}
         try:
             seq = int(order_id)
             result = self._xt_trader.cancel_order_stock(self._acc, seq)
-            return {"order_id": order_id, "status": "cancelled" if result == 0 else "failed"}
+            return {"success": result == 0, "order_id": order_id,
+                    "status": "cancelled" if result == 0 else "failed"}
         except Exception as e:
             self._logger.error(f"撤单失败 {order_id}: {e}")
-            return {"order_id": order_id, "error": str(e)}
+            return {"success": False, "order_id": order_id, "error": str(e)}
 
     def query_positions(self) -> pd.DataFrame:
         """查询当前持仓"""
-        self._ensure_connected()
+        if not self._ensure_connected():
+            return pd.DataFrame(columns=["code", "volume", "available_volume", "avg_cost", "market_value"])
         try:
             positions = self._xt_trader.query_stock_positions(self._acc)
             if positions is None or len(positions) == 0:
-                return pd.DataFrame()
+                return pd.DataFrame(columns=["code", "volume", "available_volume", "avg_cost", "market_value"])
             data = []
             for pos in positions:
                 data.append({
@@ -158,12 +185,11 @@ class XtQuantExecutor(BaseExecutor):
                     "available_volume": pos.can_use_volume,
                     "avg_cost": pos.avg_price,
                     "market_value": pos.market_value,
-                    "profit_loss": pos.profit_amount,
                 })
             return pd.DataFrame(data)
         except Exception as e:
             self._logger.error(f"查询持仓失败: {e}")
-            return pd.DataFrame()
+            return pd.DataFrame(columns=["code", "volume", "available_volume", "avg_cost", "market_value"])
 
     def sync_positions(
         self,
@@ -180,7 +206,9 @@ class XtQuantExecutor(BaseExecutor):
         返回:
             需要执行的订单列表
         """
-        self._ensure_connected()
+        if not self._ensure_connected():
+            self._logger.warning("miniQMT 未连接,无法生成调仓订单")
+            return []
         orders = []
         try:
             account = self.query_account()
@@ -218,6 +246,7 @@ class XtQuantExecutor(BaseExecutor):
                     "volume": volume,
                     "price": price,
                     "target_weight": target_weight,
+                    "order_type": "limit",
                 })
 
             self._logger.info(f"生成 {len(orders)} 笔调仓订单")

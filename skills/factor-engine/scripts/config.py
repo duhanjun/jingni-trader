@@ -7,8 +7,9 @@ import os
 FACTOR_BACKEND = os.environ.get("FACTOR_BACKEND", "talib")
 # 可选: talib, pandas_ta
 
-# ── 因子存储目录 ──────────────────────────
-FACTOR_DIR = os.environ.get("FACTOR_DIR", "./workspace/factors")
+# ── 因子存储目录（优先读 QUANT_WORK_DIR 与主调度器对齐）──────────────
+_WORK_DIR = os.environ.get("QUANT_WORK_DIR", "./workspace")
+FACTOR_DIR = os.environ.get("FACTOR_DIR", os.path.join(_WORK_DIR, "factors"))
 
 # ── 因子分析参数 ──────────────────────────
 IC_TYPE = os.environ.get("IC_TYPE", "spearman")  # spearman / pearson

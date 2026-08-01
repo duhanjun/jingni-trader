@@ -21,11 +21,32 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 REPORTS_ENGINE_DIR = os.path.join(ROOT, "skills", "reports-engine")
 REPORTS_ENGINE_PATH = os.path.join(REPORTS_ENGINE_DIR, "engine.py")
 
+# 预加载主项目的 Context 类，避免后续 scripts 包切换导致找不到
+_CONTEXT_MODULE = None
+
+
+def _get_context_class():
+    """获取 Context 类（处理 scripts 包切换问题）"""
+    global _CONTEXT_MODULE
+    if _CONTEXT_MODULE is not None:
+        return _CONTEXT_MODULE
+
+    # 直接加载 context.py 避免 scripts 包名冲突
+    context_path = os.path.join(ROOT, "scripts", "context.py")
+    if os.path.exists(context_path):
+        spec = ilu.spec_from_file_location("jingni_context", context_path)
+        mod = ilu.module_from_spec(spec)
+        sys.modules["jingni_context"] = mod
+        spec.loader.exec_module(mod)
+        _CONTEXT_MODULE = mod.Context
+        return mod.Context
+
+    raise ImportError("无法加载 Context 类")
+
 
 def _load_reports_engine_module():
     """显式加载 reports-engine/engine.py 为独立模块。"""
-    saved = {k: sys.modules.get(k) for k in list(sys.modules.keys())
-             if k == "scripts" or k.startswith("scripts.")}
+    # 清理旧的 scripts 包，为 reports-engine 的 scripts 包腾出空间
     for key in list(sys.modules.keys()):
         if key == "scripts" or key.startswith("scripts."):
             sys.modules.pop(key, None)
@@ -45,24 +66,17 @@ def _load_reports_engine_module():
         if _m not in sys.modules:
             sys.modules[_m] = mock.MagicMock()
 
-    try:
-        spec = ilu.spec_from_file_location("reports_engine_engine", REPORTS_ENGINE_PATH)
-        mod = ilu.module_from_spec(spec)
-        sys.modules["reports_engine_engine"] = mod
-        spec.loader.exec_module(mod)
-        return mod
-    finally:
-        for key in list(sys.modules.keys()):
-            if key == "scripts" or key.startswith("scripts."):
-                sys.modules.pop(key, None)
-        for k, v in saved.items():
-            if v is not None:
-                sys.modules[k] = v
+    spec = ilu.spec_from_file_location("reports_engine_engine", REPORTS_ENGINE_PATH)
+    mod = ilu.module_from_spec(spec)
+    sys.modules["reports_engine_engine"] = mod
+    spec.loader.exec_module(mod)
+    # 不清理 scripts 包：reports-engine 的 run() 函数依赖 scripts.template_engine 等子模块
+    return mod
 
 
 def _make_ctx(stock_pool=None):
     """构造 reports-engine 标准输入 Context"""
-    from scripts.context import Context
+    Context = _get_context_class()
     return Context(
         task_id="test_report",
         stock_pool=stock_pool or ["000001.SZ", "600000.SH"],

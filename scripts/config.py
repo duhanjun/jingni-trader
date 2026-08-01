@@ -118,7 +118,7 @@ DATABASE_URL = os.environ.get("QUANT_DB_URL", f"sqlite:///{WORK_DIR}/quant.db")
 # ── API 密钥（只从环境变量读取）────────────
 TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN", "")
 GM_TOKEN = os.environ.get("GM_TOKEN", "")
-XTP_ACCOUNT = os.environ.get("XTP_ACCOUNT", "")
+XTQUANT_ACCOUNT = os.environ.get("XTQUANT_ACCOUNT", "")
 
 # ── 自动创建目录 ──────────────────────────
 for _dir in [WORK_DIR, DATA_DIR, FACTOR_DIR, MODEL_DIR,

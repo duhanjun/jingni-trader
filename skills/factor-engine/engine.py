@@ -6,6 +6,7 @@ import os
 import sys
 import logging
 import json
+import importlib
 from typing import List, Dict, Any, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -24,6 +25,7 @@ from scripts.config import (
 # 新增: 表达式引擎和扩展因子库
 from expression import FactorExpressionEngine as ExpressionEngine
 from factors import Alpha158FactorEngine
+from factors.factors_config import FACTOR_CATEGORIES
 
 logger = logging.getLogger("a-share-factor-engine")
 
@@ -374,10 +376,10 @@ class FactorEngine:
                 continue
             normalized[f"{factor}_rank"] = factor_df.groupby('date')[factor].transform(
                 lambda x: x.rank(pct=True)
-            )
+            ).fillna(0.5)  # NaN隔离：缺失因子的rank填充为中性值0.5，避免0权重×NaN污染整行
 
         rank_cols = [f"{f}_rank" for f in selected_factors if f"{f}_rank" in normalized.columns]
-        normalized['alpha_score'] = 0
+        normalized['alpha_score'] = 0.0
         for f, col in zip(selected_factors, rank_cols):
             w = weights.get(f, 0)
             normalized['alpha_score'] += w * normalized[col]
@@ -522,7 +524,67 @@ def run(ctx) -> Dict[str, Any]:
 
         engine = FactorEngine()
 
-        factor_df = engine.compute_a_share_factors(df)
+        # ── 按 FACTOR_CATEGORIES 配置调度各类因子模块 ──
+        # 每类因子独立计算，缺失依赖数据时自动跳过，互不影响
+        all_factor_dfs: List[pd.DataFrame] = []
+        computed_categories: List[str] = []
+        skipped_categories: List[str] = []
+
+        for category, cfg in FACTOR_CATEGORIES.items():
+            if not cfg.get("enabled", True):
+                continue
+
+            requires = cfg.get("requires", "price_data")
+            module_path = cfg.get("module", "")
+
+            # 检查依赖数据产物是否存在
+            if requires != "price_data":
+                dep_path = ctx.get_artifact(requires) if hasattr(ctx, 'get_artifact') else None
+                if not dep_path or not os.path.exists(dep_path):
+                    logger.warning(f"跳过 {category} 因子：缺少依赖数据 {requires}")
+                    skipped_categories.append(category)
+                    continue
+
+            # 调度因子计算
+            try:
+                if module_path == "engine.compute_a_share_factors":
+                    # 动量/量价因子：调用 FactorEngine 内置方法
+                    factor_df_part = engine.compute_a_share_factors(df)
+                else:
+                    # 其余类别：动态导入模块并调用 compute(price_data, ctx)
+                    mod = importlib.import_module(module_path)
+                    factor_df_part = mod.compute(df, ctx)
+
+                if factor_df_part is not None and not factor_df_part.empty:
+                    all_factor_dfs.append(factor_df_part)
+                    computed_categories.append(category)
+                    logger.info(f"因子类别 [{category}] 计算完成: {len(factor_df_part.columns) - 2} 个因子")
+                else:
+                    logger.warning(f"因子类别 [{category}] 返回空数据，已跳过")
+                    skipped_categories.append(category)
+            except Exception as e:
+                logger.warning(f"因子类别 [{category}] 计算失败，已跳过: {e}")
+                skipped_categories.append(category)
+
+        if not all_factor_dfs:
+            return {
+                "success": False,
+                "artifact_path": "",
+                "metadata": {},
+                "error": "所有因子类别计算失败或无数据"
+            }
+
+        # 合并所有因子列（按 code, date 对齐）
+        factor_df = all_factor_dfs[0]
+        for extra_df in all_factor_dfs[1:]:
+            merge_cols = [c for c in ['code', 'date'] if c in extra_df.columns]
+            factor_cols = [c for c in extra_df.columns if c not in merge_cols]
+            if factor_cols:
+                factor_df = factor_df.merge(
+                    extra_df[merge_cols + factor_cols],
+                    on=merge_cols,
+                    how='left'
+                )
 
         forward_returns = pd.DataFrame()
         forward_returns['code'] = df['code']
@@ -561,7 +623,9 @@ def run(ctx) -> Dict[str, Any]:
                 "removed_factors": corr_result['removed_factors'],
                 "ic_results": ic_results,
                 "correlation": {k: v for k, v in corr_result.items() if k != 'correlation_matrix'},
-                "fusion_method": "ic_weighted"
+                "fusion_method": "ic_weighted",
+                "computed_categories": computed_categories,
+                "skipped_categories": skipped_categories,
             },
             "error": ""
         }

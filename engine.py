@@ -116,6 +116,56 @@ EXPECTED_ARTIFACTS = {
 }
 
 
+# 个股分析意图关键词（触发分析报告路径：DATA → FACTOR → REPORT）
+ANALYSIS_KEYWORDS = {
+    "分析", "怎么样", "怎么看", "技术面", "基本面", "K线", "k线", "形态",
+    "诊股", "能买吗", "可以买吗", "支撑", "阻力", "压力位", "支撑位",
+    "MACD", "macd", "RSI", "rsi", "KDJ", "kdj", "布林", "均线",
+    "趋势", "涨跌", "估值", "PE", "pe", "PB", "pb", "ROE", "roe",
+    "财报", "盈利", "收入", "营收", "利润", "毛利率", "净利率",
+    "股息", "分红", "行业对比", "同行业",
+}
+
+# 量化交易关键词（触发完整管线：DATA → FACTOR → MODEL → BACKTEST → ...）
+QUANT_KEYWORDS = {
+    "回测", "因子", "策略", "模型", "组合", "实盘", "选股",
+    "backtest", "alpha", "ic", "夏普", "回撤", "仓位", "风控",
+}
+
+
+# ── 数据源优先级意图解析（方案 D：用户对话切换数据源）──────────────
+# 用户可通过自然语言指定数据源优先级，例如：
+#   "用 wind 取数据"              → ctx.data_sources = ["wind", "tushare", "baostock", "akshare", "websearch"]
+#   "优先用 ifind，失败用 tushare" → ctx.data_sources = ["ifind", "tushare", "baostock", "akshare", "websearch"]
+#   "用 baostock 作为首选源"       → ctx.data_sources = ["baostock", "tushare", "akshare", "websearch"]
+# 未匹配到数据源优先级意图时，ctx.data_sources 保持 None，由 data-engine 走环境变量/默认值。
+#
+# 触发关键词（必须同时命中"指定动作"和"数据源名称"才算明确意图，避免误触发）：
+DATA_SOURCE_TRIGGER_VERBS = {"用", "使用", "优先", "首选", "改用", "切换", "换", "from", "use", "using"}
+DATA_SOURCE_NAMES = {
+    "tushare":   "tushare",
+    "baostock":  "baostock",
+    "akshare":   "akshare",
+    "websearch": "websearch",
+    "xtquant":   "xtquant",
+    "gm":        "gm",
+    "tdxquant":  "tdxquant",
+    "wind":      "wind",
+    "ifind":     "ifind",
+    "万得":       "wind",
+    "wind终端":   "wind",
+    "同花顺":      "ifind",
+    "ifind终端":  "ifind",
+    "掘金":       "gm",
+    "通达信":      "tdxquant",
+    "迅投":       "xtquant",
+}
+
+# 默认免费降级链（用户只指定首选源时，自动追加在后面作为兜底）
+# 仅含真正免费、无需 token/账号的源；tushare/wind/ifind 等 opt-in 源不在此列
+_DEFAULT_FALLBACK_CHAIN = ["baostock", "akshare", "websearch"]
+
+
 class MasterEngine:
     """主调度引擎"""
 
@@ -123,6 +173,7 @@ class MasterEngine:
         self.ctx: Optional[Context] = None
         self._loaded_skills: Dict[str, Any] = {}
         self.archiver: Optional[RunArchiver] = None
+        self._force_refresh = os.environ.get("QUANT_FORCE_REFRESH", "").lower() in ("1", "true", "yes")
 
         # 版本检查：每次实例化时检查 GitHub 是否有新版本，落后则输出提示
         # 本调用只检查、不修改任何文件（详见 scripts/skill_sync.py）
@@ -139,6 +190,106 @@ class MasterEngine:
         except Exception as e:
             logger.debug(f"skill 版本检查跳过: {e}")
 
+    def _is_analysis_intent(self, user_intent: str) -> bool:
+        """判断是否为个股分析意图（生成分析报告，不走回测/模型管线）"""
+        if not user_intent:
+            return False
+        # If contains quant keywords, it's full pipeline path
+        has_quant = any(kw in user_intent for kw in QUANT_KEYWORDS)
+        has_analysis = any(kw in user_intent for kw in ANALYSIS_KEYWORDS)
+        # If both present, prefer quant (more specific)
+        if has_quant:
+            return False
+        return has_analysis
+
+    def _detect_report_template(self, user_input: str) -> str:
+        """从用户输入检测报告模板类型"""
+        text = user_input.lower()
+        tech_keywords = [
+            "技术面", "技术分析", "k线", "k 线", "趋势", "支撑", "阻力",
+            "形态", "macd", "rsi", "kdj", "boll", "均线", "量价", "资金流",
+            "龙虎榜", "涨跌停", "北向",
+        ]
+        fund_keywords = [
+            "基本面", "财务", "估值", "roe", "毛利率", "净利率", "营收",
+            "利润", "pe", "pb", "ps", "股东", "分红", "股息", "现金流",
+            "资产负债", "成长性", "盈利能力",
+        ]
+        tech_hits = sum(1 for kw in tech_keywords if kw in text)
+        fund_hits = sum(1 for kw in fund_keywords if kw in text)
+
+        if tech_hits > 0 and fund_hits == 0:
+            return "technical"
+        if fund_hits > 0 and tech_hits == 0:
+            return "fundamental"
+        if tech_hits > 0 and fund_hits > 0:
+            if tech_hits - fund_hits >= 2:
+                return "technical"
+            if fund_hits - tech_hits >= 2:
+                return "fundamental"
+            return "both"
+        return "both"
+
+    def _parse_data_sources_intent(self, user_input: str) -> Optional[list]:
+        """解析用户对数据源优先级的明确指定。
+
+        返回:
+            - list[str]: 用户明确指定了数据源优先级链（已去重、已校验）
+            - None:     未识别到数据源优先级意图，ctx.data_sources 保持 None
+
+        判定规则（避免误触发）：
+            1. 用户输入必须同时包含"动作动词"和"数据源名称"
+            2. 动词如：用/使用/优先/首选/改用/切换/换/use/using/from
+            3. 数据源名称如：tushare/baostock/akshare/wind/ifind/万得/同花顺/掘金/通达信/迅投
+
+        示例：
+            "用 wind 取数据"        → ["wind", "tushare", "baostock", "akshare", "websearch"]
+            "优先用 ifind，失败用 tushare" → ["ifind", "tushare", "baostock", "akshare", "websearch"]
+            "用 baostock 作为首选源" → ["baostock", "tushare", "akshare", "websearch"]
+            "用 baostock 和 akshare" → ["baostock", "akshare", "tushare", "websearch"]
+            "今天天气真好"          → None
+            "用 momentum 因子做回测" → None（"用"是动词但未跟数据源名）
+        """
+        if not user_input:
+            return None
+
+        input_lower = user_input.lower()
+
+        # 1) 必须命中至少一个动作动词
+        has_verb = any(v in user_input or v in input_lower for v in DATA_SOURCE_TRIGGER_VERBS)
+        if not has_verb:
+            return None
+
+        # 2) 按名称在用户输入中出现的位置排序，提取命中的数据源
+        matched = []  # [(pos, source_name), ...]
+        for keyword, source_name in DATA_SOURCE_NAMES.items():
+            # 中文用原文匹配，英文用小写匹配
+            if keyword.isascii():
+                haystack = input_lower
+            else:
+                haystack = user_input
+            idx = haystack.find(keyword)
+            if idx >= 0:
+                matched.append((idx, source_name))
+
+        if not matched:
+            return None
+
+        # 按位置排序，去重
+        matched.sort(key=lambda x: x[0])
+        user_chain: List[str] = []
+        for _, src in matched:
+            if src not in user_chain:
+                user_chain.append(src)
+
+        # 3) 用户只指定了部分源 → 自动追加默认免费降级链作为兜底
+        #    例如用户只说"用 wind"，自动补 tushare→baostock→akshare→websearch
+        for src in _DEFAULT_FALLBACK_CHAIN:
+            if src not in user_chain:
+                user_chain.append(src)
+
+        return user_chain
+
     def parse_intent(self, user_input: str) -> Context:
         """解析用户自然语言，提取任务参数，生成 Context"""
         ctx = Context(
@@ -152,7 +303,7 @@ class MasterEngine:
         target_stages = []
         if any(kw in input_lower for kw in ["数据", "获取", "下载", "data"]):
             target_stages.append("DATA")
-        if any(kw in input_lower for kw in ["因子", "factor", "alpha", "ic"]):
+        if any(kw in input_lower for kw in ["因子", "factor", "alpha", "ic", "因子发现", "因子挖掘", "因子研究", "因子探索"]):
             target_stages.append("FACTOR")
         if any(kw in input_lower for kw in ["模型", "训练", "model", "train", "lightgbm", "机器学习"]):
             target_stages.append("MODEL")
@@ -162,8 +313,22 @@ class MasterEngine:
             target_stages.append("PORTFOLIO")
         if any(kw in input_lower for kw in ["实盘", "交易", "下单", "execution", "执行"]):
             target_stages.append("EXECUTION")
+
+        # 实盘路径：确保 MODEL 和 BACKTEST 在 EXECUTION 之前
+        if "EXECUTION" in target_stages:
+            if "MODEL" not in target_stages:
+                target_stages.append("MODEL")
+            if "BACKTEST" not in target_stages:
+                target_stages.append("BACKTEST")
         if any(kw in input_lower for kw in ["报告", "report", "可视化", "绩效", "归因"]):
             target_stages.append("REPORT")
+
+        # 个股分析意图路由：跳过 MODEL/BACKTEST/PORTFOLIO/EXECUTION，
+        # 仅保留 DATA → FACTOR → REPORT，由 REPORT 引擎按模板产出个股分析报告。
+        if self._is_analysis_intent(user_input):
+            target_stages = ["DATA", "FACTOR", "REPORT"]
+            ctx.metadata["report_template"] = self._detect_report_template(user_input)
+            logger.info(f"检测到个股分析意图，路由到分析报告路径: DATA → FACTOR → REPORT (模板: {ctx.metadata['report_template']})")
 
         if not target_stages:
             target_stages = ["DATA", "FACTOR", "MODEL", "BACKTEST", "REPORT"]
@@ -181,12 +346,22 @@ class MasterEngine:
         elif "全A" in user_input or "全市场" in user_input:
             ctx.stock_pool = []
 
+        # 日期范围：默认取最近5年数据；支持用户通过关键词自定义
+        from datetime import date as _date
+        today = _date.today()
         if "近3年" in user_input or "最近3年" in user_input:
-            ctx.start_date = "2021-01-01"
-            ctx.end_date = "2024-12-31"
+            ctx.start_date = (today.replace(year=today.year - 3)).strftime("%Y-%m-%d")
+            ctx.end_date = today.strftime("%Y-%m-%d")
         elif "近5年" in user_input or "最近5年" in user_input:
-            ctx.start_date = "2019-01-01"
-            ctx.end_date = "2024-12-31"
+            ctx.start_date = (today.replace(year=today.year - 5)).strftime("%Y-%m-%d")
+            ctx.end_date = today.strftime("%Y-%m-%d")
+        elif "近1年" in user_input or "最近1年" in user_input:
+            ctx.start_date = (today.replace(year=today.year - 1)).strftime("%Y-%m-%d")
+            ctx.end_date = today.strftime("%Y-%m-%d")
+        else:
+            # 默认：从当天起最近5年
+            ctx.start_date = (today.replace(year=today.year - 5)).strftime("%Y-%m-%d")
+            ctx.end_date = today.strftime("%Y-%m-%d")
 
         # JINGNI_URL gate: 若配置了惊泥因子库凭证且用户明确要求从因子库取数，
         # 则在 metadata 中标记 factor_source=jingni，factor-engine 据此走 jingni-datafeed 路径。
@@ -202,7 +377,18 @@ class MasterEngine:
         else:
             ctx.metadata["factor_source"] = "local"
 
-        logger.info(f"意图解析完成: 目标阶段={target_stages}, 股票池={ctx.stock_pool or '全市场'}, factor_source={ctx.metadata.get('factor_source')}")
+        # 数据源优先级意图解析（方案 D）：
+        # 用户可通过对话明确指定数据源优先级（如"用 wind 取数据"）。
+        # 匹配到 → 写入 ctx.data_sources，覆盖环境变量 DATA_BACKENDS。
+        # 未匹配到 → ctx.data_sources 保持 None，由 data-engine 走环境变量 → 默认值。
+        data_sources = self._parse_data_sources_intent(user_input)
+        if data_sources:
+            ctx.data_sources = data_sources
+            logger.info(f"检测到数据源优先级意图 → ctx.data_sources={data_sources}（覆盖环境变量 DATA_BACKENDS）")
+
+        logger.info(f"意图解析完成: 目标阶段={target_stages}, 股票池={ctx.stock_pool or '全市场'}, "
+                    f"factor_source={ctx.metadata.get('factor_source')}, "
+                    f"data_sources={ctx.data_sources or '(走默认链)'}, ")
         self.ctx = ctx
         return ctx
 
@@ -211,6 +397,12 @@ class MasterEngine:
         logger.info(f"=== 开始执行阶段 Step {step_num}: {stage} ===")
 
         artifact_file = EXPECTED_ARTIFACTS.get(stage)
+        # 模板报告模式生成 technical_report.html + fundamental_report.html，
+        # 缓存检查以 technical_report.html 为准（reports-engine 返回的第一份产物）
+        if (stage == "REPORT"
+                and getattr(self.ctx, 'metadata', {}).get("report_template") in ("both", "technical", "fundamental")
+                and not self.ctx.get_artifact("BACKTEST")):
+            artifact_file = "technical_report.html"
         stage_dir = {
             "DATA": DATA_DIR,
             "FACTOR": FACTOR_DIR,
@@ -226,7 +418,7 @@ class MasterEngine:
         if self.archiver:
             self.archiver.create_step_dir(step_num, stage)
 
-        if artifact_path and os.path.exists(artifact_path):
+        if artifact_path and os.path.exists(artifact_path) and not self._force_refresh:
             logger.info(f"阶段 {stage} 产物已存在，跳过: {artifact_path}")
             self.ctx.update_artifact(stage, artifact_path)
             if self.archiver:
@@ -270,6 +462,11 @@ class MasterEngine:
                 self.ctx.metadata[stage] = result.get("metadata", {})
                 if self.archiver:
                     self.archiver.save_artifact_copy(stage, artifact)
+                    # 处理多产物场景（如非量化 both 模式生成技术面+基本面两份报告）
+                    all_artifacts = result.get("metadata", {}).get("all_artifacts", [])
+                    for extra in all_artifacts:
+                        if extra and extra != artifact:
+                            self.archiver.save_artifact_copy(stage, extra)
                 logger.info(f"阶段 {stage} 执行成功, 产物: {artifact}")
                 if self.archiver:
                     self.archiver.write_step_summary(stage, step_num)
@@ -290,8 +487,19 @@ class MasterEngine:
                 self.archiver.write_step_summary(stage, step_num)
             return False
 
-    def run_pipeline(self, user_input: str = None, ctx: Context = None) -> dict:
-        """执行全流程管道"""
+    def run_pipeline(self, user_input: str = None, ctx: Context = None,
+                     llm_responses: dict = None) -> dict:
+        """
+        执行全流程管道
+
+        参数:
+            user_input: 用户自然语言输入（与 ctx 二选一）
+            ctx: 预构建的 Context 对象（与 user_input 二选一）
+            llm_responses: 可选，外部传入的 LLM 分析结果，用于覆盖 skill 内部生成的解读。
+                          格式 {"technical": {...}, "fundamental": {...}}
+                          注意：reports-engine 已在内部自动调用 LLM 并注入，
+                          此参数仅在需要外部覆盖时使用。
+        """
         if ctx:
             self.ctx = ctx
         elif user_input:
@@ -304,7 +512,8 @@ class MasterEngine:
         self.ctx.run_dir = run_dir
         logger.info(f"运行归档目录: {run_dir}")
 
-        results = {"success": True, "completed_stages": [], "failed_stages": [], "summary": "", "archive_dir": run_dir}
+        results = {"success": True, "completed_stages": [], "failed_stages": [],
+                   "summary": "", "archive_dir": run_dir, "llm_prompts": {}}
 
         for step_num, stage in enumerate(self.ctx.target_stages, 1):
             success = self.execute_stage(stage, step_num)
@@ -316,6 +525,18 @@ class MasterEngine:
                     results["success"] = False
                     logger.error(f"关键阶段 {stage} 失败，停止管道")
                     break
+
+        # 收集 llm_prompts 和 llm_status（从 REPORT 阶段 metadata 提取）
+        if "REPORT" in results["completed_stages"]:
+            report_meta = self.ctx.metadata.get("REPORT", {})
+            llm_prompts = report_meta.get("llm_prompts", {})
+            if llm_prompts:
+                results["llm_prompts"] = llm_prompts
+            results["llm_status"] = report_meta.get("llm_status", "unknown")
+
+        # 外部覆盖：如果传入了 llm_responses，重新注入归档 HTML
+        if llm_responses and "REPORT" in results["completed_stages"]:
+            self._inject_llm_to_archive(run_dir, llm_responses, results)
 
         results["summary"] = self._generate_summary()
 
@@ -332,6 +553,128 @@ class MasterEngine:
         results["context"] = self.ctx.to_dict()
 
         return results
+
+    def _inject_llm_to_archive(self, run_dir: str, llm_responses: dict, results: dict):
+        """将 agent 传入的 LLM 分析结果注入归档 HTML 中，替换占位符"""
+        inject_result = self.inject_llm(run_dir, llm_responses)
+        if inject_result.get("injected_count", 0) > 0:
+            results["metadata"] = results.get("metadata", {})
+            results["metadata"]["llm_injected"] = True
+            results["metadata"]["llm_injected_files"] = inject_result["injected_count"]
+
+    def inject_llm(self, run_dir: str, llm_responses: dict) -> dict:
+        """Agent 调用 LLM 后，将结果注入已归档的 HTML 报告
+
+        两阶段执行流程：
+        1. run_pipeline(ctx) → 生成报告(含占位符) → 返回 llm_prompts
+        2. agent 调用 LLM → 拿到 llm_responses
+        3. inject_llm(run_dir, llm_responses) → 替换占位符
+
+        参数:
+            run_dir: 归档目录路径（run_pipeline 返回的 archive_dir）
+            llm_responses: LLM 分析结果，格式 {"technical": {...}, "fundamental": {...}}
+
+        返回:
+            {"injected_count": int, "injected_files": [str]}
+        """
+        import html as _html_lib
+
+        # 找到归档目录中的 REPORT artifacts
+        report_artifacts_dir = None
+        for step_name in os.listdir(run_dir):
+            if step_name.startswith("step_") and "REPORT" in step_name:
+                report_artifacts_dir = os.path.join(run_dir, step_name, "artifacts")
+                break
+        if not report_artifacts_dir or not os.path.isdir(report_artifacts_dir):
+            logger.warning("未找到归档 REPORT artifacts 目录，跳过 LLM 注入")
+            return {"injected_count": 0, "injected_files": []}
+
+        def _render_tech(resp: dict) -> str:
+            score = float(resp.get("technical_score", 0))
+            sc = "positive" if score >= 60 else ("negative" if score < 40 else "")
+            opt = []
+            for key, title, tag in [("capital_flow_analysis", "资金面分析", True),
+                                     ("dragon_tiger_analysis", "龙虎榜解读", True),
+                                     ("price_limit_analysis", "涨跌停分析", False)]:
+                v = resp.get(key, "")
+                if v:
+                    t = " <span class='llm-tag-a'>A股特色</span>" if tag else ""
+                    opt.append(f"<h4>{title}{t}</h4><p>{_html_lib.escape(v)}</p>")
+            return (
+                f'<div class="llm-analysis-header">'
+                f'<span class="llm-badge llm-badge-{sc}">技术评分 {score:.0f}</span>'
+                f'<span class="llm-badge">趋势：{_html_lib.escape(resp.get("trend_direction", ""))}</span>'
+                f'<span class="llm-badge">置信度：{_html_lib.escape(resp.get("trend_confidence", ""))}</span>'
+                f'</div>'
+                f'<div class="llm-analysis-body">'
+                f'<h4>整体评估</h4><p>{_html_lib.escape(resp.get("overall_assessment", ""))}</p>'
+                f'<h4>多周期趋势分析</h4><p>{_html_lib.escape(resp.get("trend_analysis", ""))}</p>'
+                f'<h4>技术指标信号解读</h4><p>{_html_lib.escape(resp.get("indicator_analysis", ""))}</p>'
+                f'<h4>关键价位分析</h4><p>{_html_lib.escape(resp.get("key_levels", ""))}</p>'
+                f'<h4>风险信号</h4><p>{_html_lib.escape(resp.get("risk_signals", ""))}</p>'
+                f'<h4>短期展望</h4><p>{_html_lib.escape(resp.get("short_term_outlook", ""))}</p>'
+                f'{"".join(opt)}'
+                f'</div>'
+            )
+
+        def _render_fund(resp: dict) -> str:
+            score = float(resp.get("fundamental_score", 0))
+            sc = "positive" if score >= 60 else ("negative" if score < 40 else "")
+            opt = []
+            for key, title, tag in [("industry_analysis", "行业分析与景气度", False),
+                                     ("financial_statement_analysis", "财务报表分析", False),
+                                     ("shareholder_analysis", "股东结构与资本运作", True)]:
+                v = resp.get(key, "")
+                if v:
+                    t = " <span class='llm-tag-a'>A股特色</span>" if tag else ""
+                    opt.append(f"<h4>{title}{t}</h4><p>{_html_lib.escape(v)}</p>")
+            return (
+                f'<div class="llm-analysis-header">'
+                f'<span class="llm-badge llm-badge-{sc}">基本面评分 {score:.0f}</span>'
+                f'<span class="llm-badge">估值：{_html_lib.escape(resp.get("valuation_level", ""))}</span>'
+                f'</div>'
+                f'<div class="llm-analysis-body">'
+                f'<h4>整体评估</h4><p>{_html_lib.escape(resp.get("overall_assessment", ""))}</p>'
+                f'<h4>估值分析</h4><p>{_html_lib.escape(resp.get("valuation_analysis", ""))}</p>'
+                f'<h4>盈利能力分析</h4><p>{_html_lib.escape(resp.get("profitability_analysis", ""))}</p>'
+                f'<h4>成长性分析</h4><p>{_html_lib.escape(resp.get("growth_analysis", ""))}</p>'
+                f'<h4>风险因素</h4><p>{_html_lib.escape(resp.get("risk_factors", ""))}</p>'
+                f'{"".join(opt)}'
+                f'</div>'
+            )
+
+        injected_count = 0
+        injected_files = []
+        tech_resp = llm_responses.get("technical")
+        fund_resp = llm_responses.get("fundamental")
+
+        for fname in os.listdir(report_artifacts_dir):
+            if not fname.endswith(".html"):
+                continue
+            fpath = os.path.join(report_artifacts_dir, fname)
+            with open(fpath, "r", encoding="utf-8") as f:
+                html = f.read()
+            modified = False
+            if tech_resp and "<!--LLM_TECHNICAL_ANALYSIS_PLACEHOLDER-->" in html:
+                html = html.replace(
+                    "<!--LLM_TECHNICAL_ANALYSIS_PLACEHOLDER-->",
+                    _render_tech(tech_resp)
+                )
+                modified = True
+            if fund_resp and "<!--LLM_FUNDAMENTAL_ANALYSIS_PLACEHOLDER-->" in html:
+                html = html.replace(
+                    "<!--LLM_FUNDAMENTAL_ANALYSIS_PLACEHOLDER-->",
+                    _render_fund(fund_resp)
+                )
+                modified = True
+            if modified:
+                with open(fpath, "w", encoding="utf-8") as f:
+                    f.write(html)
+                injected_count += 1
+                injected_files.append(fname)
+                logger.info(f"LLM 内容已注入归档报告: {fname}")
+
+        return {"injected_count": injected_count, "injected_files": injected_files}
 
     def _generate_summary(self) -> str:
         """生成可读的管道执行摘要"""
@@ -384,8 +727,12 @@ if __name__ == "__main__":
     parser.add_argument("-i", "--input", type=str, required=True, help="用户需求描述")
     parser.add_argument("-c", "--context", type=str, default=None, help="已有的Context JSON文件路径")
     parser.add_argument("-o", "--output", type=str, default=None, help="输出结果JSON路径")
+    parser.add_argument("--force", action="store_true", help="强制刷新，忽略缓存产物重新执行所有阶段")
 
     args = parser.parse_args()
+
+    if args.force:
+        os.environ["QUANT_FORCE_REFRESH"] = "1"
 
     ctx = None
     if args.context:

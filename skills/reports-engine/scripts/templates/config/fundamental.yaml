@@ -1,0 +1,53 @@
+# 基本面分析报告模板
+# 固定章节：行情数据、深度解读、风险提示
+# 因子组合：用户可自定义，每个分组渲染为一个章节
+template_id: fundamental
+template_name: 基本面分析报告
+analyst_type: fundamental
+
+fixed_sections:
+  market_data:
+    kline_indicators: [vol, macd, rsi, kdj, boll, wr, cci, obv]
+    ma_periods: [5, 10, 20, 60]
+    show_support_resistance: false
+  deep_analysis:
+    analyst_type: fundamental
+  risk_warning:
+    source_factors: [debt_ratio, revenue_growth_yoy, pe_ttm]
+
+factor_groups:
+  - id: company_overview
+    title: 公司概况
+    factors: [industry, name, list_date, total_share, float_share]
+    render_as: info_card
+    analysis_hint: 公司基本面画像
+
+  - id: profitability
+    title: 盈利能力
+    factors: [roe_ttm, roa_ttm, gross_margin_ttm, net_margin_ttm]
+    render_as: metric_grid
+    analysis_hint: ROE/毛利率趋势与同行对比
+
+  - id: growth
+    title: 成长性分析
+    factors: [revenue_growth_yoy, profit_growth_yoy]
+    render_as: trend_chart
+    analysis_hint: 营收与利润增速趋势
+
+  - id: valuation
+    title: 估值分析
+    factors: [pe_ttm, pb, ps_ttm, dv_ratio, pe_percentile, pb_percentile]
+    render_as: percentile_chart
+    analysis_hint: PE/PB历史分位与估值合理性
+
+  - id: financial_health
+    title: 财务健康度
+    factors: [debt_ratio, current_ratio, ocf]
+    render_as: metric_grid
+    analysis_hint: 偿债能力与现金流安全
+
+  - id: shareholder
+    title: 股东结构与资本运作
+    factors: [top_holder_change, holder_concentration]
+    render_as: holder_table
+    analysis_hint: 十大股东变动与机构持仓

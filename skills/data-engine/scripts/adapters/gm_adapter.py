@@ -60,6 +60,8 @@ def _finalize(df: pd.DataFrame) -> pd.DataFrame:
 class GmAdapter(BaseDataProvider):
     """掘金量化 gm 适配器：基于 gm.api.history 拉取真实行情。"""
 
+    SUPPORTED_DATA_TYPES = {"daily", "financial"}
+
     def __init__(self):
         self.token = GM_TOKEN or os.environ.get("GM_TOKEN")
         if not self.token:
@@ -170,4 +172,124 @@ class GmAdapter(BaseDataProvider):
         return pd.DataFrame(columns=["code", "date", "adj_factor"])
 
     def get_financial(self, symbols, report_date, fields):
-        return pd.DataFrame()
+        """获取财务数据，返回统一标准 schema。
+
+        使用掘金量化新版基本面接口:
+        - stk_get_daily_valuation: 每日估值指标(pe_ttm/pb_mrq/ps_ttm/dy_ttm)
+        - stk_get_finance_prime: 财务主要指标(roe/总资产/总负债/净利润/营收/
+          经营现金流/营收同比/归母净利润同比)
+        - get_instruments: 股票名称
+
+        返回 DataFrame 包含标准字段:
+            code, report_date, pe_ttm, pb, ps_ttm, dv_ratio,
+            roe, roa, gross_margin, net_margin,
+            revenue_growth, profit_growth,
+            debt_ratio, current_ratio, quick_ratio, ocf,
+            industry, name
+        """
+        self._check_available()
+        from gm.api import set_token, stk_get_daily_valuation, stk_get_finance_prime, get_instruments
+        set_token(self.token)
+
+        standard_cols = [
+            'code', 'report_date', 'pe_ttm', 'pb', 'ps_ttm', 'dv_ratio',
+            'roe', 'roa', 'gross_margin', 'net_margin',
+            'revenue_growth', 'profit_growth',
+            'debt_ratio', 'current_ratio', 'quick_ratio', 'ocf',
+            'industry', 'name',
+        ]
+
+        # 标准化报告期: '20240930' <-> '2024-09-30'
+        period = report_date.replace('-', '')
+        period_std = f"{period[:4]}-{period[4:6]}-{period[6:8]}" if len(period) == 8 else report_date
+
+        rows = []
+        for code in symbols:
+            sym = self._to_gm(code)
+            row = {col: None for col in standard_cols}
+            row['code'] = code
+            row['report_date'] = period
+
+            # 1) 每日估值指标(PE/PB/PS/股息率): 在报告期附近取最接近的一日
+            try:
+                val_df = stk_get_daily_valuation(
+                    symbol=sym, fields='pe_ttm,pb_mrq,ps_ttm,dy_ttm',
+                    start_date=period_std, end_date=period_std, df=True
+                )
+                if val_df is not None and not val_df.empty:
+                    v = val_df.iloc[-1]
+                    row['pe_ttm'] = self._to_num(v.get('pe_ttm'))
+                    row['pb'] = self._to_num(v.get('pb_mrq'))
+                    row['ps_ttm'] = self._to_num(v.get('ps_ttm'))
+                    row['dv_ratio'] = self._to_num(v.get('dy_ttm'))
+            except Exception as e:
+                logger.debug("gm 获取 %s 估值失败: %s", code, e)
+
+            # 2) 财务主要指标: 按 rpt_date 匹配报告期
+            try:
+                prime_df = stk_get_finance_prime(
+                    symbol=sym,
+                    fields='roe,ttl_ast,ttl_liab,net_cf_oper,inc_oper_yoy,'
+                           'net_prof_pcom_yoy,inc_oper,net_prof_pcom',
+                    rpt_type=None, data_type=None,
+                    start_date=period_std, end_date=period_std, df=True
+                )
+                if prime_df is not None and not prime_df.empty:
+                    # 优先精确匹配 rpt_date，其次取最接近且 <= 报告期的一行
+                    if 'rpt_date' in prime_df.columns:
+                        prime_df = prime_df.sort_values('rpt_date')
+                        exact = prime_df[prime_df['rpt_date'].astype(str) == period_std]
+                        m = exact.iloc[0] if not exact.empty else prime_df.iloc[-1]
+                    else:
+                        m = prime_df.iloc[-1]
+                    roe = self._to_num(m.get('roe'))
+                    ttl_ast = self._to_num(m.get('ttl_ast'))
+                    ttl_liab = self._to_num(m.get('ttl_liab'))
+                    net_cf_oper = self._to_num(m.get('net_cf_oper'))
+                    inc_oper = self._to_num(m.get('inc_oper'))
+                    net_prof = self._to_num(m.get('net_prof_pcom'))
+                    row['roe'] = roe
+                    row['ocf'] = net_cf_oper
+                    row['revenue_growth'] = self._to_num(m.get('inc_oper_yoy'))
+                    row['profit_growth'] = self._to_num(m.get('net_prof_pcom_yoy'))
+                    # 衍生比率(数值均以"元"为单位，比率换算为百分比)
+                    if ttl_ast and ttl_ast != 0 and ttl_liab is not None:
+                        row['debt_ratio'] = ttl_liab / ttl_ast * 100.0
+                    if net_prof is not None and ttl_ast and ttl_ast != 0:
+                        row['roa'] = net_prof / ttl_ast * 100.0
+                    if net_prof is not None and inc_oper and inc_oper != 0:
+                        row['net_margin'] = net_prof / inc_oper * 100.0
+            except Exception as e:
+                logger.debug("gm 获取 %s 财务主要指标失败: %s", code, e)
+
+            # 3) 股票名称
+            try:
+                gi = get_instruments(symbols=sym, fields='symbol,sec_name', df=True)
+                if gi is not None and not gi.empty:
+                    row['name'] = str(gi.iloc[0].get('sec_name', '') or '')
+            except Exception as e:
+                logger.debug("gm 获取 %s 名称失败: %s", code, e)
+
+            rows.append(row)
+
+        out = pd.DataFrame(rows, columns=standard_cols)
+
+        # 如果调用方指定了 fields，按需过滤列（code/report_date 始终保留）
+        if fields:
+            keep = ['code', 'report_date'] + [f for f in fields if f in standard_cols]
+            keep = list(dict.fromkeys(keep))
+            out = out[keep]
+
+        return out.reset_index(drop=True)
+
+    @staticmethod
+    def _to_num(val):
+        """安全转换为 float"""
+        if val is None:
+            return None
+        try:
+            import math
+            f = float(val)
+            return None if (isinstance(f, float) and math.isnan(f)) else f
+        except (TypeError, ValueError):
+            return None

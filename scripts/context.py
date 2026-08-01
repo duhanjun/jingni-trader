@@ -39,6 +39,11 @@ class Context:
     external_data: Dict[str, Any] = field(default_factory=dict)
     # {"daily": DataFrame, "stock_list": DataFrame, "source": "mcp_tushare"}
 
+    # data-engine 专用参数：用户通过对话指定的数据源优先级链
+    # 仅 DATA 阶段读取；为 None 时按 环境变量 DATA_BACKENDS → 代码默认值 降级
+    data_sources: Optional[List[str]] = None
+    # 示例: ["wind", "tushare", "baostock", "akshare", "websearch"]
+
     # 运行归档目录
     run_dir: str = ""
     step_dirs: Dict[str, str] = field(default_factory=dict)

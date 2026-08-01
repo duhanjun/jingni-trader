@@ -7,8 +7,9 @@ import os
 BACKTEST_BACKEND = os.environ.get("BACKTEST_BACKEND", "native")
 # 可选: rqalpha, backtrader, gm, native
 
-# ── 回测结果存储目录 ──────────────────────
-BACKTEST_DIR = os.environ.get("BACKTEST_DIR", "./workspace/backtest_results")
+# ── 回测结果存储目录（优先读 QUANT_WORK_DIR 与主调度器对齐）──────────
+_WORK_DIR = os.environ.get("QUANT_WORK_DIR", "./workspace")
+BACKTEST_DIR = os.environ.get("BACKTEST_DIR", os.path.join(_WORK_DIR, "backtest_results"))
 
 # ── A股交易费用 ───────────────────────────
 COMMISSION_RATE = float(os.environ.get("COMMISSION_RATE", 0.00025))  # 万2.5

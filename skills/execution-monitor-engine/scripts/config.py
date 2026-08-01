@@ -3,7 +3,8 @@
 """
 import os
 
-EXECUTION_DIR = os.environ.get("EXECUTION_DIR", "./workspace")
+_WORK_DIR = os.environ.get("QUANT_WORK_DIR", "./workspace")
+EXECUTION_DIR = os.environ.get("EXECUTION_DIR", os.path.join(_WORK_DIR, "execution"))
 TRADE_MODE = os.environ.get("TRADE_MODE", "paper")
 TRADE_BACKEND = os.environ.get("TRADE_BACKEND", "paper")
 INIT_CAPITAL = float(os.environ.get("INIT_CAPITAL", 1000000))
@@ -17,5 +18,11 @@ STAMP_TAX_RATE = float(os.environ.get("STAMP_TAX_RATE", 0.001))
 SLIPPAGE = float(os.environ.get("SLIPPAGE", 0.001))
 AUDIT_LOG_PATH = os.path.join(EXECUTION_DIR, "trade_log.jsonl")
 ACCOUNT_STATE_PATH = os.path.join(EXECUTION_DIR, "account_state.json")
+
+# 实盘交易后端配置
+XTQUANT_PATH = os.environ.get("XTQUANT_PATH", "")  # miniQMT userdata_mini 路径
+XTQUANT_ACCOUNT = os.environ.get("XTQUANT_ACCOUNT", "")  # miniQMT 资金账号
+GM_TOKEN = os.environ.get("GM_TOKEN", "")  # 掘金量化 token
+GM_ACCOUNT_ID = os.environ.get("GM_ACCOUNT_ID", "")  # 掘金账户ID(终端获取)
 
 os.makedirs(EXECUTION_DIR, exist_ok=True)

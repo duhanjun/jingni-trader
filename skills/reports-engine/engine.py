@@ -368,9 +368,525 @@ class ReportGenerator:
         return ''.join(html_parts)
 
 
+def _load_factor_module(module_name: str, rel_path: str):
+    """通过绝对路径加载 factor-engine 的分析器模块（避免 scripts 包名冲突）"""
+    import importlib.util
+    factor_scripts = os.path.normpath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "factor-engine", "scripts"
+    ))
+    module_path = os.path.join(factor_scripts, rel_path)
+    if not os.path.exists(module_path):
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception as e:
+        logger.warning(f"加载 factor-engine 模块 {rel_path} 失败: {e}")
+        return None
+
+
+def _load_support_resistance_module():
+    """加载支撑阻力模块（处理 levels 包的相对导入 from .fibonacci import）"""
+    import importlib.util
+    import types
+    factor_scripts = os.path.normpath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "factor-engine", "scripts"
+    ))
+    levels_dir = os.path.join(factor_scripts, "levels")
+    fib_path = os.path.join(levels_dir, "fibonacci.py")
+    sr_path = os.path.join(levels_dir, "support_resistance.py")
+    if not os.path.exists(sr_path):
+        return None
+    try:
+        levels_pkg = types.ModuleType("_factor_levels_pkg")
+        levels_pkg.__path__ = [levels_dir]
+        sys.modules["_factor_levels_pkg"] = levels_pkg
+        if os.path.exists(fib_path):
+            fib_spec = importlib.util.spec_from_file_location(
+                "_factor_levels_pkg.fibonacci", fib_path
+            )
+            fib_mod = importlib.util.module_from_spec(fib_spec)
+            sys.modules["_factor_levels_pkg.fibonacci"] = fib_mod
+            fib_spec.loader.exec_module(fib_mod)
+        sr_spec = importlib.util.spec_from_file_location(
+            "_factor_levels_pkg.support_resistance", sr_path
+        )
+        sr_mod = importlib.util.module_from_spec(sr_spec)
+        sys.modules["_factor_levels_pkg.support_resistance"] = sr_mod
+        sr_spec.loader.exec_module(sr_mod)
+        return sr_mod
+    except Exception as e:
+        logger.warning(f"加载支撑阻力模块失败: {e}")
+        return None
+
+
+def _detect_report_template(ctx) -> str:
+    """
+    识别报告模板：technical / fundamental / both
+
+    统一路由逻辑，不再有量化/非量化标签区分。
+    优先级：
+    1. ctx.metadata["report_template"] 显式指定
+    2. ctx.metadata["report_intent"] 兼容旧字段
+    3. 通过用户意图关键词识别
+    4. 默认 both（同时生成技术面与基本面两份报告）
+    """
+    meta = getattr(ctx, 'metadata', {}) or {}
+
+    # 1. 显式指定模板
+    explicit = meta.get("report_template")
+    if explicit in ("technical", "fundamental", "both"):
+        return explicit
+
+    # 2. 兼容旧的 report_intent 字段
+    intent = meta.get("report_intent")
+    if intent in ("technical", "fundamental", "both"):
+        return intent
+
+    # 3. 关键词识别
+    text = (meta.get("user_intent") or meta.get("user_query") or "").lower()
+    tech_keywords = [
+        "技术面", "技术分析", "k线", "k 线", "趋势", "支撑", "阻力",
+        "形态", "macd", "rsi", "kdj", "boll", "均线", "量价", "资金流",
+        "龙虎榜", "涨跌停", "北向",
+    ]
+    fund_keywords = [
+        "基本面", "财务", "估值", "roe", "毛利率", "净利率", "营收",
+        "利润", "pe", "pb", "ps", "股东", "分红", "股息", "现金流",
+        "资产负债", "成长性", "盈利能力", "解禁", "回购",
+    ]
+
+    tech_hits = sum(1 for kw in tech_keywords if kw in text)
+    fund_hits = sum(1 for kw in fund_keywords if kw in text)
+
+    if tech_hits > 0 and fund_hits == 0:
+        return "technical"
+    if fund_hits > 0 and tech_hits == 0:
+        return "fundamental"
+    if tech_hits > 0 and fund_hits > 0:
+        if tech_hits - fund_hits >= 2:
+            return "technical"
+        if fund_hits - tech_hits >= 2:
+            return "fundamental"
+        return "both"
+
+    # 4. 默认两份都生成
+    return "both"
+
+
+def _run_template_report(ctx) -> Dict[str, Any]:
+    """
+    模板化报告生成路径：根据 report_template 路由到对应模板
+
+    - technical: 生成技术分析报告
+    - fundamental: 生成基本面分析报告
+    - both: 同时生成两份报告（默认）
+
+    流程：生成含占位符的 HTML → 调用 LLM 生成深度解读 → 替换占位符 → 输出最终报告。
+    LLM 调用在 skill 内部完成，无需 agent 二次介入。
+    """
+    from scripts.template_engine import ReportTemplateEngine
+
+    os.makedirs(REPORT_DIR, exist_ok=True)
+
+    template_choice = _detect_report_template(ctx)
+    logger.info(f"报告模板: {template_choice}")
+
+    engine = ReportTemplateEngine()
+    llm_prompts: Dict[str, Any] = {}
+    generated_paths: List[str] = []
+
+    templates_to_generate = []
+    if template_choice in ("technical", "both"):
+        templates_to_generate.append(("technical", "technical_report.html"))
+    if template_choice in ("fundamental", "both"):
+        templates_to_generate.append(("fundamental", "fundamental_report.html"))
+
+    for tpl_id, filename in templates_to_generate:
+        output_path = os.path.join(REPORT_DIR, filename)
+        result = engine.generate(tpl_id, ctx, output_path)
+        if result.get("success"):
+            generated_paths.append(result["artifact_path"])
+            llm_prompts.update(result.get("llm_prompts", {}))
+            logger.info(f"模板 [{tpl_id}] 报告已生成: {result['artifact_path']}")
+        else:
+            logger.error(f"模板 [{tpl_id}] 报告生成失败: {result.get('error', '')}")
+
+    if not generated_paths:
+        return {
+            "success": False, "artifact_path": "", "metadata": {},
+            "error": "所有模板报告生成失败"
+        }
+
+    # ── 调用 LLM 生成深度解读并注入报告 ──
+    llm_responses: Dict[str, Any] = {}
+    llm_status = "skipped"  # skipped | success | fallback | failed
+
+    if llm_prompts:
+        try:
+            from scripts.llm_client import generate_analysis, is_available
+            if is_available():
+                logger.info("开始调用 LLM 生成深度解读...")
+                for analyst_type, prompt_data in llm_prompts.items():
+                    resp = generate_analysis(prompt_data)
+                    if resp:
+                        llm_responses[analyst_type] = resp
+                        logger.info(f"  {analyst_type}: LLM 解读生成成功")
+                    else:
+                        logger.warning(f"  {analyst_type}: LLM 返回为空，使用规则模板兜底")
+                llm_status = "success" if llm_responses else "failed"
+            else:
+                llm_status = "skipped"
+                logger.info("未配置 QUANT_LLM_API_KEY，跳过 LLM 调用，深度解读使用规则模板兜底")
+        except Exception as e:
+            llm_status = "failed"
+            logger.warning(f"LLM 调用异常: {e}，深度解读使用规则模板兜底")
+
+    # 无论 LLM 是否成功，都替换占位符（LLM 失败时用规则模板生成兜底内容）
+    _inject_deep_analysis(generated_paths, llm_responses, llm_prompts)
+
+    primary_path = generated_paths[0]
+    report_data = {
+        "report_template": template_choice,
+        "generated_at": datetime.now().isoformat(),
+        "artifacts": generated_paths,
+        "llm_status": llm_status,
+    }
+    data_path_out = os.path.join(REPORT_DIR, "report_data.json")
+    with open(data_path_out, "w", encoding="utf-8") as f:
+        json.dump(report_data, f, ensure_ascii=False, indent=2, default=str)
+
+    return {
+        "success": True,
+        "artifact_path": primary_path,
+        "metadata": {
+            "report_template": template_choice,
+            "report_data_path": data_path_out,
+            "all_artifacts": generated_paths,
+            "llm_prompts": llm_prompts,
+            "llm_status": llm_status,
+        },
+        "error": ""
+    }
+
+
+def _inject_deep_analysis(
+    html_paths: List[str],
+    llm_responses: Dict[str, Any],
+    llm_prompts: Dict[str, Any],
+) -> None:
+    """将 LLM 深度解读内容注入 HTML 报告（替换占位符）
+
+    LLM 成功时用 LLM 输出；失败时用规则模板从因子数据生成兜底内容。
+    """
+    import html as _html_lib
+
+    for html_path in html_paths:
+        with open(html_path, "r", encoding="utf-8") as f:
+            html_content = f.read()
+
+        modified = False
+
+        # 技术面占位符
+        if "<!--LLM_TECHNICAL_ANALYSIS_PLACEHOLDER-->" in html_content:
+            resp = llm_responses.get("technical")
+            if not resp:
+                # 兜底：从 prompt 中的因子数据生成规则解读
+                resp = _build_fallback_technical(llm_prompts.get("technical", {}))
+            rendered = _render_technical_analysis(resp)
+            html_content = html_content.replace(
+                "<!--LLM_TECHNICAL_ANALYSIS_PLACEHOLDER-->", rendered
+            )
+            modified = True
+
+        # 基本面占位符
+        if "<!--LLM_FUNDAMENTAL_ANALYSIS_PLACEHOLDER-->" in html_content:
+            resp = llm_responses.get("fundamental")
+            if not resp:
+                resp = _build_fallback_fundamental(llm_prompts.get("fundamental", {}))
+            rendered = _render_fundamental_analysis(resp)
+            html_content = html_content.replace(
+                "<!--LLM_FUNDAMENTAL_ANALYSIS_PLACEHOLDER-->", rendered
+            )
+            modified = True
+
+        if modified:
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(html_content)
+            logger.info(f"深度解读已注入: {html_path}")
+
+
+def _render_technical_analysis(resp: Dict[str, Any]) -> str:
+    """渲染技术面深度解读 HTML"""
+    import html as _html_lib
+    score = float(resp.get("technical_score", 0))
+    sc = "positive" if score >= 60 else ("negative" if score < 40 else "")
+    opt = []
+    for key, title, tag in [("capital_flow_analysis", "资金面分析", True),
+                             ("dragon_tiger_analysis", "龙虎榜解读", True),
+                             ("price_limit_analysis", "涨跌停分析", False)]:
+        v = resp.get(key, "")
+        if v:
+            t = " <span class='llm-tag-a'>A股特色</span>" if tag else ""
+            opt.append(f"<h4>{title}{t}</h4><p>{_html_lib.escape(v)}</p>")
+    return (
+        f'<div class="llm-analysis-header">'
+        f'<span class="llm-badge llm-badge-{sc}">技术评分 {score:.0f}</span>'
+        f'<span class="llm-badge">趋势：{_html_lib.escape(resp.get("trend_direction", ""))}</span>'
+        f'<span class="llm-badge">置信度：{_html_lib.escape(resp.get("trend_confidence", ""))}</span>'
+        f'</div>'
+        f'<div class="llm-analysis-body">'
+        f'<h4>整体评估</h4><p>{_html_lib.escape(resp.get("overall_assessment", ""))}</p>'
+        f'<h4>多周期趋势分析</h4><p>{_html_lib.escape(resp.get("trend_analysis", ""))}</p>'
+        f'<h4>技术指标信号解读</h4><p>{_html_lib.escape(resp.get("indicator_analysis", ""))}</p>'
+        f'<h4>关键价位分析</h4><p>{_html_lib.escape(resp.get("key_levels", ""))}</p>'
+        f'<h4>风险信号</h4><p>{_html_lib.escape(resp.get("risk_signals", ""))}</p>'
+        f'<h4>短期展望</h4><p>{_html_lib.escape(resp.get("short_term_outlook", ""))}</p>'
+        f'{"".join(opt)}'
+        f'</div>'
+    )
+
+
+def _render_fundamental_analysis(resp: Dict[str, Any]) -> str:
+    """渲染基本面深度解读 HTML"""
+    import html as _html_lib
+    score = float(resp.get("fundamental_score", 0))
+    sc = "positive" if score >= 60 else ("negative" if score < 40 else "")
+    opt = []
+    for key, title, tag in [("industry_analysis", "行业分析与景气度", False),
+                             ("financial_statement_analysis", "财务报表分析", False),
+                             ("shareholder_analysis", "股东结构与资本运作", True)]:
+        v = resp.get(key, "")
+        if v:
+            t = " <span class='llm-tag-a'>A股特色</span>" if tag else ""
+            opt.append(f"<h4>{title}{t}</h4><p>{_html_lib.escape(v)}</p>")
+    return (
+        f'<div class="llm-analysis-header">'
+        f'<span class="llm-badge llm-badge-{sc}">基本面评分 {score:.0f}</span>'
+        f'<span class="llm-badge">估值：{_html_lib.escape(resp.get("valuation_level", ""))}</span>'
+        f'<span class="llm-badge">评级：{_html_lib.escape(resp.get("investment_rating", ""))}</span>'
+        f'</div>'
+        f'<div class="llm-analysis-body">'
+        f'<h4>整体评估</h4><p>{_html_lib.escape(resp.get("overall_assessment", ""))}</p>'
+        f'<h4>估值分析</h4><p>{_html_lib.escape(resp.get("valuation_analysis", ""))}</p>'
+        f'<h4>盈利能力分析</h4><p>{_html_lib.escape(resp.get("profitability_analysis", ""))}</p>'
+        f'<h4>成长性分析</h4><p>{_html_lib.escape(resp.get("growth_analysis", ""))}</p>'
+        f'<h4>风险因素</h4><p>{_html_lib.escape(resp.get("risk_factors", ""))}</p>'
+        f'{"".join(opt)}'
+        f'</div>'
+    )
+
+
+def _build_fallback_technical(prompt_data: Dict[str, Any]) -> Dict[str, Any]:
+    """LLM 不可用时，从 prompt 中的因子数据生成规则兜底解读
+
+    解析 user_prompt 中的因子数值，基于简单规则生成分析文本。
+    """
+    import re
+
+    user_prompt = prompt_data.get("user_prompt", "")
+
+    # 提取因子数值（prompt 格式如 "MA5=310.35", "DIF=0.997" 等）
+    factors = {}
+    for match in re.finditer(r'(\w+)[=：]\s*(-?[\d.]+)', user_prompt):
+        key, val = match.group(1).lower(), match.group(2)
+        try:
+            factors[key] = float(val)
+        except ValueError:
+            pass
+
+    # 规则生成（prompt 中用 DIF/DEA/柱 等简写名）
+    ma5 = factors.get("ma5", 0)
+    ma10 = factors.get("ma10", 0)
+    ma20 = factors.get("ma20", 0)
+    ma60 = factors.get("ma60", 0)
+    current = factors.get("current_price", factors.get("close", 0))
+    macd_dif = factors.get("macd_dif", factors.get("dif", 0))
+    macd_dea = factors.get("macd_dea", factors.get("dea", 0))
+    macd_hist = factors.get("macd_hist", factors.get("柱", 0))
+    kdj_k = factors.get("kdj_k", factors.get("k", 0))
+    kdj_d = factors.get("kdj_d", factors.get("d", 0))
+    kdj_j = factors.get("kdj_j", factors.get("j", 0))
+    boll_ub = factors.get("boll_ub", factors.get("上轨", 0))
+    boll_lb = factors.get("boll_lb", factors.get("下轨", 0))
+    boll_mid = factors.get("boll_mid", factors.get("中轨", 0))
+
+    # 趋势方向
+    if ma5 > ma10 > ma20 and current > ma60:
+        trend = "看涨"
+        score = 70
+    elif ma5 < ma10 < ma20 and current < ma60:
+        trend = "看跌"
+        score = 30
+    else:
+        trend = "震荡"
+        score = 55
+
+    # MACD 信号
+    if macd_dif > macd_dea and macd_hist > 0:
+        macd_desc = f"MACD金叉（DIF={macd_dif:.2f} > DEA={macd_dea:.2f}），柱状图转正（{macd_hist:.2f}），短期动量转强"
+        score = min(score + 5, 100)
+    elif macd_dif < macd_dea and macd_hist < 0:
+        macd_desc = f"MACD死叉（DIF={macd_dif:.2f} < DEA={macd_dea:.2f}），柱状图为负（{macd_hist:.2f}），短期动量偏弱"
+        score = max(score - 5, 0)
+    else:
+        macd_desc = f"MACD处于转换期（DIF={macd_dif:.2f}, DEA={macd_dea:.2f}），趋势不明朗"
+
+    # KDJ 信号
+    if kdj_j > 80:
+        kdj_desc = f"KDJ超买（K={kdj_k:.1f}, D={kdj_d:.1f}, J={kdj_j:.1f}），短期有回调风险"
+    elif kdj_j < 20:
+        kdj_desc = f"KDJ超卖（K={kdj_k:.1f}, D={kdj_d:.1f}, J={kdj_j:.1f}），短期有反弹机会"
+    else:
+        kdj_desc = f"KDJ中性区域（K={kdj_k:.1f}, D={kdj_d:.1f}, J={kdj_j:.1f}），方向待选择"
+
+    # 布林带
+    boll_width = 0
+    if boll_ub > 0 and boll_lb > 0:
+        boll_width = boll_ub - boll_lb
+        if current >= boll_ub * 0.98:
+            boll_desc = f"价格接近布林上轨（{boll_ub:.2f}），短期偏强但注意回落"
+        elif current <= boll_lb * 1.02:
+            boll_desc = f"价格接近布林下轨（{boll_lb:.2f}），短期偏弱但关注支撑"
+        else:
+            boll_desc = f"价格在布林带中轨（{boll_mid:.2f}）附近运行，带宽{boll_width:.2f}"
+    else:
+        boll_desc = "布林带数据暂缺"
+
+    # 均线分析
+    if ma5 > ma10 > ma20:
+        ma_desc = f"短期均线多头排列（MA5={ma5:.2f} > MA10={ma10:.2f} > MA20={ma20:.2f}），短期趋势偏多"
+    elif ma5 < ma10 < ma20:
+        ma_desc = f"短期均线空头排列（MA5={ma5:.2f} < MA10={ma10:.2f} < MA20={ma20:.2f}），短期趋势偏空"
+    else:
+        ma_desc = f"短期均线粘合（MA5={ma5:.2f}, MA10={ma10:.2f}, MA20={ma20:.2f}），方向待选择"
+
+    ma60_note = f"MA60={ma60:.2f}" if ma60 > 0 else "MA60数据暂缺"
+
+    # 龙虎榜
+    lhb_count = int(factors.get("lhb_count_5d", 0))
+    lhb_note = f"近5日上榜{lhb_count}次" if lhb_count > 0 else "近5日无龙虎榜记录"
+
+    return {
+        "trend_direction": trend,
+        "trend_confidence": "中",
+        "technical_score": score,
+        "overall_assessment": f"当前技术面{trend}，{macd_desc.split('，')[0]}。",
+        "trend_analysis": f"{ma_desc}。{ma60_note}。多周期共振情况需结合周线/月线判断。",
+        "indicator_analysis": f"{macd_desc}。{kdj_desc}。{boll_desc}。",
+        "key_levels": f"MA20({ma20:.2f})为短期支撑，MA60({ma60:.2f})为中期阻力。布林上轨({boll_ub:.2f})和下轨({boll_lb:.2f})为极端位置参考。",
+        "risk_signals": "量能数据缺失，无法判断量价配合。布林带带宽变化需关注突破方向。" if boll_width < 30 else "布林带较宽，波动正常。",
+        "short_term_outlook": f"关注MA20({ma20:.2f})支撑和MA60({ma60:.2f})阻力的突破方向。",
+        "capital_flow_analysis": "",
+        "dragon_tiger_analysis": lhb_note,
+        "price_limit_analysis": "",
+    }
+
+
+def _build_fallback_fundamental(prompt_data: Dict[str, Any]) -> Dict[str, Any]:
+    """LLM 不可用时，从 prompt 中的因子数据生成规则兜底解读"""
+    import re
+
+    user_prompt = prompt_data.get("user_prompt", "")
+
+    factors = {}
+    for match in re.finditer(r'(\w+)[=：]\s*(-?[\d.]+)', user_prompt):
+        key, val = match.group(1).lower(), match.group(2)
+        try:
+            factors[key] = float(val)
+        except ValueError:
+            pass
+
+    roe = factors.get("roe_ttm", factors.get("roe", 0))
+    debt = factors.get("debt_ratio", factors.get("资产负债率", 0))
+    current = factors.get("current_ratio", factors.get("流动比率", 0))
+    pe = factors.get("pe_ttm", factors.get("pe", 0))
+    pb = factors.get("pb", 0)
+
+    # 评分
+    score = 50
+    if roe > 15:
+        score += 15
+    elif roe > 10:
+        score += 8
+    elif roe < 5:
+        score -= 10
+
+    if debt > 70:
+        score -= 10
+    elif debt < 50:
+        score += 5
+
+    if current < 1:
+        score -= 8
+    elif current > 2:
+        score += 5
+
+    score = max(0, min(100, score))
+
+    # 估值判断
+    if pe > 0:
+        if pe < 15:
+            valuation = "低估"
+        elif pe < 30:
+            valuation = "合理"
+        elif pe < 50:
+            valuation = "偏高"
+        else:
+            valuation = "高估"
+    else:
+        valuation = "合理"
+
+    # 评级
+    if score >= 70:
+        rating = "买入"
+    elif score >= 60:
+        rating = "增持"
+    elif score >= 40:
+        rating = "中性"
+    elif score >= 30:
+        rating = "减持"
+    else:
+        rating = "卖出"
+
+    roe_desc = f"ROE(TTM)为{roe:.2f}%，" + ("股东回报效率优秀" if roe > 15 else "股东回报效率偏低" if roe < 8 else "股东回报效率适中")
+    debt_desc = f"资产负债率{debt:.2f}%，" + ("杠杆水平偏高" if debt > 70 else "杠杆水平适中" if debt > 50 else "杠杆水平较低")
+    current_desc = f"流动比率{current:.2f}，" + ("短期偿债能力偏弱" if current < 1 else "短期偿债能力良好" if current > 2 else "短期偿债能力一般")
+
+    risk_items = []
+    if debt > 70:
+        risk_items.append(f"资产负债率{debt:.1f}%偏高，财务杠杆风险较大")
+    if current < 1:
+        risk_items.append(f"流动比率{current:.2f}低于1，短期偿债压力较大")
+    if roe < 5:
+        risk_items.append(f"ROE仅{roe:.1f}%，盈利能力偏弱")
+    if not risk_items:
+        risk_items.append("未发现重大基本面风险信号")
+
+    return {
+        "valuation_level": valuation,
+        "fundamental_score": score,
+        "investment_rating": rating,
+        "overall_assessment": f"{roe_desc}。{debt_desc}。综合评估给予{rating}评级。",
+        "valuation_analysis": f"PE(TTM)={pe:.1f}，PB={pb:.2f}，估值水平{valuation}。" if pe > 0 else "估值数据暂缺，无法判断估值高低。",
+        "profitability_analysis": roe_desc + "。建议关注毛利率和净利率的改善趋势。",
+        "growth_analysis": "营收和利润增速数据暂缺，建议关注后续财报和行业增速变化。",
+        "risk_factors": "；".join(risk_items) + "。",
+        "industry_analysis": "",
+        "financial_statement_analysis": f"{debt_desc}。{current_desc}。",
+        "shareholder_analysis": "",
+    }
+
+
 def run(ctx) -> Dict[str, Any]:
     """
     reports-engine 的 run 函数
+
+    统一路由逻辑（不再区分量化/非量化）：
+    1. 若有 BACKTEST 产物 → 生成回测绩效报告（夏普/回撤/归因）
+    2. 否则 → 按报告模板生成个股分析报告（技术面/基本面）
 
     参数:
         ctx: Context 对象
@@ -383,11 +899,18 @@ def run(ctx) -> Dict[str, Any]:
             "error": str
         }
     """
+    # 检查是否有回测产物 → 回测绩效报告路径
+    backtest_path = ctx.get_artifact("BACKTEST") if hasattr(ctx, 'get_artifact') else None
+    has_backtest = backtest_path and os.path.exists(backtest_path)
+
+    if not has_backtest:
+        # 无回测产物 → 模板化个股分析报告
+        return _run_template_report(ctx)
+
     try:
         os.makedirs(REPORT_DIR, exist_ok=True)
         generator = ReportGenerator()
 
-        backtest_path = ctx.get_artifact("BACKTEST")
         portfolio_path = ctx.get_artifact("PORTFOLIO")
         data_path = ctx.get_artifact("DATA")
         factor_path = ctx.get_artifact("FACTOR")

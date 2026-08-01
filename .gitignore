@@ -27,6 +27,7 @@ Thumbs.db
 workspace/
 *.db
 *.sqlite
+_tmp_*
 
 # Trae IDE 规格驱动开发目录（设计文档，非运行代码，不纳入版本库）
 .trae/

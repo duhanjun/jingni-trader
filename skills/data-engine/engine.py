@@ -34,6 +34,7 @@ from scripts.config import (
     notify_supported_backends,
 )
 from scripts.base.base_data_provider import BaseDataProvider
+from scripts.data_types import DATA_TYPES, DataTypeMeta
 from scripts.errors import (
     DataSourceError, QuotaExceededError, RateLimitError, NetworkError,
     InvalidParameterError, BlacklistedError, DataNotFoundError,
@@ -44,6 +45,7 @@ from scripts.errors import (
 # 适配器注册表
 # 注意：websearch 适配器需要 web_search_fn 注入，特殊处理
 # tdxquant 是新增的 opt-in 源（通达信量化）
+# wind/ifind 是新增的 opt-in 源（万得 WindPy / 同花顺 iFinD）
 _ADAPTER_REGISTRY = {
     "tushare":   ("scripts.adapters.tushare_adapter",   "TushareAdapter",   {}),
     "baostock":  ("scripts.adapters.baostock_adapter",  "BaostockAdapter",  {}),
@@ -52,6 +54,8 @@ _ADAPTER_REGISTRY = {
     "xtquant":   ("scripts.adapters.xtquant_adapter",   "XtQuantAdapter",   {}),
     "gm":        ("scripts.adapters.gm_adapter",        "GmAdapter",        {}),
     "tdxquant":  ("scripts.adapters.tdxquant_adapter",  "TdxQuantAdapter",  {}),
+    "wind":      ("scripts.adapters.wind_adapter",       "WindAdapter",      {}),
+    "ifind":     ("scripts.adapters.ifind_adapter",      "IfindAdapter",     {}),
 }
 
 
@@ -509,6 +513,132 @@ class DataEngine:
 
         return df
 
+    # ------------------------------------------------------------------
+    # 按数据类型粒度独立降级（v4 增强）
+    # ------------------------------------------------------------------
+
+    def _build_kwargs_for_type(
+        self, data_type: str, symbols: List[str],
+        start_date: str, end_date: str, report_date: Optional[str],
+    ) -> Dict[str, Any]:
+        """根据数据类型构造对应适配器方法的参数"""
+        if data_type == "daily":
+            return {
+                "symbols": symbols, "start_date": start_date,
+                "end_date": end_date, "adjust": ADJUST_MODE,
+            }
+        elif data_type == "financial":
+            return {
+                "symbols": symbols,
+                "report_date": report_date or start_date,
+                "fields": [],
+            }
+        elif data_type in ("capital_flow", "dragon_tiger"):
+            return {
+                "symbols": symbols,
+                "start_date": start_date,
+                "end_date": end_date,
+            }
+        elif data_type == "shareholder":
+            return {
+                "symbols": symbols,
+                "report_date": report_date or "",
+            }
+        return {}
+
+    def fetch_by_type(
+        self,
+        data_type: str,
+        symbols: List[str],
+        start_date: str,
+        end_date: str,
+        report_date: Optional[str] = None,
+    ) -> tuple:
+        """
+        按数据类型独立降级获取数据
+
+        遍历 self.data_sources 优先级链，逐个尝试支持该类型的适配器。
+        某个源不支持该方法或返回空数据时，自动切到下一个源。
+
+        返回: (DataFrame, active_backend)
+        """
+        meta = DATA_TYPES.get(data_type)
+        if meta is None:
+            raise ValueError(f"未知数据类型: {data_type}")
+
+        kwargs = self._build_kwargs_for_type(
+            data_type, symbols, start_date, end_date, report_date
+        )
+        tried = []
+        errors: Dict[str, str] = {}
+
+        for backend in self.data_sources:
+            # 加载适配器
+            try:
+                adapter = _load_adapter(backend, **self._websearch_extra_kwargs(backend))
+            except Exception as e:
+                logger.debug(f"[{meta.display_name}] 加载 {backend} 失败: {e}")
+                tried.append(backend)
+                continue
+
+            # 检查该适配器是否支持此数据类型
+            if not adapter.supports(data_type):
+                logger.info(f"[{meta.display_name}] {backend} 不支持此数据类型，跳过")
+                tried.append(backend)
+                continue
+
+            # 调用适配器获取数据
+            try:
+                df = adapter.fetch(data_type, **kwargs)
+                if df is not None and not df.empty:
+                    logger.info(f"[{meta.display_name}] 从 {backend} 获取成功 ({len(df)} 行)")
+                    return df, backend
+                else:
+                    logger.info(f"[{meta.display_name}] {backend} 返回空数据，尝试下一个源")
+            except Exception as e:
+                msg = str(e)
+                errors[backend] = msg
+                logger.warning(f"[{meta.display_name}] {backend} 获取失败: {msg}")
+
+            tried.append(backend)
+
+        # 全部源都失败
+        if meta.allow_synthetic:
+            logger.warning(f"[{meta.display_name}] 所有源均失败，使用模拟数据兜底")
+            return self._generate_synthetic_data(symbols, start_date, end_date), "synthetic"
+        else:
+            logger.warning(
+                f"[{meta.display_name}] 所有源均失败或返回空 "
+                f"(已尝试: {' → '.join(tried)})"
+            )
+            return pd.DataFrame(), ""
+
+    def fetch_all_types(
+        self,
+        symbols: List[str],
+        start_date: str,
+        end_date: str,
+        report_date: Optional[str] = None,
+    ) -> Dict[str, tuple]:
+        """
+        批量获取所有数据类型，每种类型独立降级
+
+        返回: {data_type: (DataFrame, active_backend)}
+        每种类型独立降级，互不影响
+        """
+        results = {}
+        for data_type, meta in DATA_TYPES.items():
+            df, backend = self.fetch_by_type(
+                data_type, symbols, start_date, end_date, report_date
+            )
+            if df is not None and not df.empty:
+                results[data_type] = (df, backend)
+            elif meta.required:
+                raise RuntimeError(f"必需数据类型 {meta.display_name} 获取失败")
+            else:
+                logger.info(f"[{meta.display_name}] 数据缺失（非必需，跳过）")
+        return results
+
     def fetch_and_clean(
         self,
         symbols: List[str],
@@ -589,11 +719,37 @@ class DataEngine:
             try:
                 stock_info = self.provider.get_stock_list()
                 if not stock_info.empty and 'list_date' in stock_info.columns:
-                    stock_info['list_date'] = pd.to_datetime(stock_info['list_date'], format='%Y%m%d', errors='coerce')
-                    df = df.merge(stock_info[['code', 'list_date']], on='code', how='left')
+                    # 统一 code 格式：不同适配器返回的 code 格式可能不同
+                    # (如日线数据为 002594.SZ，股票列表为 SZ.002594)
+                    def _normalize_code(c):
+                        """将各种 code 格式统一为 6位数字.交易所 后缀格式"""
+                        s = str(c).strip().upper()
+                        if '.' in s:
+                            parts = s.split('.')
+                            # SZ.002594 → 002594.SZ, 002594.SZ → 002594.SZ
+                            if len(parts) == 2 and len(parts[0]) <= 3 and parts[0] in ('SH', 'SZ', 'BJ'):
+                                return f'{parts[1]}.{parts[0]}'
+                            return s
+                        # sh600000 → 600000.SH
+                        if s.startswith(('SH', 'SZ', 'BJ')) and len(s) > 4:
+                            return f'{s[2:]}.{s[:2]}'
+                        return s
+
+                    df['_code_norm'] = df['code'].apply(_normalize_code)
+                    stock_info['_code_norm'] = stock_info['code'].apply(_normalize_code)
+                    # list_date 支持多种格式（%Y%m%d / %Y-%m-%d / ISO）
+                    stock_info['list_date'] = pd.to_datetime(
+                        stock_info['list_date'], format='mixed', errors='coerce'
+                    )
+                    df = df.merge(
+                        stock_info[['_code_norm', 'list_date']],
+                        on='_code_norm', how='left', suffixes=('', '_stock')
+                    )
                     df['listed_days'] = (df['date'] - df['list_date']).dt.days
+                    before = len(df)
                     df = df[df['listed_days'] >= min_listed_days]
-                    logger.info(f"剔除新股后剩余 {len(df)} 行 (剔除 {initial_rows - len(df)} 行)")
+                    logger.info(f"剔除新股后剩余 {len(df)} 行 (剔除 {before - len(df)} 行)")
+                    df = df.drop(columns=['_code_norm'], errors='ignore')
             except Exception as e:
                 logger.warning(f"获取股票列表失败，跳过新股剔除: {e}")
 
@@ -620,6 +776,196 @@ class DataEngine:
 
         logger.info(f"清洗完成，最终 {len(df)} 行数据")
         return df.sort_values(['date', 'code']).reset_index(drop=True)
+
+    # ------------------------------------------------------------------
+    # 财务数据 / 估值数据（v3 扩展：统一标准 schema + 降级链）
+    # ------------------------------------------------------------------
+
+    # 标准 schema 字段（与 base_data_provider.BaseDataProvider.get_financial 一致）
+    _FINANCIAL_STANDARD_COLS = [
+        'code', 'report_date', 'pe_ttm', 'pb', 'ps_ttm', 'dv_ratio',
+        'roe', 'roa', 'gross_margin', 'net_margin',
+        'revenue_growth', 'profit_growth',
+        'debt_ratio', 'current_ratio', 'quick_ratio', 'ocf',
+        'industry', 'name',
+    ]
+
+    def _try_fetch_financial_with_fallback(
+        self,
+        symbols: List[str],
+        report_date: str,
+        fields: Optional[List[str]] = None,
+    ) -> pd.DataFrame:
+        """
+        财务数据版本的降级链拉取。复用 _should_fallback 决策逻辑，
+        但调用 provider.get_financial 而非 get_daily。
+
+        与 _try_fetch_with_fallback 的区别：
+        - 不走模拟数据兜底（财务数据合成无意义）
+        - 全部源都失败/为空时返回空 DataFrame
+        """
+        tried_backends: List[str] = []
+        last_errors: Dict[str, str] = {}
+
+        for idx, backend in enumerate(self.data_sources):
+            tried_backends.append(backend)
+            # 切换 provider
+            if idx > 0 or self.backend != backend:
+                logger.info(f"切换到数据源: {backend}（财务数据链路: {' → '.join(tried_backends)}）")
+                try:
+                    self.provider = _load_adapter(backend, **self._websearch_extra_kwargs(backend))
+                    self.backend = backend
+                except Exception as e:
+                    last_errors[backend] = f"初始化失败: {e}"
+                    logger.warning(f"切换到 {backend} 失败: {e}，尝试下一个")
+                    continue
+
+            try:
+                logger.info(
+                    f"使用数据源 {backend} 获取 {len(symbols)} 只股票的财务数据 (report_date={report_date})"
+                )
+                df = self.provider.get_financial(symbols, report_date, fields or [])
+                if df is not None and not df.empty:
+                    if idx > 0:
+                        logger.info(
+                            f"✓ 数据源 {backend} 财务数据拉取成功 {len(df)} 行"
+                            f"（链路: {' → '.join(tried_backends)}）"
+                        )
+                    self.is_synthetic = False
+                    return df
+                else:
+                    last_errors[backend] = "返回空数据"
+                    logger.warning(f"数据源 {backend} 财务数据返回空，尝试下一个源")
+                    continue
+            except Exception as e:
+                msg = getattr(e, "message", str(e))
+                last_errors[backend] = f"{type(e).__name__}: {msg}"
+
+                if self._should_fallback(backend, e):
+                    reason = DATA_FALLBACK_RULES.get(backend, {}).get("downgrade_reason", "")
+                    logger.warning(
+                        f"数据源 {backend} 触发【{reason or type(e).__name__}】（{msg}），自动降级"
+                    )
+                    continue
+
+                if isinstance(e, DataSourceError):
+                    logger.error(f"数据源 {backend} 错误（{msg}），不切换")
+                else:
+                    logger.error(f"数据源 {backend} 未知异常（{msg}），不切换")
+                raise
+
+        # 走完整个降级链仍失败：财务数据不走模拟兜底，直接返回空
+        logger.error(
+            f"财务数据 data_sources {self.data_sources} 中所有数据源都失败或返回空。"
+            f"已尝试: {' → '.join(tried_backends)}"
+        )
+        for k, v in last_errors.items():
+            logger.error(f"  • {k}: {v}")
+        return pd.DataFrame(columns=self._FINANCIAL_STANDARD_COLS)
+
+    def fetch_financial(
+        self,
+        symbols: List[str],
+        report_date: str,
+        fields: Optional[List[str]] = None,
+    ) -> pd.DataFrame:
+        """
+        获取财务数据，返回统一标准 schema 的 DataFrame。
+
+        走与 fetch_and_clean 相同的降级链（tushare → baostock → akshare → websearch），
+        每个源的 get_financial 实现负责把原始字段映射到标准 schema。
+
+        参数:
+            symbols: 股票代码列表，如 ['000001.SZ', '600000.SH']
+            report_date: 报告期，如 '20240930' 或 '2024-09-30'
+            fields: 可选，需要返回的字段列表（code/report_date 始终保留）；
+                    为 None 时返回完整标准 schema。
+
+        返回:
+            DataFrame，每行一只股票一个报告期，标准字段:
+            code, report_date, pe_ttm, pb, ps_ttm, dv_ratio,
+            roe, roa, gross_margin, net_margin,
+            revenue_growth, profit_growth,
+            debt_ratio, current_ratio, quick_ratio, ocf,
+            industry, name
+            全部源都失败时返回空 DataFrame（不抛异常）。
+        """
+        if not symbols:
+            logger.warning("fetch_financial: symbols 为空")
+            return pd.DataFrame(columns=self._FINANCIAL_STANDARD_COLS)
+
+        try:
+            df = self._try_fetch_financial_with_fallback(symbols, report_date, fields)
+        except Exception as e:
+            logger.error(f"fetch_financial 拉取失败: {e}")
+            return pd.DataFrame(columns=self._FINANCIAL_STANDARD_COLS)
+
+        if df.empty:
+            return df
+
+        # 保证列顺序与标准 schema 一致（缺失列补 NaN）
+        for col in self._FINANCIAL_STANDARD_COLS:
+            if col not in df.columns:
+                df[col] = None
+        df = df[self._FINANCIAL_STANDARD_COLS]
+
+        # 如果调用方指定了 fields，按需过滤列（code/report_date 始终保留）
+        if fields:
+            keep = ['code', 'report_date'] + [f for f in fields if f in self._FINANCIAL_STANDARD_COLS]
+            keep = list(dict.fromkeys(keep))
+            df = df[keep]
+
+        return df.reset_index(drop=True)
+
+    def fetch_valuation(
+        self,
+        symbols: List[str],
+        trade_date: str,
+    ) -> pd.DataFrame:
+        """
+        获取指定交易日的估值数据（PE/PB/PS/股息率）。
+
+        复用各适配器的 get_financial 实现：
+        - Tushare: pro.daily_basic(trade_date=...)
+        - AkShare: ak.stock_a_indicator_lg() 取最近一条
+        - BaoStock: 不直接提供估值，留空
+
+        参数:
+            symbols: 股票代码列表
+            trade_date: 交易日期，如 '20240930' 或 '2024-09-30'
+
+        返回:
+            DataFrame，列: code, trade_date, pe_ttm, pb, ps_ttm, dv_ratio
+            全部源失败时返回空 DataFrame。
+        """
+        val_cols = ['code', 'trade_date', 'pe_ttm', 'pb', 'ps_ttm', 'dv_ratio']
+
+        if not symbols:
+            logger.warning("fetch_valuation: symbols 为空")
+            return pd.DataFrame(columns=val_cols)
+
+        # 复用财务数据降级链，传入估值相关字段
+        try:
+            df = self._try_fetch_financial_with_fallback(
+                symbols=symbols,
+                report_date=trade_date,
+                fields=['pe_ttm', 'pb', 'ps_ttm', 'dv_ratio'],
+            )
+        except Exception as e:
+            logger.error(f"fetch_valuation 拉取失败: {e}")
+            return pd.DataFrame(columns=val_cols)
+
+        if df.empty:
+            return pd.DataFrame(columns=val_cols)
+
+        # 把 report_date 重命名为 trade_date，仅保留估值字段
+        out = pd.DataFrame()
+        out['code'] = df['code'] if 'code' in df.columns else None
+        out['trade_date'] = df['report_date'] if 'report_date' in df.columns else trade_date.replace('-', '')
+        for col in ['pe_ttm', 'pb', 'ps_ttm', 'dv_ratio']:
+            out[col] = df[col] if col in df.columns else None
+
+        return out[val_cols].reset_index(drop=True)
 
     def _mark_price_limits(self, df: pd.DataFrame) -> pd.DataFrame:
         """根据涨跌幅标记涨跌停"""
@@ -708,13 +1054,31 @@ def run(ctx) -> Dict[str, Any]:
             data_sources=data_sources,
             web_search_fn=web_search_fn,
         )
-        df = engine.fetch_and_clean(
-            symbols=ctx.stock_pool,
-            start_date=ctx.start_date,
-            end_date=ctx.end_date,
-            adjust=ADJUST_MODE,
-            external_data=external
-        )
+
+        output_dir = os.environ.get("QUANT_DATA_DIR", "./workspace/data")
+        os.makedirs(output_dir, exist_ok=True)
+
+        # ============================================================
+        # v4: 按数据类型粒度独立降级，批量获取所有数据类型
+        # ============================================================
+        # 日线数据：优先外部数据，其次降级链
+        if external and external.get("daily") is not None:
+            df = engine.fetch_and_clean(
+                symbols=ctx.stock_pool,
+                start_date=ctx.start_date,
+                end_date=ctx.end_date,
+                adjust=ADJUST_MODE,
+                external_data=external
+            )
+        else:
+            df = engine.fetch_and_clean(
+                symbols=ctx.stock_pool,
+                start_date=ctx.start_date,
+                end_date=ctx.end_date,
+                adjust=ADJUST_MODE,
+                external_data=None
+            )
+
         if df.empty:
             return {
                 "success": False,
@@ -723,24 +1087,55 @@ def run(ctx) -> Dict[str, Any]:
                 "error": "未获取到任何有效数据"
             }
 
-        output_dir = os.environ.get("QUANT_DATA_DIR", "./workspace/data")
-        os.makedirs(output_dir, exist_ok=True)
+        # 保存日线数据（主产物）
         path = os.path.join(output_dir, "cleaned_data.parquet")
         engine.save_data(df, path)
 
         data_source = "external" if external and external.get("daily") is not None else "native"
+        metadata = {
+            "rows": len(df),
+            "symbols_count": df['code'].nunique(),
+            "date_range": f"{df['date'].min().strftime('%Y-%m-%d')} ~ {df['date'].max().strftime('%Y-%m-%d')}",
+            "data_source": data_source,
+            "active_backend": engine.backend,
+            "is_synthetic": engine.is_synthetic,
+            "fallback_chain": engine.data_sources,
+            "data_source_usage": {},
+        }
+
+        # 获取补充数据类型（financial/capital_flow/dragon_tiger/shareholder）
+        # 每种数据类型独立降级，互不影响
+        report_date = getattr(ctx, 'metadata', {}).get("report_date", "")
+        supplementary_types = ["financial", "capital_flow", "dragon_tiger", "shareholder"]
+        for data_type in supplementary_types:
+            meta = DATA_TYPES.get(data_type)
+            if meta is None:
+                continue
+            try:
+                sdf, sbackend = engine.fetch_by_type(
+                    data_type=data_type,
+                    symbols=ctx.stock_pool,
+                    start_date=ctx.start_date,
+                    end_date=ctx.end_date,
+                    report_date=report_date,
+                )
+                if sdf is not None and not sdf.empty:
+                    spath = os.path.join(output_dir, meta.artifact_filename)
+                    engine.save_data(sdf, spath)
+                    ctx.update_artifact(meta.artifact_key, spath)
+                    metadata["data_source_usage"][data_type] = sbackend
+                    logger.info(f"{meta.display_name} 已落盘: {spath} (源: {sbackend})")
+                else:
+                    logger.info(f"{meta.display_name} 数据缺失（非必需，跳过）")
+            except Exception as e:
+                logger.warning(f"获取 {meta.display_name} 失败（非必需，跳过）: {e}")
+
+        metadata["data_source_usage"]["daily"] = engine.backend
+
         return {
             "success": True,
             "artifact_path": path,
-            "metadata": {
-                "rows": len(df),
-                "symbols_count": df['code'].nunique(),
-                "date_range": f"{df['date'].min().strftime('%Y-%m-%d')} ~ {df['date'].max().strftime('%Y-%m-%d')}",
-                "data_source": data_source,
-                "active_backend": engine.backend,
-                "is_synthetic": engine.is_synthetic,
-                "fallback_chain": engine.data_sources,
-            },
+            "metadata": metadata,
             "error": ""
         }
     except Exception as e:

@@ -23,6 +23,7 @@ from scripts.config import (
     MAX_ORDER_FREQUENCY, MIN_COMMISSION, COMMISSION_RATE, STAMP_TAX_RATE,
     SLIPPAGE, AUDIT_LOG_PATH, ACCOUNT_STATE_PATH
 )
+from scripts.base.base_executor import BaseExecutor
 
 logger = logging.getLogger("execution-monitor-engine")
 
@@ -39,6 +40,9 @@ class Account:
     def reset_daily(self):
         self.start_of_day_nav = self.nav
         self.daily_pnl = 0.0
+        # T+1: 次日所有持仓可卖
+        for pos in self.positions.values():
+            pos["available_volume"] = pos["volume"]
 
     def get_current_nav(self, prices: Optional[Dict[str, float]] = None) -> float:
         total = self.available_cash
@@ -54,18 +58,20 @@ class Account:
             raise ValueError(f"资金不足: 需要 {cost}, 可用 {self.available_cash}")
         self.available_cash -= cost
         if code not in self.positions:
-            self.positions[code] = {"volume": 0, "avg_cost": 0.0}
+            self.positions[code] = {"volume": 0, "avg_cost": 0.0, "available_volume": 0}
         old_cost = self.positions[code]["avg_cost"] * self.positions[code]["volume"]
         self.positions[code]["volume"] += volume
-        self.positions[code]["avg_cost"] = (old_cost + cost) / self.positions[code]["volume"]
+        self.positions[code]["avg_cost"] = (old_cost + price * volume) / self.positions[code]["volume"] if self.positions[code]["volume"] > 0 else 0.0
+        # T+1: 买入当日 available_volume 不变,次日 reset_daily 后才可卖
 
     def apply_sell(self, code: str, price: float, volume: int, commission: float, stamp_tax: float):
-        if code not in self.positions or self.positions[code]["volume"] < volume:
-            raise ValueError(f"持仓不足: 需要 {volume}")
+        if code not in self.positions or self.positions[code].get("available_volume", 0) < volume:
+            raise ValueError(f"可用持仓不足: 需要 {volume}, 可用 {self.positions[code].get('available_volume', 0)}")
         total_fee = commission + stamp_tax
         revenue = price * volume - total_fee
         self.available_cash += revenue
         self.positions[code]["volume"] -= volume
+        self.positions[code]["available_volume"] -= volume
         if self.positions[code]["volume"] <= 0:
             del self.positions[code]
 
@@ -162,7 +168,7 @@ class AuditLogger:
         return logs[-n:]
 
 
-class PaperExecutor:
+class PaperExecutor(BaseExecutor):
     """模拟交易执行器"""
 
     def __init__(self, init_capital: float = INIT_CAPITAL):
@@ -182,7 +188,28 @@ class PaperExecutor:
         price: Optional[float] = None,
         order_type: str = "limit"
     ) -> Dict[str, Any]:
-        order_value = (price or 0) * volume
+        # 数量校验: A股最小100股
+        if volume < 100 or volume % 100 != 0:
+            return {"success": False, "error": f"下单数量需为100的整数倍且≥100, 当前 {volume}"}
+
+        # 价格校验
+        if order_type == "limit" and price is None:
+            return {"success": False, "error": "限价单必须指定价格"}
+        if price is not None and price <= 0:
+            return {"success": False, "error": f"价格必须>0, 当前 {price}"}
+
+        # 滑点模拟
+        base_price = price if price is not None else 0
+        if order_type == "market" and base_price == 0:
+            return {"success": False, "error": "市价单需提供基准价格"}
+        fill_price = base_price
+        if SLIPPAGE > 0:
+            if side == "buy":
+                fill_price = base_price * (1 + SLIPPAGE)
+            elif side == "sell":
+                fill_price = base_price * (1 - SLIPPAGE)
+
+        order_value = fill_price * volume
         check = self.circuit_breaker.check_send_order(self.account, code, order_value)
 
         if not check["allowed"]:
@@ -192,23 +219,26 @@ class PaperExecutor:
         try:
             if side == "buy":
                 commission = self.account.calc_commission(order_value, is_sell=False)
-                self.account.apply_buy(code, price or 0, volume, commission)
+                self.account.apply_buy(code, fill_price, volume, commission)
             elif side == "sell":
                 total_fee = self.account.calc_commission(order_value, is_sell=True)
                 stamp_tax = order_value * STAMP_TAX_RATE
                 commission = total_fee - stamp_tax
-                self.account.apply_sell(code, price or 0, volume, commission, stamp_tax)
+                self.account.apply_sell(code, fill_price, volume, commission, stamp_tax)
+            else:
+                return {"success": False, "error": f"未知 side: {side}"}
 
             self.orders[order_id] = {
                 "order_id": order_id, "code": code, "side": side,
-                "volume": volume, "price": price, "status": "filled",
+                "volume": volume, "price": fill_price, "order_price": base_price,
+                "status": "filled",
                 "timestamp": datetime.now().isoformat(),
             }
-            self.audit.log_order(order_id, code, side, volume, price, "filled")
-            return {"success": True, "order_id": order_id, "status": "filled"}
+            self.audit.log_order(order_id, code, side, volume, fill_price, "filled", {"order_price": base_price})
+            return {"success": True, "order_id": order_id, "status": "filled", "fill_price": fill_price}
 
         except Exception as e:
-            self.audit.log_order(order_id, code, side, volume, price, "rejected", {"error": str(e)})
+            self.audit.log_order(order_id, code, side, volume, fill_price, "rejected", {"error": str(e)})
             return {"success": False, "order_id": order_id, "status": "rejected", "error": str(e)}
 
     def cancel_order(self, order_id: str) -> Dict[str, Any]:
@@ -220,8 +250,12 @@ class PaperExecutor:
     def query_positions(self) -> pd.DataFrame:
         rows = []
         for code, pos in self.account.positions.items():
-            rows.append({"code": code, "volume": pos["volume"], "avg_cost": pos["avg_cost"]})
-        return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["code", "volume", "avg_cost"])
+            rows.append({
+                "code": code, "volume": pos["volume"],
+                "available_volume": pos.get("available_volume", pos["volume"]),
+                "avg_cost": pos["avg_cost"]
+            })
+        return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["code", "volume", "available_volume", "avg_cost"])
 
     def sync_positions(
         self,
@@ -237,18 +271,22 @@ class PaperExecutor:
                 continue
             price = prices[code]
             target_value = nav * target_weight
-            current_volume = self.account.positions.get(code, {}).get("volume", 0)
+            pos = self.account.positions.get(code, {})
+            current_volume = pos.get("volume", 0)
+            current_available = pos.get("available_volume", current_volume)
             target_volume = int((target_value / price) // 100 * 100)
 
             if target_volume > current_volume:
+                # 需买入(看总持仓差额)
                 diff = target_volume - current_volume
                 if diff >= 100:
                     orders_to_execute.append({
                         "code": code, "side": "buy", "volume": diff,
                         "price": price, "order_type": "limit",
                     })
-            elif target_volume < current_volume:
-                diff = current_volume - target_volume
+            elif target_volume < current_available:
+                # 需卖出(只能卖可用部分,T+1约束)
+                diff = current_available - target_volume
                 if diff >= 100:
                     orders_to_execute.append({
                         "code": code, "side": "sell", "volume": diff,
@@ -278,7 +316,12 @@ class PaperExecutor:
             state = json.load(f)
         self.account.nav = state.get("nav", INIT_CAPITAL)
         self.account.available_cash = state.get("available_cash", INIT_CAPITAL)
-        self.account.positions = state.get("positions", {})
+        positions = state.get("positions", {})
+        # 兼容旧状态文件:补齐 available_volume 字段
+        for code, pos in positions.items():
+            if "available_volume" not in pos:
+                pos["available_volume"] = pos.get("volume", 0)
+        self.account.positions = positions
         logger.info(f"已加载账户状态: nav={self.account.nav}")
         return True
 
@@ -325,13 +368,30 @@ def run(ctx) -> Dict[str, Any]:
         if mode == "paper":
             executor = PaperExecutor()
             executor.load_state()
+        elif mode == "live":
+            backend = TRADE_BACKEND
+            if backend == "xtquant":
+                from scripts.adapters.xtquant_adapter import XtQuantExecutor
+                executor = XtQuantExecutor()
+                if not executor.connect():
+                    return {"success": False, "artifact_path": "", "metadata": {},
+                            "error": "miniQMT 连接失败,请检查 XTQUANT_PATH/XTQUANT_ACCOUNT 配置及客户端运行状态"}
+            elif backend == "gm":
+                from scripts.adapters.gm_adapter import GMExecutor
+                executor = GMExecutor()
+                if not executor._try_connect():
+                    return {"success": False, "artifact_path": "", "metadata": {},
+                            "error": "掘金终端连接失败,请检查 GM_TOKEN 及客户端运行状态"}
+            else:
+                return {"success": False, "artifact_path": "", "metadata": {},
+                        "error": f"不支持的交易后端: {backend}"}
         else:
-            return {
-                "success": False, "artifact_path": "", "metadata": {},
-                "error": f"实盘模式 ({TRADE_BACKEND}) 需配置券商接口，当前不可用"
-            }
+            return {"success": False, "artifact_path": "", "metadata": {},
+                    "error": f"未知交易模式: {mode}(应为 paper/live)"}
 
-        executor.account.reset_daily()
+        # 仅 paper 执行器有 account 字段和 reset_daily 语义
+        if hasattr(executor, "account") and executor.account is not None:
+            executor.account.reset_daily()
         orders = executor.sync_positions(target_weights, prices)
 
         success_count = 0
@@ -344,13 +404,15 @@ def run(ctx) -> Dict[str, Any]:
                 price=order["price"],
                 order_type=order.get("order_type", "limit"),
             )
-            if result["success"]:
+            if result.get("success"):
                 success_count += 1
             else:
                 fail_count += 1
                 logger.warning(f"订单失败: {result}")
 
-        executor.save_state()
+        # 仅 paper 执行器支持本地状态持久化
+        if hasattr(executor, "save_state"):
+            executor.save_state()
         account_snapshot = executor.query_account()
 
         return {

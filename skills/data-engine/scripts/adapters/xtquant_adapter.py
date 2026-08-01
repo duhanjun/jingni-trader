@@ -55,6 +55,8 @@ def _finalize(df: pd.DataFrame) -> pd.DataFrame:
 class XtQuantAdapter(BaseDataProvider):
     """迅投 xtquant (QMT) 适配器：连接本地 QMT 数据服务拉取真实行情。"""
 
+    SUPPORTED_DATA_TYPES = {"daily", "financial"}
+
     def __init__(self):
         try:
             from xtquant import xtdata
@@ -147,4 +149,56 @@ class XtQuantAdapter(BaseDataProvider):
         return pd.DataFrame(columns=["code", "date", "adj_factor"])
 
     def get_financial(self, symbols, report_date, fields):
-        return pd.DataFrame()
+        """获取财务数据，返回统一标准 schema。
+
+        xtquant 的 get_financial_data 主要提供股本结构(Capital)、十大股东
+        (Top10Holder)、股东户数(HolderNum)等股权类数据，不直接提供
+        PE/PB/ROE/营收等基本面指标。此处通过 get_instrument_detail 获取
+        股票名称，其余财务字段留空(None)，由上层降级链切换到其他源补充。
+
+        返回 DataFrame 包含标准字段:
+            code, report_date, pe_ttm, pb, ps_ttm, dv_ratio,
+            roe, roa, gross_margin, net_margin,
+            revenue_growth, profit_growth,
+            debt_ratio, current_ratio, quick_ratio, ocf,
+            industry, name
+        """
+        self._check_available()
+        xtdata = self.xtdata
+
+        standard_cols = [
+            'code', 'report_date', 'pe_ttm', 'pb', 'ps_ttm', 'dv_ratio',
+            'roe', 'roa', 'gross_margin', 'net_margin',
+            'revenue_growth', 'profit_growth',
+            'debt_ratio', 'current_ratio', 'quick_ratio', 'ocf',
+            'industry', 'name',
+        ]
+
+        # 标准化报告期: '2024-09-30' -> '20240930'
+        period = report_date.replace('-', '')
+
+        rows = []
+        for code in symbols:
+            row = {col: None for col in standard_cols}
+            row['code'] = code
+            row['report_date'] = period
+
+            # 股票名称: get_instrument_detail 返回 InstrumentName 字段
+            try:
+                det = xtdata.get_instrument_detail(code)
+                if det and isinstance(det, dict):
+                    row['name'] = det.get('InstrumentName') or None
+            except Exception as e:
+                logger.debug("xtdata 获取 %s 名称失败: %s", code, e)
+
+            rows.append(row)
+
+        out = pd.DataFrame(rows, columns=standard_cols)
+
+        # 如果调用方指定了 fields，按需过滤列（code/report_date 始终保留）
+        if fields:
+            keep = ['code', 'report_date'] + [f for f in fields if f in standard_cols]
+            keep = list(dict.fromkeys(keep))
+            out = out[keep]
+
+        return out.reset_index(drop=True)

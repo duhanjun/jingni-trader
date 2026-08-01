@@ -39,6 +39,8 @@ class WebSearchAdapter(BaseDataProvider):
         adapter = WebSearchAdapter(web_search_fn=web_search)
     """
 
+    SUPPORTED_DATA_TYPES = {"daily", "financial"}
+
     def __init__(self, web_search_fn: Optional[WebSearchFn] = None):
         """
         参数:
@@ -197,4 +199,16 @@ class WebSearchAdapter(BaseDataProvider):
         return pd.DataFrame()
 
     def get_financial(self, symbols, report_date, fields):
-        return pd.DataFrame()
+        """获取财务数据。
+
+        WebSearch 通过搜索引擎查询，不适合结构化财务数据。
+        此处规范为返回带标准列的空 DataFrame，由上层降级链切换到其他源。
+        """
+        standard_cols = [
+            'code', 'report_date', 'pe_ttm', 'pb', 'ps_ttm', 'dv_ratio',
+            'roe', 'roa', 'gross_margin', 'net_margin',
+            'revenue_growth', 'profit_growth',
+            'debt_ratio', 'current_ratio', 'quick_ratio', 'ocf',
+            'industry', 'name',
+        ]
+        return pd.DataFrame(columns=standard_cols)

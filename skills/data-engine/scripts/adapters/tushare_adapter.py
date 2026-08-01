@@ -25,6 +25,8 @@ logger = logging.getLogger("tushare-adapter")
 class TushareAdapter(BaseDataProvider):
     """Tushare Pro 适配器"""
 
+    SUPPORTED_DATA_TYPES = {"daily", "financial", "capital_flow", "dragon_tiger"}
+
     def __init__(self, token: Optional[str] = None):
         token = token or TUSHARE_TOKEN
         if not token:
@@ -36,6 +38,7 @@ class TushareAdapter(BaseDataProvider):
         self._min_interval = 0.2  # 每秒最多5次
         # 配额/限频错误重试上限：碰到这些错误时不要重试
         self._non_retriable = (QuotaExceededError, RateLimitError)
+        self._logger = logger
 
     def _rate_limit(self):
         """简单频率控制"""
@@ -241,13 +244,193 @@ class TushareAdapter(BaseDataProvider):
         return result
 
     def get_financial(self, symbols, report_date, fields):
-        # 示例仅实现基本调用
-        df = self._safe_call(
-            self.pro.fina_indicator,
-            ts_code=','.join(symbols),
-            period=report_date,
-            fields=','.join(fields)
+        """
+        获取财务数据，返回统一标准 schema。
+
+        使用:
+        - pro.fina_indicator: 财务指标（ROE/ROA/毛利率/净利率/增速/现金流等）
+        - pro.daily_basic: 估值数据（PE_TTM/PB/PS_TTM/DV_RATIO）
+        - pro.stock_basic: 行业与股票名称
+
+        返回 DataFrame 包含标准字段:
+            code, report_date, pe_ttm, pb, ps_ttm, dv_ratio,
+            roe, roa, gross_margin, net_margin,
+            revenue_growth, profit_growth,
+            debt_ratio, current_ratio, quick_ratio, ocf,
+            industry, name
+        """
+        period = report_date.replace('-', '')
+
+        # 标准输出列（固定顺序）
+        standard_cols = [
+            'code', 'report_date', 'pe_ttm', 'pb', 'ps_ttm', 'dv_ratio',
+            'roe', 'roa', 'gross_margin', 'net_margin',
+            'revenue_growth', 'profit_growth',
+            'debt_ratio', 'current_ratio', 'quick_ratio', 'ocf',
+            'industry', 'name',
+        ]
+
+        # 1) 财务指标 fina_indicator
+        fina_fields = (
+            'ts_code,ann_date,end_date,'
+            'roe,roa,grossprofit_margin,netprofit_margin,'
+            'or_on_year,qprofit_yoy,'
+            'debt_to_assets,current_ratio,quick_ratio,'
+            'netcash_oper'
         )
-        if df is not None and not df.empty:
-            df.rename(columns={'ts_code': 'code'}, inplace=True)
-        return df if df is not None else pd.DataFrame()
+        fina_frames = []
+        for symbol in symbols:
+            try:
+                df_f = self._safe_call(
+                    self.pro.fina_indicator,
+                    ts_code=symbol,
+                    period=period,
+                    fields=fina_fields
+                )
+                if df_f is not None and not df_f.empty:
+                    fina_frames.append(df_f)
+            except DataSourceError:
+                raise
+            except Exception as e:
+                logger.warning(f"获取 {symbol} 财务指标失败: {e}")
+                continue
+
+        if not fina_frames:
+            return pd.DataFrame(columns=standard_cols)
+
+        fina_df = pd.concat(fina_frames, ignore_index=True)
+        # 同一报告期可能有多条（更新批次），保留最新 ann_date
+        if 'ann_date' in fina_df.columns:
+            fina_df = fina_df.sort_values('ann_date').drop_duplicates(
+                subset=['ts_code', 'end_date'], keep='last'
+            )
+
+        # 2) 估值数据 daily_basic（用报告期对应的当日；若当日无数据则返回空）
+        val_frames = []
+        for symbol in symbols:
+            try:
+                df_v = self._safe_call(
+                    self.pro.daily_basic,
+                    ts_code=symbol,
+                    trade_date=period,
+                    fields='ts_code,trade_date,pe_ttm,pb,ps_ttm,dv_ratio'
+                )
+                if df_v is not None and not df_v.empty:
+                    val_frames.append(df_v)
+            except DataSourceError:
+                raise
+            except Exception as e:
+                logger.warning(f"获取 {symbol} 估值数据失败: {e}")
+                continue
+
+        if val_frames:
+            val_df = pd.concat(val_frames, ignore_index=True)
+            val_df = val_df.rename(columns={'trade_date': 'val_date'})
+        else:
+            val_df = pd.DataFrame(columns=['ts_code', 'val_date', 'pe_ttm', 'pb', 'ps_ttm', 'dv_ratio'])
+
+        # 3) 行业 + 名称（一次性获取全市场，本地过滤）
+        try:
+            basic_df = self._safe_call(
+                self.pro.stock_basic,
+                exchange='',
+                list_status='L',
+                fields='ts_code,name,industry'
+            )
+        except DataSourceError:
+            raise
+        except Exception as e:
+            logger.warning(f"获取 stock_basic 失败: {e}")
+            basic_df = pd.DataFrame(columns=['ts_code', 'name', 'industry'])
+
+        if basic_df is None or basic_df.empty:
+            basic_df = pd.DataFrame(columns=['ts_code', 'name', 'industry'])
+
+        # 4) 合并
+        merged = fina_df.merge(val_df, on='ts_code', how='left')
+        merged = merged.merge(basic_df, on='ts_code', how='left')
+
+        # 5) 字段映射到标准 schema
+        out = pd.DataFrame()
+        out['code'] = merged['ts_code']
+        out['report_date'] = merged['end_date']
+        # 估值字段（daily_basic）
+        out['pe_ttm'] = merged.get('pe_ttm')
+        out['pb'] = merged.get('pb')
+        out['ps_ttm'] = merged.get('ps_ttm')
+        out['dv_ratio'] = merged.get('dv_ratio')
+        # 财务指标（fina_indicator）
+        out['roe'] = merged.get('roe')
+        out['roa'] = merged.get('roa')
+        out['gross_margin'] = merged.get('grossprofit_margin')
+        out['net_margin'] = merged.get('netprofit_margin')
+        out['revenue_growth'] = merged.get('or_on_year')
+        out['profit_growth'] = merged.get('qprofit_yoy')
+        out['debt_ratio'] = merged.get('debt_to_assets')
+        out['current_ratio'] = merged.get('current_ratio')
+        out['quick_ratio'] = merged.get('quick_ratio')
+        out['ocf'] = merged.get('netcash_oper')
+        # 行业与名称（stock_basic）
+        out['industry'] = merged.get('industry')
+        out['name'] = merged.get('name')
+
+        # 如果调用方指定了 fields，按需过滤列（code/report_date 始终保留）
+        if fields:
+            keep = ['code', 'report_date'] + [f for f in fields if f in standard_cols]
+            keep = list(dict.fromkeys(keep))  # 去重保序
+            out = out[keep]
+
+        return out.reset_index(drop=True)
+
+    def get_capital_flow(self, symbols, start_date, end_date, **kwargs):
+        """获取资金面数据（tushare moneyflow接口）"""
+        import pandas as pd
+        try:
+            import tushare as ts
+            pro = ts.pro_api()
+            all_rows = []
+            for code in symbols:
+                ticker = code.split(".")[0] if "." in code else code
+                ts_code = f"{ticker}.SZ" if code.startswith(("0", "3")) else f"{ticker}.SH"
+                df = pro.moneyflow(ts_code=ts_code, start_date=start_date.replace("-",""), end_date=end_date.replace("-",""))
+                if df is not None and not df.empty:
+                    df = df.rename(columns={"net_mf_amount": "main_net_inflow"})
+                    df["code"] = code
+                    all_rows.append(df)
+            if not all_rows:
+                return pd.DataFrame()
+            result = pd.concat(all_rows, ignore_index=True)
+            result["main_net_inflow_5d"] = result.groupby("code")["main_net_inflow"].rolling(5, min_periods=1).mean().reset_index(level=0, drop=True)
+            return result
+        except Exception as e:
+            self._logger.warning(f"tushare 资金面数据获取失败: {e}")
+            return pd.DataFrame()
+
+    def get_dragon_tiger(self, symbols, start_date, end_date, **kwargs):
+        """获取龙虎榜数据（tushare top_list接口）"""
+        import pandas as pd
+        from datetime import datetime, timedelta
+        try:
+            import tushare as ts
+            pro = ts.pro_api()
+            end_dt = datetime.strptime(end_date.replace("-",""), "%Y%m%d")
+            check_dates = [(end_dt - timedelta(days=i)).strftime("%Y%m%d") for i in range(7)]
+            all_rows = []
+            for code in symbols:
+                found = False
+                ticker = code.split(".")[0] if "." in code else code
+                ts_code = f"{ticker}.SZ" if code.startswith(("0","3")) else f"{ticker}.SH"
+                for trade_date in check_dates:
+                    df = pro.top_list(trade_date=trade_date)
+                    if df is not None and not df.empty:
+                        matched = df[df["ts_code"] == ts_code]
+                        if not matched.empty:
+                            row = matched.iloc[0]
+                            all_rows.append({"code": code, "trade_date": trade_date, "has_data": True, "reason": str(row.get("name","")), "net_buy": float(row.get("net_buy", 0)), "seats": ""})
+                            found = True
+                if not found:
+                    all_rows.append({"code": code, "trade_date": "", "has_data": False, "reason": "", "net_buy": 0.0, "seats": ""})
+            return pd.DataFrame(all_rows)
+        except Exception as e:
+            self._logger.warning(f"tushare 龙虎榜数据获取失败: {e}")
+            return pd.DataFrame()

@@ -8,7 +8,8 @@ MODEL_TYPE = os.environ.get("MODEL_TYPE", "lightgbm")
 # 可选: lightgbm, catboost, logistic_regression, random_forest
 
 # ── 模型存储目录 ──────────────────────────
-MODEL_DIR = os.environ.get("MODEL_DIR", "./workspace/models")
+_WORK_DIR = os.environ.get("QUANT_WORK_DIR", "./workspace")
+MODEL_DIR = os.environ.get("MODEL_DIR", os.path.join(_WORK_DIR, "models"))
 
 # ── 超参数优化 ────────────────────────────
 OPTUNA_TRIALS = int(os.environ.get("OPTUNA_TRIALS", 100))

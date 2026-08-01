@@ -56,6 +56,8 @@ def _finalize(df: pd.DataFrame) -> pd.DataFrame:
 class TdxQuantAdapter(BaseDataProvider):
     """通达信行情适配器（pytdx 实现）。"""
 
+    SUPPORTED_DATA_TYPES = {"daily", "financial"}
+
     def __init__(self):
         try:
             import pytdx  # noqa
@@ -206,4 +208,125 @@ class TdxQuantAdapter(BaseDataProvider):
         return pd.DataFrame(columns=["code", "date", "adj_factor"])
 
     def get_financial(self, symbols, report_date, fields):
-        return pd.DataFrame()
+        """获取财务数据，返回统一标准 schema。
+
+        使用 pytdx 的 get_finance_info 接口获取基础财务数据(最新一期)。
+        通达信行情服务器仅提供最新一期的累计财务数据，无法按指定报告期
+        精确查询；此处取最新数据，并按报告期字段填充。PE/PB/PS 等估值
+        指标及同比增速留空(由其他源补充)。
+
+        返回 DataFrame 包含标准字段:
+            code, report_date, pe_ttm, pb, ps_ttm, dv_ratio,
+            roe, roa, gross_margin, net_margin,
+            revenue_growth, profit_growth,
+            debt_ratio, current_ratio, quick_ratio, ocf,
+            industry, name
+        """
+        self._check_available()
+
+        standard_cols = [
+            'code', 'report_date', 'pe_ttm', 'pb', 'ps_ttm', 'dv_ratio',
+            'roe', 'roa', 'gross_margin', 'net_margin',
+            'revenue_growth', 'profit_growth',
+            'debt_ratio', 'current_ratio', 'quick_ratio', 'ocf',
+            'industry', 'name',
+        ]
+
+        # 标准化报告期: '2024-09-30' -> '20240930'
+        period = report_date.replace('-', '')
+
+        api = self._connect()
+        try:
+            # 预取各市场前若干批股票名称(用于 best-effort 名称填充)
+            name_map = {}
+            try:
+                for market in (0, 1):
+                    start = 0
+                    for _ in range(3):  # 取前 3 批(约 3000 只)
+                        batch = api.get_security_list(market, start) or []
+                        if not batch:
+                            break
+                        for it in batch:
+                            c = it.get("code", "")
+                            if c:
+                                suffix = ".SZ" if market == 0 else ".SH"
+                                name_map[c + suffix] = it.get("name", "")
+                        if len(batch) < 1000:
+                            break
+                        start += len(batch)
+            except Exception as e:
+                logger.debug("TdxQuant 获取股票名称失败: %s", e)
+
+            rows = []
+            for code in symbols:
+                market, pure = self._split_code(code)
+                row = {col: None for col in standard_cols}
+                row['code'] = code
+                row['report_date'] = period
+                row['name'] = name_map.get(code, '')
+
+                try:
+                    fin = api.get_finance_info(market, pure)
+                except Exception as e:
+                    logger.warning("TdxQuant 获取 %s 财务失败: %s", code, e)
+                    rows.append(row)
+                    continue
+
+                if not fin:
+                    rows.append(row)
+                    continue
+
+                zongzichan = self._to_num(fin.get('zongzichan'))
+                jingzichan = self._to_num(fin.get('jingzichan'))
+                zhuyingshouru = self._to_num(fin.get('zhuyingshouru'))
+                jinglirun = self._to_num(fin.get('jinglirun'))
+                zhuyinglirun = self._to_num(fin.get('zhuyinglirun'))
+                ocf = self._to_num(fin.get('jingyingxianjinliu'))
+
+                # 经营现金流净额
+                row['ocf'] = ocf
+
+                # 资产负债率 = 总负债 / 总资产; 总负债 ≈ 总资产 - 净资产
+                if zongzichan and zongzichan != 0 and jingzichan is not None:
+                    row['debt_ratio'] = (zongzichan - jingzichan) / zongzichan * 100.0
+                # ROE(未年化) = 净利润 / 净资产
+                if jinglirun is not None and jingzichan and jingzichan != 0:
+                    row['roe'] = jinglirun / jingzichan * 100.0
+                # ROA = 净利润 / 总资产
+                if jinglirun is not None and zongzichan and zongzichan != 0:
+                    row['roa'] = jinglirun / zongzichan * 100.0
+                # 销售净利率 = 净利润 / 营业收入
+                if jinglirun is not None and zhuyingshouru and zhuyingshouru != 0:
+                    row['net_margin'] = jinglirun / zhuyingshouru * 100.0
+                # 主营利润率(近似毛利率) = 主营利润 / 营业收入
+                if zhuyinglirun is not None and zhuyingshouru and zhuyingshouru != 0:
+                    row['gross_margin'] = zhuyinglirun / zhuyingshouru * 100.0
+
+                rows.append(row)
+        finally:
+            try:
+                api.disconnect()
+            except Exception:
+                pass
+
+        out = pd.DataFrame(rows, columns=standard_cols)
+
+        # 如果调用方指定了 fields，按需过滤列（code/report_date 始终保留）
+        if fields:
+            keep = ['code', 'report_date'] + [f for f in fields if f in standard_cols]
+            keep = list(dict.fromkeys(keep))
+            out = out[keep]
+
+        return out.reset_index(drop=True)
+
+    @staticmethod
+    def _to_num(val):
+        """安全转换为 float"""
+        if val is None:
+            return None
+        try:
+            import math
+            f = float(val)
+            return None if (isinstance(f, float) and math.isnan(f)) else f
+        except (TypeError, ValueError):
+            return None

@@ -12,25 +12,27 @@ logger = logging.getLogger("data-engine.config")
 
 # ── 系统支持的全部数据源 ────────────────────────────
 SUPPORTED_BACKENDS: List[str] = [
-    # 通用免费/聚合源（默认按以下顺序启用）
-    "tushare",    # 主源：Tushare Pro 商业 API
-    "baostock",   # 次源：老虎量化开源项目
-    "akshare",    # 第三层：聚合库（爬虫）
+    # 真正免费源（默认按以下顺序启用，无需任何 token/账号）
+    "baostock",   # 主源：老虎量化开源项目（无需 Token）
+    "akshare",    # 次源：聚合库（爬虫，无需 Token）
     "websearch",  # 终极回退：通过 WebSearch 工具查询
-    # 显式 opt-in 源（需用户主动指定）
-    "xtquant",    # 迅投 QMT/xtp（需本地客户端）
+    # 显式 opt-in 源（需用户主动指定：配 token/账号或安装本地终端 SDK）
+    "tushare",    # Tushare Pro 商业 API（需 TUSHARE_TOKEN）
+    "xtquant",    # 迅投 QMT/xtp（需本地券商客户端）
     "gm",         # 掘金量化（需 GM_TOKEN + 付费 SDK）
     "tdxquant",   # 通达信量化（需本地通达信金融终端 TQ 策略）
+    "wind",       # 万得 WindPy（需 Wind 金融终端 + WindPy）
+    "ifind",      # 同花顺 iFinD（需 iFinDPy + 账号密码）
 ]
 
 
 # ── 默认数据源（按优先级排序）────────────────────────
-# 用户未指定 DATA_BACKENDS 时按此链自动降级
-# 降级链中每个源失败时，触发下一级，每级都有明确的降级条件（见下方 DATA_FALLBACK_RULES）
+# 仅包含真正免费、无需任何配置的源。
+# opt-in 源（tushare/wind/ifind 等）需用户通过对话或 DATA_BACKENDS 环境变量显式启用。
 DEFAULT_DATA_SOURCES: List[str] = [
     s.strip() for s in os.environ.get(
         "DATA_BACKENDS",
-        "tushare,baostock,akshare,websearch"
+        "baostock,akshare,websearch"
     ).split(",")
     if s.strip()
 ]
@@ -68,11 +70,16 @@ DATA_FALLBACK_RULES: Dict[str, Dict[str, str]] = {
 
 
 # ── 系统支持的 opt-in 源（用于友好提示）─────────────
-PAID_OR_SPECIAL_BACKENDS: List[str] = ["xtquant", "gm", "tdxquant"]
+# opt-in 源需要前置条件（token/账号/本地终端 SDK），默认不进入降级链。
+# 用户可通过对话（如"用 tushare 取数据"）或 DATA_BACKENDS 环境变量显式启用。
+PAID_OR_SPECIAL_BACKENDS: List[str] = ["tushare", "xtquant", "gm", "tdxquant", "wind", "ifind"]
 PAID_OR_SPECIAL_DESCRIPTIONS = {
+    "tushare":   "Tushare Pro 商业 API（需 TUSHARE_TOKEN，https://tushare.pro/）",
     "xtquant":   "迅投 QMT/xtp（需本地券商客户端）",
     "gm":        "掘金量化（需 GM_TOKEN + 付费 SDK，https://www.myquant.cn）",
     "tdxquant":  "通达信量化（需本地通达信金融终端 TQ 策略，https://help.tdx.com.cn/quant/）",
+    "wind":      "万得 WindPy（需 Wind 金融终端 + WindPy，https://www.wind.com.cn/）",
+    "ifind":     "同花顺 iFinD（需 iFinDPy + 账号密码，http://ft.10jqka.com.cn/）",
 }
 
 
@@ -93,7 +100,8 @@ MAX_WORKERS = int(os.environ.get("DATA_MAX_WORKERS", 4))
 ADJUST_MODE = os.environ.get("ADJUST_MODE", "hfq")
 
 # ── 缓存目录 ──────────────────────────────
-CACHE_DIR = os.environ.get("DATA_CACHE_DIR", "./workspace/data_cache")
+_WORK_DIR = os.environ.get("QUANT_WORK_DIR", "./workspace")
+CACHE_DIR = os.environ.get("DATA_CACHE_DIR", os.path.join(_WORK_DIR, "data_cache"))
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 # ── 股票池默认文件 ─────────────────────────
@@ -105,6 +113,8 @@ MAX_MISSING_RATIO = 0.05
 # ── API 令牌（仅从环境变量读取）────────────
 TUSHARE_TOKEN: Optional[str] = os.environ.get("TUSHARE_TOKEN")
 GM_TOKEN: Optional[str] = os.environ.get("GM_TOKEN")
+IFIND_USERNAME: Optional[str] = os.environ.get("IFIND_USERNAME")
+IFIND_PASSWORD: Optional[str] = os.environ.get("IFIND_PASSWORD")
 
 # ── 是否允许模拟数据 fallback ──────────────────
 # 当所有外部源都失败时，引擎是否生成合成数据继续跑流程
@@ -120,6 +130,9 @@ ALLOW_SYNTHETIC_FALLBACK: bool = os.environ.get("ALLOW_SYNTHETIC_FALLBACK", "tru
 AUTO_INSTALL_BACKENDS: bool = os.environ.get("AUTO_INSTALL_BACKENDS", "true").lower() == "true"
 
 # 后端名 -> 需要的 pip 包名（用于自动安装；空列表表示无第三方依赖）
+# 注意：wind/ifind 的 SDK 不在 PyPI 公开发布，BACKEND_PIP_PACKAGES 中
+#       留空表示自动安装无法处理（SDK 由对应终端安装目录提供），
+#       缺失时直接判定为不可用，由降级链切换到下一源。
 BACKEND_PIP_PACKAGES: Dict[str, List[str]] = {
     "tushare":  ["tushare"],
     "baostock": ["baostock"],
@@ -128,6 +141,8 @@ BACKEND_PIP_PACKAGES: Dict[str, List[str]] = {
     "xtquant":  ["xtquant"],
     "gm":       ["gm"],
     "tdxquant": ["tdxquant", "pytdx"],
+    "wind":     [],   # WindPy 由 Wind 终端安装，非 PyPI
+    "ifind":    [],   # iFinDPy 由同花顺终端安装，非 PyPI
 }
 
 
