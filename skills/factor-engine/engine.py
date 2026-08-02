@@ -7,6 +7,8 @@ import sys
 import logging
 import json
 import importlib
+import warnings
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -169,7 +171,16 @@ class FactorEngine:
         neutralize_mcap: bool = NEUTRALIZE_MARKET_CAP,
         neutralize_industry: bool = NEUTRALIZE_INDUSTRY
     ) -> pd.DataFrame:
-        """因子行业中性化处理"""
+        """因子行业中性化处理
+
+        .. deprecated:: v2.0
+            将在 v3.0 移除，请改用 ``NeutralizeProcessor`` 或 ``ProcessorChain``。
+        """
+        warnings.warn(
+            "FactorEngine.neutralize() 将在 v3.0 移除，请改用 NeutralizeProcessor 或 ProcessorChain",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if not neutralize_industry and not neutralize_mcap:
             return factor_df
 
@@ -234,7 +245,16 @@ class FactorEngine:
         forward_returns: pd.DataFrame,
         factor_names: Optional[List[str]] = None
     ) -> Dict[str, Any]:
-        """计算因子的IC序列和统计量"""
+        """计算因子的IC序列和统计量
+
+        .. deprecated:: v2.0
+            将在 v3.0 移除，请改用 ``ICAnalysisProcessor`` 或 ``ProcessorChain``。
+        """
+        warnings.warn(
+            "FactorEngine.ic_analysis() 将在 v3.0 移除，请改用 ICAnalysisProcessor 或 ProcessorChain",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if factor_df.empty or forward_returns.empty:
             return {}
 
@@ -317,40 +337,29 @@ class FactorEngine:
         self,
         factor_df: pd.DataFrame,
         factor_names: Optional[List[str]] = None,
-        max_correlation: float = MAX_CORRELATION
+        max_correlation: float = MAX_CORRELATION,
+        backend: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """因子相关性分析"""
-        if factor_df.empty:
-            return {"correlation_matrix": pd.DataFrame(), "selected_factors": [], "removed_factors": []}
+        """因子相关性分析
 
-        if factor_names is None:
-            factor_names = [c for c in factor_df.columns
-                           if c not in ['code', 'date', 'industry']]
+        参数:
+            backend: ``"pandas"`` / ``"polars"`` / ``"auto"`` / ``None``
+                ``None`` 时使用环境变量 ``QUANT_FACTOR_BACKEND`` 默认值
 
-        factor_means = factor_df.groupby('date')[factor_names].mean()
-        corr_matrix = factor_means.corr()
-
-        to_remove = set()
-        for i in range(len(factor_names)):
-            for j in range(i + 1, len(factor_names)):
-                fi, fj = factor_names[i], factor_names[j]
-                if fi in to_remove or fj in to_remove:
-                    continue
-                if abs(corr_matrix.loc[fi, fj]) > max_correlation:
-                    if len(fj) < len(fi):
-                        to_remove.add(fi)
-                    else:
-                        to_remove.add(fj)
-
-        selected = [f for f in factor_names if f not in to_remove]
-
-        logger.info(f"因子相关性分析：原始 {len(factor_names)} 个，剔除 {len(to_remove)} 个，保留 {len(selected)} 个")
-
-        return {
-            "correlation_matrix": corr_matrix.to_dict(),
-            "selected_factors": selected,
-            "removed_factors": list(to_remove)
-        }
+        .. deprecated:: v2.0
+            将在 v3.0 移除，请改用 ``CorrelationFilterProcessor`` 或 ``ProcessorChain``。
+        """
+        warnings.warn(
+            "FactorEngine.correlation_analysis() 将在 v3.0 移除，请改用 CorrelationFilterProcessor 或 ProcessorChain",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return _correlation_analysis(
+            factor_df=factor_df,
+            factor_names=factor_names,
+            max_correlation=max_correlation,
+            backend=backend,
+        )
 
     def factor_fusion(
         self,
@@ -359,7 +368,16 @@ class FactorEngine:
         selected_factors: List[str],
         fusion_method: str = "ic_weighted"
     ) -> pd.DataFrame:
-        """多因子融合为复合Alpha信号"""
+        """多因子融合为复合Alpha信号
+
+        .. deprecated:: v2.0
+            将在 v3.0 移除，请改用 ``FusionProcessor`` 或 ``ProcessorChain``。
+        """
+        warnings.warn(
+            "FactorEngine.factor_fusion() 将在 v3.0 移除，请改用 FusionProcessor 或 ProcessorChain",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if factor_df.empty or not selected_factors:
             return pd.DataFrame()
 
@@ -460,6 +478,207 @@ def _try_load_factor_from_datafeed(ctx) -> Optional[pd.DataFrame]:
     except Exception as e:
         logger.warning(f"从jingni-datafeed取因子数据失败，将回退到本地计算: {e}")
         return None
+
+
+def _maybe_generate_alphalens_reports(
+    factor_df: pd.DataFrame,
+    price_df: pd.DataFrame,
+    factor_names: List[str],
+    task_id: str,
+) -> str:
+    """T3-6: 可选生成 alphalens 完整因子分析报告。
+
+    环境变量 QUANT_ALPHALENS_REPORT=1 启用；默认关闭，返回空字符串。
+    每个因子输出 4 PNG + 1 HTML + 1 JSON 到 workspace/reports/alphalens/<task_id>/。
+    alphalens-reloaded 不可用时自动降级到方案 C（自研轻量分层回测，仅 JSON+HTML）。
+    失败时静默记录日志，不阻塞主流程。
+
+    返回
+    ----
+    报告目录路径；未启用时返回空字符串
+    """
+    if os.environ.get("QUANT_ALPHALENS_REPORT", "0") != "1":
+        return ""
+
+    # 延迟导入避免 alphalens 缺失时影响模块加载
+    try:
+        from scripts.alphalens_adapter import AlphalensAdapter
+    except ImportError:
+        # 跨 skill 加载场景下 scripts 包可能指向子 skill，按相对路径加载
+        import importlib.util as _ilu
+        _adapter_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "scripts", "alphalens_adapter.py"
+        )
+        _spec = _ilu.spec_from_file_location("_alphalens_adapter_tmp", _adapter_path)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        AlphalensAdapter = _mod.AlphalensAdapter
+
+    # 输出目录：workspace/reports/alphalens/<task_id>/
+    _work_dir = os.environ.get("QUANT_WORK_DIR", "./workspace")
+    report_dir = os.path.join(_work_dir, "reports", "alphalens", task_id or "default")
+    os.makedirs(report_dir, exist_ok=True)
+
+    # 价格数据：从原始 df 提取 code/date/close
+    price_cols = {"code", "date", "close"}
+    if not price_cols.issubset(price_df.columns):
+        logger.warning("alphalens 报告生成跳过：price_df 缺少 code/date/close 列")
+        return report_dir
+
+    success_count = 0
+    fail_count = 0
+    for factor_name in (factor_names or []):
+        if factor_name not in factor_df.columns:
+            continue
+        try:
+            result = AlphalensAdapter.generate_for_factor(
+                factor_df=factor_df,
+                price_df=price_df,
+                factor_name=factor_name,
+                output_dir=report_dir,  # 字符串路径，AlphalensAdapter 内部会转 Path
+            )
+            if result:
+                success_count += 1
+            else:
+                fail_count += 1
+        except Exception as e:
+            logger.warning(f"alphalens 报告生成失败（因子 {factor_name}）: {e}")
+            fail_count += 1
+
+    logger.info(
+        f"alphalens 报告生成完成：成功 {success_count} 个，失败 {fail_count} 个，目录 {report_dir}"
+    )
+    return report_dir
+
+
+# ---------------------------------------------------------------------------
+# T1-6/T1-8: Processor Pipeline 新路径 + 旧路径兼容层
+# ---------------------------------------------------------------------------
+
+
+def _run_legacy_factor_pipeline(
+    engine: "FactorEngine",
+    factor_df: pd.DataFrame,
+    forward_returns: pd.DataFrame,
+    factor_names: List[str],
+) -> Tuple[pd.DataFrame, Dict[str, Any], List[str], Dict[str, Any]]:
+    """旧 4 步硬编码因子处理路径（兼容回滚用）。
+
+    保留 v1.x 的 5 步逻辑（IC 分析 → 相关性去冗余 → 选因子 → 融合 → 合并 alpha_score），
+    通过 ``QUANT_LEGACY_PIPELINE=1`` 环境变量触发。
+
+    Returns
+    -------
+    (final_df, ic_results, selected_factors, corr_result)
+    """
+    # 旧路径直接调用 engine 内部方法（绕过 DeprecationWarning）
+    # 使用 warnings.catch_warnings 临时抑制 DeprecationWarning
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        ic_results = engine.ic_analysis(factor_df, forward_returns, factor_names)
+        corr_result = engine.correlation_analysis(factor_df, factor_names)
+        selected_factors = corr_result['selected_factors']
+        fusion_df = engine.factor_fusion(factor_df, ic_results, selected_factors)
+
+    # 合并 alpha_score 到 factor_df
+    final_df = factor_df.merge(
+        fusion_df[['code', 'date', 'alpha_score']],
+        on=['code', 'date'],
+        how='left',
+    )
+    return final_df, ic_results, selected_factors, corr_result
+
+
+def _run_processor_chain(
+    factor_df: pd.DataFrame,
+    forward_returns: pd.DataFrame,
+    factor_names: List[str],
+    task_id: str,
+    data_path: str,
+) -> Tuple[pd.DataFrame, Dict[str, Any], List[str], Dict[str, Any]]:
+    """新 ProcessorChain 路径（默认路径）。
+
+    通过 ``pipeline.yaml`` 声明式配置因子处理流程，自动记录实验元数据到
+    ``ExperimentRecorder``（manifest.json 含 7 字段，接入 P1-3 sha256 机制）。
+
+    Returns
+    -------
+    (final_df, ic_results, selected_factors, corr_result)
+    """
+    # 延迟导入避免循环依赖
+    from scripts.processors import (
+        ProcessorChain,
+        ProcessContext,
+        load_pipeline_config,
+    )
+    from scripts.recorder import ExperimentRecorder
+
+    # 加载 pipeline 配置（work_dir 优先 → skill 默认 → 兜底默认链）
+    _work_dir = os.environ.get("QUANT_WORK_DIR", "./workspace")
+    work_dir = Path(_work_dir) if _work_dir else None
+
+    try:
+        processors = load_pipeline_config(work_dir=work_dir)
+    except Exception as e:
+        logger.warning(
+            f"加载 pipeline.yaml 失败 ({e})，回退兜底默认链"
+        )
+        from scripts.processors.loader import _default_processors
+        processors = _default_processors()
+
+    # 构造 ProcessorChain
+    chain = ProcessorChain(processors, fail_fast=False)
+
+    # 初始化 Recorder
+    _archive_dir = os.path.join(_work_dir, "archives", "factor_engine")
+    try:
+        recorder = ExperimentRecorder(
+            archive_dir=Path(_archive_dir),
+            pipeline_config=chain.describe_chain(),
+            input_data_paths=[data_path] if data_path else None,
+        )
+    except Exception as e:
+        logger.warning(f"ExperimentRecorder 初始化失败，降级为无记录模式: {e}")
+        recorder = None
+
+    # 构造 ProcessContext
+    proc_ctx = ProcessContext(
+        forward_returns=forward_returns,
+        factor_names=list(factor_names),
+        task_id=task_id or "",
+        work_dir=work_dir,
+        recorder=recorder,
+    )
+
+    # 执行 ProcessorChain
+    final_df = chain.run(factor_df, proc_ctx)
+
+    # 从 ctx 提取 IC 结果与选中因子
+    ic_results = proc_ctx.ic_results or {}
+    selected_factors = proc_ctx.selected_factors or []
+
+    # 构造 corr_result 兼容旧返回结构
+    corr_meta = proc_ctx.metadata.get("correlation_result", {})
+    corr_result = {
+        "selected_factors": selected_factors,
+        "removed_factors": corr_meta.get("removed_factors", []),
+        "correlation_matrix": {},
+    }
+
+    # 记录输出产物并 finalize Recorder
+    if recorder is not None:
+        try:
+            recorder.log_output_artifact("factor_data", "<runtime>")
+            recorder.finalize()
+        except Exception as e:
+            logger.warning(f"Recorder finalize 失败（不阻塞主流程）: {e}")
+
+    # 如果 final_df 没有 alpha_score 列（如 Fusion 被禁用），补一个空列保持结构兼容
+    if "alpha_score" not in final_df.columns:
+        logger.warning("ProcessorChain 输出未包含 alpha_score 列（FusionProcessor 可能被禁用）")
+        final_df["alpha_score"] = 0.0
+
+    return final_df, ic_results, selected_factors, corr_result
 
 
 def run(ctx) -> Dict[str, Any]:
@@ -598,21 +817,46 @@ def run(ctx) -> Dict[str, Any]:
                        if c not in ['code', 'date', 'industry', 'estimated_mv',
                                     'money_flow_raw', 'ret_1d', 'ret_5d', 'ret_20d', 'ret_60d',
                                     'turnover_5d']]
-        ic_results = engine.ic_analysis(factor_df, forward_returns, factor_names)
 
-        corr_result = engine.correlation_analysis(factor_df, factor_names)
-        selected_factors = corr_result['selected_factors']
+        # ── T1-6/T1-8: Processor Pipeline 新路径 vs 旧路径切换 ──
+        # 环境变量 QUANT_LEGACY_PIPELINE=1 强制走旧 4 步硬编码路径（兼容回滚）
+        # 默认走 ProcessorChain（新路径），通过 pipeline.yaml 声明式配置
+        use_legacy = os.environ.get("QUANT_LEGACY_PIPELINE", "0") == "1"
 
-        fusion_df = engine.factor_fusion(factor_df, ic_results, selected_factors)
+        if use_legacy:
+            logger.info("QUANT_LEGACY_PIPELINE=1，走旧 4 步硬编码路径")
+            final_df, ic_results, selected_factors, corr_result = _run_legacy_factor_pipeline(
+                engine=engine,
+                factor_df=factor_df,
+                forward_returns=forward_returns,
+                factor_names=factor_names,
+            )
+        else:
+            logger.info("走 ProcessorChain 新路径（默认）")
+            final_df, ic_results, selected_factors, corr_result = _run_processor_chain(
+                factor_df=factor_df,
+                forward_returns=forward_returns,
+                factor_names=factor_names,
+                task_id=ctx.task_id,
+                data_path=data_path,
+            )
 
         os.makedirs(FACTOR_DIR, exist_ok=True)
         output_path = os.path.join(FACTOR_DIR, "factor_data.parquet")
-        final_df = factor_df.merge(fusion_df[['code', 'date', 'alpha_score']], on=['code', 'date'], how='left')
         final_df.to_parquet(output_path, index=False)
 
         ic_report_path = os.path.join(FACTOR_DIR, "ic_report.json")
         with open(ic_report_path, 'w', encoding='utf-8') as f:
             json.dump(ic_results, f, ensure_ascii=False, indent=2, default=str)
+
+        # T3-6: 可选生成 alphalens 完整因子分析报告
+        # 环境变量 QUANT_ALPHALENS_REPORT=1 启用，每个因子输出 4 PNG + 1 HTML + 1 JSON
+        alphalens_report_dir = _maybe_generate_alphalens_reports(
+            factor_df=factor_df,
+            price_df=df,
+            factor_names=factor_names,
+            task_id=ctx.task_id,
+        )
 
         return {
             "success": True,
@@ -626,6 +870,7 @@ def run(ctx) -> Dict[str, Any]:
                 "fusion_method": "ic_weighted",
                 "computed_categories": computed_categories,
                 "skipped_categories": skipped_categories,
+                "alphalens_report_dir": alphalens_report_dir,
             },
             "error": ""
         }
@@ -695,6 +940,9 @@ from scripts.optimizations.vectorized_neutralize import (
     neutralize_factor as _neutralize_factor,
     neutralize_factors_batch as _neutralize_factors_batch,
 )
+from scripts.optimizations.vectorized_correlation import (
+    correlation_analysis as _correlation_analysis,
+)
 from scripts.optimizations.ic_analysis_v2 import (
     calc_ic_series as _calc_ic_series,
     calc_ic_stats as _calc_ic_stats,
@@ -728,6 +976,7 @@ class optimizations:
     NeutralizerV2 = _NeutralizerV2
     neutralize_factor = _neutralize_factor
     neutralize_factors_batch = _neutralize_factors_batch
+    correlation_analysis = _correlation_analysis
     calc_ic_series = _calc_ic_series
     calc_ic_stats = _calc_ic_stats
 
@@ -751,3 +1000,77 @@ class optimizations:
             "calc_ic_series": _calc_ic_series,
             "calc_ic_stats": _calc_ic_stats,
         }
+
+
+# ---------------------------------------------------------------------------
+# T1-6: Processor Pipeline 模块入口（方向一）
+# 使用方式: from engine import processors
+#           processors.ProcessorChain / processors.NeutralizeProcessor / ...
+# ---------------------------------------------------------------------------
+from scripts.processors.base import (
+    Processor as _Processor,
+    ProcessContext as _ProcessContext,
+    ProcessorRequirementError as _ProcessorRequirementError,
+)
+from scripts.processors.chain import (
+    ProcessorChain as _ProcessorChain,
+    ChainValidationError as _ChainValidationError,
+)
+from scripts.processors.loader import (
+    load_pipeline_config as _load_pipeline_config,
+    parse_yaml_to_processors as _parse_yaml_to_processors,
+    register_processor as _register_processor,
+    PROCESSOR_REGISTRY as _PROCESSOR_REGISTRY,
+)
+from scripts.processors.neutralize import NeutralizeProcessor as _NeutralizeProcessor
+from scripts.processors.winsorize import WinsorizeProcessor as _WinsorizeProcessor
+from scripts.processors.fillna import FillnaProcessor as _FillnaProcessor
+from scripts.processors.standardize import StandardizeProcessor as _StandardizeProcessor
+from scripts.processors.ic_analysis import ICAnalysisProcessor as _ICAnalysisProcessor
+from scripts.processors.correlation_filter import (
+    CorrelationFilterProcessor as _CorrelationFilterProcessor,
+)
+from scripts.processors.fusion import FusionProcessor as _FusionProcessor
+from scripts.recorder import ExperimentRecorder as _ExperimentRecorder
+
+
+class processors:
+    """因子引擎 Processor Pipeline 模块集合（方向一）
+
+    通过 ``from engine import processors`` 访问所有 Processor 相关类与工具函数。
+    """
+    # 基类与异常
+    Processor = _Processor
+    ProcessContext = _ProcessContext
+    ProcessorRequirementError = _ProcessorRequirementError
+    ChainValidationError = _ChainValidationError
+
+    # 调度器与加载器
+    ProcessorChain = _ProcessorChain
+    load_pipeline_config = _load_pipeline_config
+    parse_yaml_to_processors = _parse_yaml_to_processors
+    register_processor = _register_processor
+    PROCESSOR_REGISTRY = _PROCESSOR_REGISTRY
+
+    # 7 个内置 Processor
+    NeutralizeProcessor = _NeutralizeProcessor
+    WinsorizeProcessor = _WinsorizeProcessor
+    FillnaProcessor = _FillnaProcessor
+    StandardizeProcessor = _StandardizeProcessor
+    ICAnalysisProcessor = _ICAnalysisProcessor
+    CorrelationFilterProcessor = _CorrelationFilterProcessor
+    FusionProcessor = _FusionProcessor
+
+    # 实验记录器
+    ExperimentRecorder = _ExperimentRecorder
+
+    @staticmethod
+    def get_all_processors():
+        """返回所有已注册的 Processor 类"""
+        return dict(_PROCESSOR_REGISTRY)
+
+    @staticmethod
+    def create_default_chain():
+        """创建默认 ProcessorChain（兜底默认链，仅 IC + Correlation + Fusion）"""
+        from scripts.processors.loader import _default_processors
+        return _ProcessorChain(_default_processors())

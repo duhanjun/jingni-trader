@@ -7,10 +7,11 @@ import sys
 import json
 import logging
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Set
 from dataclasses import dataclass, field, asdict
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -24,6 +25,11 @@ from scripts.config import (
     SLIPPAGE, AUDIT_LOG_PATH, ACCOUNT_STATE_PATH
 )
 from scripts.base.base_executor import BaseExecutor
+from scripts.paper_ledger import (
+    PaperTradeRecordV1, AccountSnapshot, PositionState,
+    append_paper_trade, replay_ledger, migrate_legacy_state,
+    get_default_ledger_path,
+)
 
 logger = logging.getLogger("execution-monitor-engine")
 
@@ -169,7 +175,7 @@ class AuditLogger:
 
 
 class PaperExecutor(BaseExecutor):
-    """模拟交易执行器"""
+    """模拟交易执行器（P1-1: 集成追加式 JSONL 账本）"""
 
     def __init__(self, init_capital: float = INIT_CAPITAL):
         self.account = Account(nav=init_capital, available_cash=init_capital)
@@ -177,8 +183,96 @@ class PaperExecutor(BaseExecutor):
         self.audit = AuditLogger()
         self.orders: Dict[str, Dict] = {}
 
+        # P1-1: 追加式 JSONL 账本配置
+        self.ledger_path = get_default_ledger_path()
+        self.init_capital = init_capital
+        self._trade_seq = 0  # 用于生成 execution_id
+
+        # P1-1.6a: 旧状态自动迁移（account_state.json 存在但 ledger.jsonl 不存在）
+        try:
+            migrated = migrate_legacy_state(
+                Path(self.ledger_path), Path(ACCOUNT_STATE_PATH), init_capital
+            )
+            if migrated:
+                logger.info("P1-1 旧 account_state.json 已迁移为 ledger.jsonl")
+        except Exception as e:
+            logger.warning(f"P1-1 旧状态迁移失败（不阻断）: {e}")
+
+        # P1-1.6: 启动时调用 replay_ledger 重建状态
+        self._restore_from_ledger()
+
     def query_account(self) -> Dict[str, Any]:
         return self.account.to_dict()
+
+    # ------------------------------------------------------------------
+    # P1-1: JSONL 账本集成
+    # ------------------------------------------------------------------
+
+    def _restore_from_ledger(self) -> None:
+        """P1-1.6: 启动时调用 replay_ledger 重建账户状态"""
+        try:
+            snapshot = replay_ledger(Path(self.ledger_path), self.init_capital)
+        except Exception as e:
+            logger.warning(f"P1-1 replay_ledger 失败（使用初始资金）: {e}")
+            return
+        if snapshot.last_trade_date:
+            # 有历史记录，用重建结果覆盖 account
+            self.account.available_cash = snapshot.cash
+            self.account.nav = snapshot.nav
+            # PositionState → account.positions dict
+            self.account.positions = {
+                code: {
+                    "volume": pos.shares,
+                    "available_volume": pos.available,
+                    "avg_cost": pos.cost,
+                }
+                for code, pos in snapshot.positions.items()
+            }
+            self._ledger_restored = True
+            logger.info(
+                f"P1-1 已从 ledger 重建状态: nav={snapshot.nav}, "
+                f"持仓标的数={len(snapshot.positions)}"
+            )
+        else:
+            self._ledger_restored = False
+
+    def _append_trade_record(
+        self,
+        code: str,
+        side: str,
+        shares: int,
+        price: float,
+        commission: float,
+        stamp_tax: float,
+    ) -> None:
+        """P1-1.5: 成交后追加一条 record 到 ledger.jsonl"""
+        self._trade_seq += 1
+        ts = datetime.now()
+        pos = self.account.positions.get(code, {})
+        position_after = pos.get("volume", 0)
+        nav_after = self.account.nav
+        # 滑点成本
+        slippage_cost = abs(price - price) * shares if SLIPPAGE == 0 else 0.0
+        try:
+            record = PaperTradeRecordV1(
+                execution_id=f"{ts.strftime('%Y%m%d%H%M%S')}_{self._trade_seq:04d}",
+                trade_date=ts.strftime("%Y-%m-%d"),
+                code=code,
+                side=side,
+                shares=shares,
+                price=price,
+                commission=commission,
+                stamp_tax=stamp_tax,
+                slippage_cost=slippage_cost,
+                position_after_shares=position_after,
+                cash_after=self.account.available_cash,
+                nav_after=nav_after,
+                confirmed=True,
+                created_at=ts,
+            )
+            append_paper_trade(Path(self.ledger_path), record)
+        except Exception as e:
+            logger.warning(f"P1-1 追加 ledger 失败（不阻断交易）: {e}")
 
     def send_order(
         self,
@@ -235,6 +329,9 @@ class PaperExecutor(BaseExecutor):
                 "timestamp": datetime.now().isoformat(),
             }
             self.audit.log_order(order_id, code, side, volume, fill_price, "filled", {"order_price": base_price})
+            # P1-1.5: 成交后追加 record 到 ledger.jsonl（事务日志）
+            stamp_tax_amt = order_value * STAMP_TAX_RATE if side == "sell" else 0.0
+            self._append_trade_record(code, side, volume, fill_price, commission, stamp_tax_amt)
             return {"success": True, "order_id": order_id, "status": "filled", "fill_price": fill_price}
 
         except Exception as e:
@@ -308,7 +405,15 @@ class PaperExecutor(BaseExecutor):
             json.dump(state, f, ensure_ascii=False, indent=2)
 
     def load_state(self) -> bool:
-        """加载持久化的账户状态"""
+        """加载持久化的账户状态。
+
+        P1-1: 若 ledger 已重建状态（__init__ 中 _restore_from_ledger），
+        则跳过 account_state.json 加载（ledger 是 source of truth）。
+        """
+        # P1-1: ledger 已恢复 → 不覆盖
+        if getattr(self, "_ledger_restored", False):
+            logger.debug("P1-1 ledger 已恢复状态，跳过 account_state.json 加载")
+            return True
         if not os.path.exists(ACCOUNT_STATE_PATH):
             logger.info("无账户状态文件，使用初始资金")
             return False

@@ -91,7 +91,9 @@ def validate_changed_paths(
             continue
 
         # 规则 2: 绝对路径或含 ../ 违规
-        if os.path.isabs(path) or ".." in Path(path).parts:
+        # os.path.isabs 在 Windows 上不认 Unix 风格 /path，需额外检查
+        is_abs = os.path.isabs(path) or path.startswith("/") or path.startswith("\\")
+        if is_abs or ".." in Path(path).parts:
             violations.append(path)
             continue
 

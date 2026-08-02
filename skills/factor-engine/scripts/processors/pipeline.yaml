@@ -1,0 +1,61 @@
+# factor-engine 默认 Processor Pipeline 配置
+#
+# 加载顺序（PRD FE-PP-010）：
+#   1. work_dir/pipeline.yaml（用户覆盖）
+#   2. skill/scripts/processors/pipeline.yaml（本文件，默认配置）
+#   3. 兜底默认链（loader._default_processors()）
+#
+# 自定义示例：
+#   在 QUANT_WORK_DIR 下放置 pipeline.yaml 即可覆盖本配置，
+#   可删除/禁用/重排任意工序，新增自定义 Processor 需通过
+#   ``register_processor(name, cls)`` 注册后才能在 YAML 中引用。
+#
+# 字段说明：
+#   - processor: Processor 类名（必须已在 PROCESSOR_REGISTRY 注册）
+#   - enabled:   true/false，false 时跳过该工序
+#   - params:    传递给 Processor 构造函数的参数
+#
+# 向后兼容说明（PRD CR-3 / CR-6）：
+#   默认配置仅启用 IC + Correlation + Fusion 三步，与 v1.x 的 run() 行为完全一致，
+#   保证 489 条现有回归测试 100% 通过。Neutralize/Winsorize/Fillna 作为可选工序，
+#   用户可通过设置 enabled: true 启用，启用后输出会与旧路径不同（属于预期行为）。
+
+pipeline:
+  - processor: NeutralizeProcessor
+    enabled: false              # 默认禁用（保持与 v1.x run() 一致）；启用后执行行业+市值中性化
+    params:
+      neutralize_mcap: true
+      neutralize_industry: true
+      mcap_col: lncap
+      industry_col: industry
+      min_count: 30
+
+  - processor: WinsorizeProcessor
+    enabled: false              # 默认禁用；启用后执行 MAD 去极值
+    params:
+      method: mad
+      threshold: 3.0
+
+  - processor: FillnaProcessor
+    enabled: false              # 默认禁用；启用后执行 rank_pct 缺失值填充
+    params:
+      method: rank_pct
+      fill_value: 0.5
+
+  - processor: ICAnalysisProcessor
+    enabled: true
+    params:
+      ic_type: normal
+      forward_periods: [1, 5, 20]
+      min_count: 10
+
+  - processor: CorrelationFilterProcessor
+    enabled: true
+    params:
+      max_correlation: 0.7
+
+  - processor: FusionProcessor
+    enabled: true
+    params:
+      method: ic_weighted
+      forward_period_for_weight: ret_forward_5d

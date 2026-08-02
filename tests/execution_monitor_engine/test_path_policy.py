@@ -19,10 +19,22 @@ from __future__ import annotations
 import json
 import os
 import sys
+import subprocess
 import importlib.util as ilu
 from unittest import mock
 
 import pytest
+
+
+def _git(repo_dir, *args):
+    """在指定目录执行 git 命令（subprocess.run，避免 os.system 的 shell 兼容问题）"""
+    return subprocess.run(
+        ["git"] + list(args),
+        cwd=str(repo_dir),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
 
 
 # ============================================================================
@@ -170,11 +182,12 @@ class TestGitChangeTracker:
     def test_post_diff_returns_new_files_only(self, tmp_path):
         """post_diff 只返回 pre_snapshot 之后的新增/修改文件"""
         mod = _load_path_policy_module()
-        # 初始化 git 仓库
-        os.system(f'cd "{tmp_path}" && git init -q && git config user.email t@t.com && git config user.name t')
-        # 创建并提交初始文件
+        _git(tmp_path, "init", "-q")
+        _git(tmp_path, "config", "user.email", "t@t.com")
+        _git(tmp_path, "config", "user.name", "t")
         (tmp_path / "committed.txt").write_text("initial")
-        os.system(f'cd "{tmp_path}" && git add . && git commit -q -m init')
+        _git(tmp_path, "add", ".")
+        _git(tmp_path, "commit", "-q", "-m", "init")
 
         tracker = mod.GitChangeTracker(repo_root=str(tmp_path))
         tracker.pre_snapshot()
@@ -187,9 +200,12 @@ class TestGitChangeTracker:
     def test_post_diff_returns_empty_when_no_change(self, tmp_path):
         """无变更时 post_diff 返回空"""
         mod = _load_path_policy_module()
-        os.system(f'cd "{tmp_path}" && git init -q && git config user.email t@t.com && git config user.name t')
+        _git(tmp_path, "init", "-q")
+        _git(tmp_path, "config", "user.email", "t@t.com")
+        _git(tmp_path, "config", "user.name", "t")
         (tmp_path / "f.txt").write_text("x")
-        os.system(f'cd "{tmp_path}" && git add . && git commit -q -m init')
+        _git(tmp_path, "add", ".")
+        _git(tmp_path, "commit", "-q", "-m", "init")
 
         tracker = mod.GitChangeTracker(repo_root=str(tmp_path))
         tracker.pre_snapshot()
@@ -199,11 +215,14 @@ class TestGitChangeTracker:
     def test_git_status_parse_handles_rename(self, tmp_path):
         """git status 解析能处理重命名"""
         mod = _load_path_policy_module()
-        os.system(f'cd "{tmp_path}" && git init -q && git config user.email t@t.com && git config user.name t')
+        _git(tmp_path, "init", "-q")
+        _git(tmp_path, "config", "user.email", "t@t.com")
+        _git(tmp_path, "config", "user.name", "t")
         (tmp_path / "old_name.txt").write_text("content")
-        os.system(f'cd "{tmp_path}" && git add . && git commit -q -m init')
+        _git(tmp_path, "add", ".")
+        _git(tmp_path, "commit", "-q", "-m", "init")
         # 重命名
-        os.system(f'cd "{tmp_path}" && git mv old_name.txt new_name.txt')
+        _git(tmp_path, "mv", "old_name.txt", "new_name.txt")
 
         tracker = mod.GitChangeTracker(repo_root=str(tmp_path))
         status = tracker._git_status_porcelain()

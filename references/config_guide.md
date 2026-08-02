@@ -20,7 +20,155 @@
 | DATA_BACKEND | 数据源后端 | tushare/baostock/akshare/xtquant/gm | "tushare" |
 | BACKTEST_BACKEND | 回测框架 | rqalpha/backtrader/gm | "rqalpha" |
 | TRADE_BACKEND | 交易接口 | xtquant/gm | "xtquant" |
-| FACTOR_BACKEND | 因子计算库 | talib/pandas_ta | "talib" |
+| FACTOR_BACKEND | 因子计算库（技术指标） | talib/pandas_ta | "talib" |
+| QUANT_FACTOR_BACKEND | DataFrame 后端（IC/中性化/相关性热路径） | pandas/polars/auto | "pandas" |
+| QUANT_ALPHALENS_REPORT | 是否生成 Alphalens 因子分析报告 | 0/1 | "0" |
+| QUANT_LEGACY_PIPELINE | 强制走旧 4 步硬编码因子处理路径（兼容回滚） | 0/1 | "0" |
+| QUANT_WORK_DIR | 工作目录根路径 | 任意路径 | "./workspace" |
+
+## factor-engine 高性能 DataFrame 后端
+
+IC 计算 / 中性化 / IC Decay / 相关性分析等热路径支持 pandas / polars 双后端，通过 `QUANT_FACTOR_BACKEND` 环境变量切换。
+
+### 取值说明
+
+| 取值 | 行为 | 适用场景 |
+|------|------|---------|
+| `pandas` | 强制使用 pandas 后端（默认） | 兼容性最广，零额外依赖 |
+| `polars` | 强制使用 polars 后端 | 大规模截面计算（5000+ 股票）；polars 缺失时报错 |
+| `auto` | 自动检测 polars 可用性 | 生产环境推荐；polars 可用时自动启用，否则回退 pandas |
+
+### 性能对比（5000 股 × 1000 日面板）
+
+| 模块 | pandas 基线 | polars 后端 | 加速比 |
+|------|------------|-------------|--------|
+| Pearson IC | ~12s | ~1.0s | 10-15× |
+| Spearman IC | ~15s | ~1.5s | 8-12× |
+| 中性化（行业+市值） | ~10s | ~2s | 3-5× |
+| IC Decay（lag 1-20） | ~30s | ~3s | 8-10× |
+| 相关性分析（10 因子） | ~0.5s | ~0.4s | 1-1.5×（小矩阵无优势） |
+
+### 覆盖模块
+
+| 模块 | 文件 | 提速来源 |
+|------|------|---------|
+| Pearson IC | `skills/factor-engine/scripts/optimizations/ic_vectorized.py` | polars 多线程 Rust 引擎 |
+| Spearman IC | `skills/factor-engine/scripts/optimizations/ic_vectorized.py` | polars 窗口函数 + rank |
+| 中性化 | `skills/factor-engine/scripts/optimizations/vectorized_neutralize.py` | polars group_by 批量截面求解 |
+| IC Decay | `skills/factor-engine/scripts/optimizations/ic_decay.py` | polars `over(code/date)` 一次性扫描 |
+| 相关性分析 | `skills/factor-engine/scripts/optimizations/vectorized_correlation.py` | polars `DataFrame.corr()` |
+
+### 使用示例
+
+```bash
+# 显式启用 polars（高性能场景）
+export QUANT_FACTOR_BACKEND=polars
+
+# 自动检测（推荐生产环境）
+export QUANT_FACTOR_BACKEND=auto
+
+# 临时禁用（强制 pandas，用于排查问题）
+export QUANT_FACTOR_BACKEND=pandas
+```
+
+```python
+import os
+os.environ["QUANT_FACTOR_BACKEND"] = "polars"
+
+from engine import FactorEngine
+engine = FactorEngine()
+# IC/中性化/IC Decay/相关性分析将自动使用 polars 后端
+```
+
+### 双后端一致性保证
+
+- 所有支持 polars 后端的模块均通过 L2 单元测试验证
+- 双后端输出最大绝对偏差 < 1e-10（IC Decay 因 rank 实现细节差异放宽到 1e-6）
+- polars 缺失或运行异常时自动回退 pandas 并输出 warning 日志
+- 通过 `backend` 参数可临时覆盖环境变量：
+  ```python
+  engine.correlation_analysis(df, factor_names, backend="pandas")  # 临时强制 pandas
+  ```
+
+### 依赖安装
+
+```bash
+# polars 为可选依赖，需手动安装
+pip install "polars>=0.20.0"
+
+# 验证可用性
+python -c "import polars; print(polars.__version__)"
+```
+
+## factor-engine Alphalens 因子分析报告
+
+通过 `QUANT_ALPHALENS_REPORT` 环境变量控制是否在 FACTOR 阶段自动生成 Alphalens 因子分析报告。
+
+| 取值 | 行为 |
+|------|------|
+| `0` | 不生成报告（默认） |
+| `1` | 为每个入选因子生成 4 PNG + 1 HTML + 1 metrics.json |
+
+详见 [SKILL.md - Alphalens 因子分析报告](../skills/factor-engine/SKILL.md#alphalens-因子分析报告可选)。
+
+## factor-engine Processor Pipeline（方向一）
+
+因子处理流程抽象为可插拔的工序链 + 实验可重放记录器，通过 `pipeline.yaml` 声明式配置。
+
+### QUANT_LEGACY_PIPELINE 环境变量
+
+| 取值 | 行为 |
+|------|------|
+| `0`（默认） | 走 ProcessorChain 新路径，加载 `pipeline.yaml`，输出 manifest.json |
+| `1` | 走 v1.x 的 4 步硬编码路径（IC → 相关性 → 选因子 → 融合），绕过 pipeline.yaml 与 ExperimentRecorder |
+
+### pipeline.yaml 加载顺序
+
+1. `<QUANT_WORK_DIR>/pipeline.yaml`（用户覆盖，优先级最高）
+2. `<skill>/scripts/processors/pipeline.yaml`（默认配置）
+3. 兜底默认链（`_default_processors()`，仅 IC + Correlation + Fusion）
+
+### YAML 配置示例
+
+```yaml
+pipeline:
+  - processor: NeutralizeProcessor
+    enabled: true                  # 启用行业+市值中性化
+    params:
+      neutralize_mcap: true
+      neutralize_industry: true
+      min_count: 30
+
+  - processor: WinsorizeProcessor
+    enabled: false                  # 禁用去极值
+    params:
+      method: mad
+      threshold: 3.0
+
+  - processor: ICAnalysisProcessor
+    enabled: true
+    params:
+      ic_type: normal               # 或 spearman
+      forward_periods: [1, 5, 20]
+      min_count: 10
+
+  - processor: CorrelationFilterProcessor
+    enabled: true
+    params:
+      max_correlation: 0.7
+
+  - processor: FusionProcessor
+    enabled: true
+    params:
+      method: ic_weighted           # 或 equal_weighted
+      forward_period_for_weight: ret_forward_5d
+```
+
+### ExperimentRecorder 归档路径
+
+每次 pipeline 运行自动在 `<QUANT_WORK_DIR>/archives/factor_engine/run_YYYYMMDD_HHMMSS/manifest.json` 输出 7 字段 manifest（run_id / start_time / pipeline_config / input_data_hash / steps / output_artifacts / env），manifest 自身 sha256 纳入 P1-3 artifact_store 覆盖范围，支持实验可重放。
+
+详见 [SKILL.md - Processor Pipeline 架构](../skills/factor-engine/SKILL.md#processor-pipeline-架构方向一)。
 
 ## 配置文件
 

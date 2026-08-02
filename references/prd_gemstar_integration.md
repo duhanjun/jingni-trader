@@ -1,11 +1,25 @@
 # 产品需求文档（PRD）：jingni-trader 工程化升级（借鉴 GemStar P0/P1）
 
-> **文档版本**：v1.1（已确认决策，进入实施阶段）
+> **文档版本**：v1.2（P0/P1 全部 8 项借鉴点已开发完成）
 > **创建日期**：2026-08-02
 > **确认日期**：2026-08-02
+> **完成日期**：2026-08-02
 > **需求来源**：[gemstar_evaluation_report.md](file:///d:/codebuddy/jingni-trader/references/gemstar_evaluation_report.md) P0/P1 优先级借鉴点
 > **目标读者**：项目负责人、开发工程师、测试工程师
-> **状态**：✅ 用户已确认，进入实际开发环节
+> **状态**：✅ P0-1 ~ P1-4 全部完成；回归测试 626 passed / 5 skipped / 2 failed（2 失败为预先存在的环境问题：gm token 无效、ifindpy 缺失，与本次开发无关）
+
+## 实施进度总览
+
+| ID | 借鉴点 | 所属 Skill | 状态 | 关键产物 |
+|----|--------|-----------|------|---------|
+| P0-1 | PIT 强制契约 | data-engine | ✅ 完成 | `scripts/pit.py` + `pit_filter` + 6 adapter 出口新增 `disclosure_date` |
+| P0-2 | 三态数据质量门 | data-engine | ✅ 完成 | `scripts/quality_gate.py` + `DataQualityGate` + `CORE_TABLES`/`OPTIONAL_TABLES` |
+| P0-3 | RuleJudge 五硬门 | backtest-engine | ✅ 完成 | `scripts/rule_judge.py` + `RuleJudge.judge` + `Verdict` |
+| P0-4 | Frozen Core 路径策略 | master + cross-skill | ✅ 完成 | `scripts/path_policy_loader.py` + `GitChangeTracker` + atexit 退出兜底 |
+| P1-1 | JSONL Paper Trading 账本 | execution-monitor-engine | ✅ 完成 | `scripts/paper_ledger.py` + `PaperTradeRecordV1` + `replay_ledger` + 旧状态迁移 |
+| P1-2 | 显式 FSM + IncidentFSM | master | ✅ 完成 | `scripts/fsm.py` + `DailyFSM`(11 状态) + `IncidentFSM`(7 状态) + `engine.py` 集成 |
+| P1-3 | 工件版本化 + sha256 manifest | master | ✅ 完成 | `scripts/artifact_store.py` + `scripts/replay_check.py` + `archive.py` 增强 + `engine.py` 集成 `run_manifest.json` |
+| P1-4 | Pydantic V2 Schema 全链路 | master | ✅ 完成 | `scripts/schemas.py`(8 个 V1 模型) + `Context` 改造为 Pydantic + `STAGE_SCHEMA_MAP` |
 
 ---
 

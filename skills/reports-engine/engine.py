@@ -476,6 +476,117 @@ def _detect_report_template(ctx) -> str:
     return "both"
 
 
+def _maybe_render_factor_analysis_report(ctx) -> str:
+    """T3-8: 若存在 alphalens 因子分析报告目录，则聚合各因子 metrics.json
+    生成独立的因子分析汇总报告 HTML。
+
+    读取 workspace/reports/alphalens/<task_id>/*_metrics.json，
+    拼接为单页 HTML，含各因子关键指标卡片 + 原 HTML 报告链接。
+
+    返回
+    ----
+    生成的 HTML 路径；不存在或无 metrics.json 时返回空字符串
+    """
+    import glob as _glob
+
+    _work_dir = os.environ.get("QUANT_WORK_DIR", "./workspace")
+    task_id = getattr(ctx, "task_id", "") or "default"
+    alphalens_dir = os.path.join(_work_dir, "reports", "alphalens", task_id)
+    if not os.path.isdir(alphalens_dir):
+        return ""
+
+    metrics_files = sorted(_glob.glob(os.path.join(alphalens_dir, "*_metrics.json")))
+    if not metrics_files:
+        return ""
+
+    # 读取所有 metrics.json
+    metrics_list = []
+    for mf in metrics_files:
+        try:
+            with open(mf, "r", encoding="utf-8") as f:
+                metrics_list.append(json.load(f))
+        except Exception as e:
+            logger.warning(f"读取 alphalens metrics 失败: {mf}: {e}")
+
+    if not metrics_list:
+        return ""
+
+    # 渲染汇总 HTML
+    cards_html = []
+    for m in metrics_list:
+        verdict = m.get("suggested_verdict", "REVIEW")
+        verdict_color = {
+            "ACCEPT": "#28a745", "REVIEW": "#ffc107", "REJECT": "#dc3545"
+        }.get(verdict, "#6c757d")
+        factor_name = m.get("factor", "unknown")
+        # 找到对应的因子报告 HTML（同目录下 <factor>_report.html）
+        factor_html = os.path.join(alphalens_dir, f"{factor_name}_report.html")
+        # relpath 基准使用运行时 work_dir/reports，与 output_path 一致
+        _runtime_report_dir = os.path.join(_work_dir, "reports")
+        factor_link = (
+            f'<a href="{os.path.relpath(factor_html, _runtime_report_dir)}" target="_blank">查看详情</a>'
+            if os.path.exists(factor_html) else ""
+        )
+        cards_html.append(f"""
+        <div class="factor-card">
+          <h3>{factor_name} <span class="verdict" style="background:{verdict_color}">{verdict}</span></h3>
+          <div class="metrics-row">
+            <span><b>IC 均值</b>: {m.get('ic_mean', 0):.4f}</span>
+            <span><b>IC IR</b>: {m.get('ic_ir', 0):.4f}</span>
+            <span><b>多空夏普</b>: {m.get('long_short_sharpe', 0):.4f}</span>
+            <span><b>多空收益</b>: {m.get('long_short_return', 0):.4f}</span>
+            <span><b>Top 换手率</b>: {m.get('avg_turnover_top_quantile', 0):.4f}</span>
+          </div>
+          <div class="link-row">{factor_link}</div>
+        </div>""")
+
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>因子分析汇总报告</title>
+<style>
+  body {{ font-family: -apple-system, "Microsoft YaHei", sans-serif; margin: 24px; color: #333; }}
+  h1 {{ color: #1a3a6c; border-bottom: 2px solid #1a3a6c; padding-bottom: 8px; }}
+  .factor-card {{ background: #f8f9fa; padding: 16px; border-radius: 6px; margin: 12px 0; border-left: 4px solid #2c5282; }}
+  .factor-card h3 {{ margin: 0 0 8px 0; color: #2c5282; }}
+  .verdict {{ display: inline-block; padding: 2px 10px; border-radius: 10px; color: white; font-size: 12px; margin-left: 8px; }}
+  .metrics-row {{ display: flex; flex-wrap: wrap; gap: 16px; font-size: 14px; }}
+  .metrics-row span {{ background: white; padding: 4px 8px; border-radius: 3px; }}
+  .link-row {{ margin-top: 8px; font-size: 13px; }}
+  .link-row a {{ color: #2c5282; text-decoration: none; }}
+  .link-row a:hover {{ text-decoration: underline; }}
+  footer {{ margin-top: 32px; color: #6c757d; font-size: 12px; text-align: center; }}
+  .summary {{ background: #e9ecef; padding: 12px; border-radius: 4px; margin: 16px 0; }}
+</style>
+</head>
+<body>
+<h1>因子分析汇总报告</h1>
+<p>生成时间：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} ｜ 任务 ID：{task_id}</p>
+<div class="summary">共分析 <b>{len(metrics_list)}</b> 个因子。
+ACCEPT 数量：{sum(1 for m in metrics_list if m.get('suggested_verdict') == 'ACCEPT')}
+｜ REVIEW 数量：{sum(1 for m in metrics_list if m.get('suggested_verdict') == 'REVIEW')}
+</div>
+{''.join(cards_html)}
+<footer>由 jingni-trader reports-engine 自动聚合 alphalens metrics 生成</footer>
+</body>
+</html>"""
+
+    # 使用运行时 QUANT_WORK_DIR 而非模块加载时固化的 REPORT_DIR，
+    # 避免 monkeypatch.setenv("QUANT_WORK_DIR") 后输出路径不一致
+    _report_dir = os.path.join(_work_dir, "reports")
+    os.makedirs(_report_dir, exist_ok=True)
+    output_path = os.path.join(_report_dir, "factor_analysis_report.html")
+    try:
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(html)
+        logger.info(f"因子分析汇总报告已生成: {output_path}")
+        return output_path
+    except Exception as e:
+        logger.warning(f"因子分析汇总报告生成失败: {e}")
+        return ""
+
+
 def _run_template_report(ctx) -> Dict[str, Any]:
     """
     模板化报告生成路径：根据 report_template 路由到对应模板
@@ -547,6 +658,11 @@ def _run_template_report(ctx) -> Dict[str, Any]:
     # 无论 LLM 是否成功，都替换占位符（LLM 失败时用规则模板生成兜底内容）
     _inject_deep_analysis(generated_paths, llm_responses, llm_prompts)
 
+    # T3-8: 若存在 alphalens 因子分析报告，则聚合各因子 metrics.json 生成独立的因子分析报告
+    factor_report_path = _maybe_render_factor_analysis_report(ctx)
+    if factor_report_path:
+        generated_paths.append(factor_report_path)
+
     primary_path = generated_paths[0]
     report_data = {
         "report_template": template_choice,
@@ -567,6 +683,7 @@ def _run_template_report(ctx) -> Dict[str, Any]:
             "all_artifacts": generated_paths,
             "llm_prompts": llm_prompts,
             "llm_status": llm_status,
+            "factor_report_path": factor_report_path,
         },
         "error": ""
     }

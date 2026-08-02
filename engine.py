@@ -19,6 +19,8 @@ from scripts.config import (
 )
 from scripts.context import Context
 from scripts.archive import RunArchiver
+from scripts.schemas import STAGE_SCHEMA_MAP, safe_validate_payload
+from scripts.fsm import DailyFSM, IncidentFSM, STATE_MANUAL_ATTENTION, STATE_DEGRADED
 
 
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -415,7 +417,12 @@ class MasterEngine:
             self.ctx.update_artifact(stage, artifact_path)
             if self.archiver:
                 self.archiver.record_step_result(stage, {"success": True, "artifact_path": artifact_path, "metadata": {"source": "cache"}})
-                self.archiver.save_artifact_copy(stage, artifact_path)
+                # P1-3.5: 传入上游 inputs 血缘（ctx.artifacts 中除当前阶段外的产物）
+                upstream_inputs = [
+                    v for k, v in self.ctx.artifacts.items() if k != stage and v
+                ]
+                self.archiver.save_artifact_copy(stage, artifact_path, inputs=upstream_inputs)
+                self.archiver.record_stage_end(stage, "success")
                 self.archiver.write_step_summary(stage, step_num)
             return True
 
@@ -426,6 +433,7 @@ class MasterEngine:
             self.ctx.add_error(error_msg)
             if self.archiver:
                 self.archiver.record_step_result(stage, {"success": False, "error": error_msg})
+                self.archiver.record_stage_end(stage, "failed")
                 self.archiver.write_step_summary(stage, step_num)
             return False
 
@@ -441,6 +449,7 @@ class MasterEngine:
             self.ctx.add_error(error_msg)
             if self.archiver:
                 self.archiver.record_step_result(stage, {"success": False, "error": error_msg})
+                self.archiver.record_stage_end(stage, "failed")
                 self.archiver.write_step_summary(stage, step_num)
             return False
 
@@ -452,15 +461,30 @@ class MasterEngine:
                 artifact = result.get("artifact_path", "")
                 self.ctx.update_artifact(stage, artifact)
                 self.ctx.metadata[stage] = result.get("metadata", {})
+                # P1-4 阶段间 schema 校验（软校验，不阻断流程，遵循零回归）
+                stage_meta = result.get("metadata", {})
+                schema_cls = STAGE_SCHEMA_MAP.get(stage)
+                if schema_cls is not None and stage_meta:
+                    safe_validate_payload(stage_meta, schema_cls, stage=stage)
                 if self.archiver:
-                    self.archiver.save_artifact_copy(stage, artifact)
+                    # P1-3.5: 传入上游 inputs 血缘（ctx.artifacts 中除当前阶段外的产物）
+                    upstream_inputs = [
+                        v for k, v in self.ctx.artifacts.items() if k != stage and v
+                    ]
+                    self.archiver.save_artifact_copy(stage, artifact, inputs=upstream_inputs)
                     # 处理多产物场景（如非量化 both 模式生成技术面+基本面两份报告）
                     all_artifacts = result.get("metadata", {}).get("all_artifacts", [])
                     for extra in all_artifacts:
                         if extra and extra != artifact:
-                            self.archiver.save_artifact_copy(stage, extra)
+                            self.archiver.save_artifact_copy(stage, extra, inputs=upstream_inputs)
+                    # T3-7: FACTOR 阶段额外归档 alphalens 报告目录（环境变量启用时存在）
+                    if stage == "FACTOR":
+                        alphalens_dir = result.get("metadata", {}).get("alphalens_report_dir", "")
+                        if alphalens_dir and os.path.isdir(alphalens_dir):
+                            self.archiver.save_artifact_copy(stage, alphalens_dir, inputs=upstream_inputs)
                 logger.info(f"阶段 {stage} 执行成功, 产物: {artifact}")
                 if self.archiver:
+                    self.archiver.record_stage_end(stage, "success")
                     self.archiver.write_step_summary(stage, step_num)
                 return True
             else:
@@ -468,6 +492,7 @@ class MasterEngine:
                 logger.error(f"阶段 {stage} 执行失败: {error_msg}")
                 self.ctx.add_error(f"{stage}: {error_msg}")
                 if self.archiver:
+                    self.archiver.record_stage_end(stage, "failed")
                     self.archiver.write_step_summary(stage, step_num)
                 return False
         except Exception as e:
@@ -476,6 +501,7 @@ class MasterEngine:
             self.ctx.add_error(error_msg)
             if self.archiver:
                 self.archiver.record_step_result(stage, {"success": False, "error": error_msg})
+                self.archiver.record_stage_end(stage, "failed")
                 self.archiver.write_step_summary(stage, step_num)
             return False
 
@@ -514,12 +540,54 @@ class MasterEngine:
         results = {"success": True, "completed_stages": [], "failed_stages": [],
                    "summary": "", "archive_dir": run_dir, "llm_prompts": {}}
 
+        # P1-2 显式 FSM 校验层（不替换 STAGES，只校验转移合法性）
+        fsm = DailyFSM()
+        fsm_current = "INITIALIZED"
+        self.ctx.metadata["fsm_transitions"] = []
+
         for step_num, stage in enumerate(self.ctx.target_stages, 1):
+            # P1-2.6: 阶段间 FSM 转移校验
+            try:
+                fsm_current = fsm.transition(fsm_current, stage)
+                self.ctx.metadata["fsm_transitions"].append(
+                    {"from": fsm_current, "to": stage}
+                )
+            except ValueError as fsm_err:
+                logger.error(f"P1-2 FSM 非法转移: {fsm_err}")
+                self.ctx.add_error(f"FSM: {fsm_err}")
+                results["success"] = False
+                break
+
             success = self.execute_stage(stage, step_num)
             if success:
                 results["completed_stages"].append(stage)
+                # P1-2.7: data_quality abort → MANUAL_ATTENTION
+                if stage == "DATA":
+                    dq = self.ctx.metadata.get("DATA", {}).get("data_quality", {})
+                    if isinstance(dq, dict) and dq.get("mode") == "abort":
+                        logger.error("P1-2 数据质量 abort → 转入 MANUAL_ATTENTION")
+                        try:
+                            fsm.transition(fsm_current, STATE_MANUAL_ATTENTION)
+                        except ValueError:
+                            pass
+                        results["success"] = False
+                        break
             else:
                 results["failed_stages"].append(stage)
+                # P1-2.9: 异常时创建 IncidentFSM 重试
+                if stage not in ["DATA", "BACKTEST"]:
+                    incident = IncidentFSM()
+                    try:
+                        incident.transition("DETECTED", "CLASSIFIED")
+                        incident.transition("CLASSIFIED", "RETRYING")
+                        incident.transition("RETRYING", "CLASSIFIED")
+                        incident.transition("CLASSIFIED", "DEGRADED")
+                        fsm.transition(fsm_current, STATE_DEGRADED)
+                        fsm_current = STATE_DEGRADED
+                        logger.warning(f"P1-2 阶段 {stage} 失败，FSM 转 DEGRADED")
+                    except ValueError:
+                        pass
+                    continue
                 if stage in ["DATA", "BACKTEST"]:
                     results["success"] = False
                     logger.error(f"关键阶段 {stage} 失败，停止管道")
@@ -548,10 +616,40 @@ class MasterEngine:
                 task_id=self.ctx.task_id,
                 errors=self.ctx.errors
             )
+            # P1-3.6: run 结束时落盘 run_manifest.json（含各阶段 sha256/latency/status）
+            # 紧跟在 pipeline_summary 之后，作为血缘与可重放校验的权威记录
+            try:
+                manifest_path = self.archiver.write_run_manifest(
+                    inputs_sha256=self._collect_inputs_sha256()
+                )
+                results["run_manifest"] = manifest_path
+            except Exception as e:
+                logger.warning(f"P1-3 write_run_manifest 失败（不阻断）: {e}")
 
         results["context"] = self.ctx.to_dict()
 
         return results
+
+    def _collect_inputs_sha256(self) -> Dict[str, str]:
+        """P1-3: 收集各阶段上游输入产物的 sha256，用于 run_manifest 的 inputs_sha256 字段。
+
+        对每个已执行的阶段，计算其产物文件的 sha256 作为下一阶段的输入指纹。
+        返回 {stage: sha256} 映射（产物不存在的阶段跳过）。
+        """
+        try:
+            from scripts.artifact_store import compute_sha256
+        except ImportError:
+            return {}
+
+        inputs_sha: Dict[str, str] = {}
+        for stage, path in self.ctx.artifacts.items():
+            if not path or not os.path.isfile(path):
+                continue
+            try:
+                inputs_sha[stage] = compute_sha256(path)
+            except Exception:
+                continue
+        return inputs_sha
 
     def _inject_llm_to_archive(self, run_dir: str, llm_responses: dict, results: dict):
         """将 agent 传入的 LLM 分析结果注入归档 HTML 中，替换占位符"""
