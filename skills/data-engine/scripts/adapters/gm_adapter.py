@@ -185,18 +185,20 @@ class GmAdapter(BaseDataProvider):
             roe, roa, gross_margin, net_margin,
             revenue_growth, profit_growth,
             debt_ratio, current_ratio, quick_ratio, ocf,
-            industry, name
+            industry, name, disclosure_date
         """
         self._check_available()
         from gm.api import set_token, stk_get_daily_valuation, stk_get_finance_prime, get_instruments
         set_token(self.token)
 
+        # P0-1 PIT 契约：末尾追加 disclosure_date
+        # gm 无原生披露日接口，出口回填为 report_date（保守降级）
         standard_cols = [
             'code', 'report_date', 'pe_ttm', 'pb', 'ps_ttm', 'dv_ratio',
             'roe', 'roa', 'gross_margin', 'net_margin',
             'revenue_growth', 'profit_growth',
             'debt_ratio', 'current_ratio', 'quick_ratio', 'ocf',
-            'industry', 'name',
+            'industry', 'name', 'disclosure_date',
         ]
 
         # 标准化报告期: '20240930' <-> '2024-09-30'
@@ -209,6 +211,8 @@ class GmAdapter(BaseDataProvider):
             row = {col: None for col in standard_cols}
             row['code'] = code
             row['report_date'] = period
+            # P0-1 PIT 契约：gm 无原生披露日，回填为 report_date（保守降级）
+            row['disclosure_date'] = period
 
             # 1) 每日估值指标(PE/PB/PS/股息率): 在报告期附近取最接近的一日
             try:
@@ -274,9 +278,10 @@ class GmAdapter(BaseDataProvider):
 
         out = pd.DataFrame(rows, columns=standard_cols)
 
-        # 如果调用方指定了 fields，按需过滤列（code/report_date 始终保留）
+        # 如果调用方指定了 fields，按需过滤列
+        # P0-1 PIT 契约：code/report_date/disclosure_date 始终保留
         if fields:
-            keep = ['code', 'report_date'] + [f for f in fields if f in standard_cols]
+            keep = ['code', 'report_date', 'disclosure_date'] + [f for f in fields if f in standard_cols]
             keep = list(dict.fromkeys(keep))
             out = out[keep]
 

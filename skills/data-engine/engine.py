@@ -782,12 +782,13 @@ class DataEngine:
     # ------------------------------------------------------------------
 
     # 标准 schema 字段（与 base_data_provider.BaseDataProvider.get_financial 一致）
+    # P0-1 PIT 契约：末尾追加 disclosure_date（披露日）
     _FINANCIAL_STANDARD_COLS = [
         'code', 'report_date', 'pe_ttm', 'pb', 'ps_ttm', 'dv_ratio',
         'roe', 'roa', 'gross_margin', 'net_margin',
         'revenue_growth', 'profit_growth',
         'debt_ratio', 'current_ratio', 'quick_ratio', 'ocf',
-        'industry', 'name',
+        'industry', 'name', 'disclosure_date',
     ]
 
     def _try_fetch_financial_with_fallback(
@@ -909,9 +910,10 @@ class DataEngine:
                 df[col] = None
         df = df[self._FINANCIAL_STANDARD_COLS]
 
-        # 如果调用方指定了 fields，按需过滤列（code/report_date 始终保留）
+        # 如果调用方指定了 fields，按需过滤列
+        # P0-1 PIT 契约：code/report_date/disclosure_date 始终保留
         if fields:
-            keep = ['code', 'report_date'] + [f for f in fields if f in self._FINANCIAL_STANDARD_COLS]
+            keep = ['code', 'report_date', 'disclosure_date'] + [f for f in fields if f in self._FINANCIAL_STANDARD_COLS]
             keep = list(dict.fromkeys(keep))
             df = df[keep]
 
@@ -1106,6 +1108,11 @@ def run(ctx) -> Dict[str, Any]:
         # 获取补充数据类型（financial/capital_flow/dragon_tiger/shareholder）
         # 每种数据类型独立降级，互不影响
         report_date = getattr(ctx, 'metadata', {}).get("report_date", "")
+        # P0-1 PIT 契约：asof 取回测结束日期（防止未来披露数据进入下游）
+        pit_asof = ctx.end_date.replace("-", "") if ctx.end_date else ""
+        pit_warnings: list = []
+        # P0-2 三态数据质量门：收集实际拉到的 supplementary DataFrame，供出口 gate.check 使用
+        supplementary_dfs: Dict[str, "pd.DataFrame"] = {}
         supplementary_types = ["financial", "capital_flow", "dragon_tiger", "shareholder"]
         for data_type in supplementary_types:
             meta = DATA_TYPES.get(data_type)
@@ -1120,17 +1127,79 @@ def run(ctx) -> Dict[str, Any]:
                     report_date=report_date,
                 )
                 if sdf is not None and not sdf.empty:
+                    # P0-1.3 PIT 出口扫描：财务数据保存前做 PIT 校验
+                    if data_type == "financial" and pit_asof:
+                        try:
+                            from scripts.pit import scan_pit_warnings, pit_filter
+                            warnings = scan_pit_warnings(sdf, pit_asof, table_name="financial")
+                            if warnings:
+                                pit_warnings.extend(warnings)
+                                sdf = pit_filter(sdf, pit_asof)
+                                logger.info(
+                                    f"PIT 出口扫描：financial 表过滤后剩余 {len(sdf)} 行"
+                                    f"（asof={pit_asof}，剔除 {len(warnings)} 行未来披露数据）"
+                                )
+                        except ValueError as ve:
+                            logger.warning(f"PIT 出口扫描跳过（缺 disclosure_date 列）: {ve}")
+                        except Exception as pit_e:
+                            logger.warning(f"PIT 出口扫描异常（不阻断流程）: {pit_e}")
                     spath = os.path.join(output_dir, meta.artifact_filename)
                     engine.save_data(sdf, spath)
                     ctx.update_artifact(meta.artifact_key, spath)
                     metadata["data_source_usage"][data_type] = sbackend
+                    # P0-2 收集实际拉到的 supplementary DataFrame，供出口 gate.check 使用
+                    supplementary_dfs[data_type] = sdf
                     logger.info(f"{meta.display_name} 已落盘: {spath} (源: {sbackend})")
                 else:
                     logger.info(f"{meta.display_name} 数据缺失（非必需，跳过）")
             except Exception as e:
                 logger.warning(f"获取 {meta.display_name} 失败（非必需，跳过）: {e}")
 
+        # P0-1.3 PIT 扫描结果写入 ctx.metadata 供下游参考
+        if pit_warnings:
+            if hasattr(ctx, 'metadata') and isinstance(ctx.metadata, dict):
+                ctx.metadata["pit_warnings"] = pit_warnings
+            metadata["pit_warnings"] = pit_warnings
+            logger.warning(
+                f"PIT 扫描汇总：共 {len(pit_warnings)} 条 PIT 违规记录，已写入 ctx.metadata['pit_warnings']"
+            )
+
         metadata["data_source_usage"]["daily"] = engine.backend
+
+        # ============================================================
+        # P0-2 三态数据质量门：出口校验（PRD P0-2.5）
+        # ============================================================
+        # 构造 tables 字典：daily（主产物）+ 实际拉到的 supplementary
+        # 别名（cleaned_data/financial/capital_flow/...）会在 gate 内部归一为 PRD 标准名
+        tables_for_gate = {"daily": df}
+        tables_for_gate.update(supplementary_dfs)
+        try:
+            from scripts.quality_gate import DataQualityGate
+            gate = DataQualityGate(core_required=["daily"])
+            verdict = gate.check(
+                tables=tables_for_gate,
+                asof=pit_asof or "20240101",
+                pit_warnings=pit_warnings,
+            )
+            verdict_dict = verdict.to_dict()
+            if hasattr(ctx, 'metadata') and isinstance(ctx.metadata, dict):
+                ctx.metadata["data_quality"] = verdict_dict
+            metadata["data_quality"] = verdict_dict
+
+            if verdict.mode == "abort":
+                logger.error(f"数据质量 abort: {verdict.reason}")
+                return {
+                    "success": False,
+                    "artifact_path": "",
+                    "metadata": metadata,
+                    "error": f"data_quality_abort: {verdict.reason}",
+                }
+            if verdict.mode == "degraded":
+                logger.warning(f"数据质量降级: {verdict.reason}")
+            else:
+                logger.info(f"数据质量 normal: {verdict.reason}")
+        except Exception as qe:
+            logger.warning(f"P0-2 质量门校验异常（不阻断流程）: {qe}")
 
         return {
             "success": True,

@@ -116,20 +116,11 @@ EXPECTED_ARTIFACTS = {
 }
 
 
-# 个股分析意图关键词（触发分析报告路径：DATA → FACTOR → REPORT）
-ANALYSIS_KEYWORDS = {
-    "分析", "怎么样", "怎么看", "技术面", "基本面", "K线", "k线", "形态",
-    "诊股", "能买吗", "可以买吗", "支撑", "阻力", "压力位", "支撑位",
-    "MACD", "macd", "RSI", "rsi", "KDJ", "kdj", "布林", "均线",
-    "趋势", "涨跌", "估值", "PE", "pe", "PB", "pb", "ROE", "roe",
-    "财报", "盈利", "收入", "营收", "利润", "毛利率", "净利率",
-    "股息", "分红", "行业对比", "同行业",
-}
-
-# 量化交易关键词（触发完整管线：DATA → FACTOR → MODEL → BACKTEST → ...）
-QUANT_KEYWORDS = {
-    "回测", "因子", "策略", "模型", "组合", "实盘", "选股",
-    "backtest", "alpha", "ic", "夏普", "回撤", "仓位", "风控",
+# 策略构建关键词（触发完整管线：DATA → FACTOR → MODEL → BACKTEST → ...）
+# 只有用户明确需要"构建可回测/可交易策略"时才命中，因子计算/分析本身不触发
+STRATEGY_KEYWORDS = {
+    "回测", "策略", "模型", "组合", "实盘", "选股",
+    "backtest", "夏普", "回撤", "仓位", "风控", "模拟", "下单", "执行",
 }
 
 
@@ -175,6 +166,17 @@ class MasterEngine:
         self.archiver: Optional[RunArchiver] = None
         self._force_refresh = os.environ.get("QUANT_FORCE_REFRESH", "").lower() in ("1", "true", "yes")
 
+        # P0-4 Frozen Core 路径策略保护：注册 atexit 退出兜底钩子
+        # 在 run_pipeline 开始时调用 pre_snapshot，进程退出时 post_diff 校验 frozen core
+        self._git_tracker = None
+        try:
+            import atexit
+            from scripts.path_policy_loader import get_git_tracker, post_run_guard
+            self._git_tracker = get_git_tracker()
+            atexit.register(post_run_guard, self._git_tracker, "master-engine")
+        except Exception as e:
+            logger.debug(f"P0-4 atexit 钩子注册跳过: {e}")
+
         # 版本检查：每次实例化时检查 GitHub 是否有新版本，落后则输出提示
         # 本调用只检查、不修改任何文件（详见 scripts/skill_sync.py）
         # 失败/网络异常/24h 内已检查 均静默跳过，不阻断主流程（用户无感）
@@ -190,17 +192,17 @@ class MasterEngine:
         except Exception as e:
             logger.debug(f"skill 版本检查跳过: {e}")
 
-    def _is_analysis_intent(self, user_intent: str) -> bool:
-        """判断是否为个股分析意图（生成分析报告，不走回测/模型管线）"""
+    def _is_strategy_required(self, user_intent: str) -> bool:
+        """判断用户是否明确需要构建可回测/可交易策略。
+
+        设计原则：
+        - 因子计算/IC 分析是两条路径共用的前置步骤，不构成"策略构建"意图
+        - 仅当用户明确表达"回测/策略/模型/组合/实盘/选股/风控/下单"等动作时才为 True
+        - 默认 False（走分析路径 DATA → FACTOR → REPORT），与产品定位一致
+        """
         if not user_intent:
             return False
-        # If contains quant keywords, it's full pipeline path
-        has_quant = any(kw in user_intent for kw in QUANT_KEYWORDS)
-        has_analysis = any(kw in user_intent for kw in ANALYSIS_KEYWORDS)
-        # If both present, prefer quant (more specific)
-        if has_quant:
-            return False
-        return has_analysis
+        return any(kw in user_intent for kw in STRATEGY_KEYWORDS)
 
     def _detect_report_template(self, user_input: str) -> str:
         """从用户输入检测报告模板类型"""
@@ -291,7 +293,13 @@ class MasterEngine:
         return user_chain
 
     def parse_intent(self, user_input: str) -> Context:
-        """解析用户自然语言，提取任务参数，生成 Context"""
+        """解析用户自然语言，提取任务参数，生成 Context
+
+        单一工作流模型：根据是否需要构建策略选择执行深度。
+        - strategy_required=True  → 完整 7 阶段管线（含 MODEL/BACKTEST/PORTFOLIO/EXECUTION）
+        - strategy_required=False → DATA → FACTOR → REPORT（默认，分析路径）
+        - EXECUTION 触发时自动补齐 MODEL 和 BACKTEST（实盘依赖回测验证的策略）
+        """
         ctx = Context(
             task_id=datetime.now().strftime("%Y%m%d%H%M%S"),
             user_intent=user_input,
@@ -300,41 +308,25 @@ class MasterEngine:
 
         input_lower = user_input.lower()
 
-        target_stages = []
-        if any(kw in input_lower for kw in ["数据", "获取", "下载", "data"]):
-            target_stages.append("DATA")
-        if any(kw in input_lower for kw in ["因子", "factor", "alpha", "ic", "因子发现", "因子挖掘", "因子研究", "因子探索"]):
-            target_stages.append("FACTOR")
-        if any(kw in input_lower for kw in ["模型", "训练", "model", "train", "lightgbm", "机器学习"]):
-            target_stages.append("MODEL")
-        if any(kw in input_lower for kw in ["回测", "backtest", "模拟"]):
-            target_stages.append("BACKTEST")
-        if any(kw in input_lower for kw in ["组合", "优化", "portfolio", "风控", "仓位"]):
-            target_stages.append("PORTFOLIO")
-        if any(kw in input_lower for kw in ["实盘", "交易", "下单", "execution", "执行"]):
-            target_stages.append("EXECUTION")
+        # 单一布尔标志驱动路由：用户是否明确需要构建可回测/可交易策略
+        strategy_required = self._is_strategy_required(user_input)
+        ctx.metadata["strategy_required"] = strategy_required
 
-        # 实盘路径：确保 MODEL 和 BACKTEST 在 EXECUTION 之前
-        if "EXECUTION" in target_stages:
-            if "MODEL" not in target_stages:
-                target_stages.append("MODEL")
-            if "BACKTEST" not in target_stages:
-                target_stages.append("BACKTEST")
-        if any(kw in input_lower for kw in ["报告", "report", "可视化", "绩效", "归因"]):
-            target_stages.append("REPORT")
+        # 报告模板检测：正交维度，无论是否构建策略都应工作
+        ctx.metadata["report_template"] = self._detect_report_template(user_input)
 
-        # 个股分析意图路由：跳过 MODEL/BACKTEST/PORTFOLIO/EXECUTION，
-        # 仅保留 DATA → FACTOR → REPORT，由 REPORT 引擎按模板产出个股分析报告。
-        if self._is_analysis_intent(user_input):
+        if strategy_required:
+            # 完整策略管线：DATA → FACTOR → MODEL → BACKTEST → PORTFOLIO → EXECUTION → REPORT
+            # MODEL 和 BACKTEST 已在管线中，实盘依赖回测验证的策略自动满足
+            target_stages = ["DATA", "FACTOR", "MODEL", "BACKTEST", "PORTFOLIO", "EXECUTION", "REPORT"]
+            logger.info(f"检测到策略构建意图，路由到完整管线: {' → '.join(target_stages)}")
+        else:
+            # 默认分析路径：因子仅用于分析，不构建策略
             target_stages = ["DATA", "FACTOR", "REPORT"]
-            ctx.metadata["report_template"] = self._detect_report_template(user_input)
-            logger.info(f"检测到个股分析意图，路由到分析报告路径: DATA → FACTOR → REPORT (模板: {ctx.metadata['report_template']})")
-
-        if not target_stages:
-            target_stages = ["DATA", "FACTOR", "MODEL", "BACKTEST", "REPORT"]
-
-        if any(s in target_stages for s in ["FACTOR", "MODEL", "BACKTEST", "PORTFOLIO", "REPORT"]) and "DATA" not in target_stages:
-            target_stages.insert(0, "DATA")
+            logger.info(
+                f"未检测到策略构建意图，路由到分析路径: DATA → FACTOR → REPORT "
+                f"(报告模板: {ctx.metadata['report_template']})"
+            )
 
         target_stages = sorted(target_stages, key=lambda s: STAGE_ORDER.get(s, 99))
         ctx.target_stages = target_stages
@@ -511,6 +503,13 @@ class MasterEngine:
         run_dir = self.archiver.create_run(self.ctx.task_id)
         self.ctx.run_dir = run_dir
         logger.info(f"运行归档目录: {run_dir}")
+
+        # P0-4 Frozen Core：run_pipeline 开始时记录 git status 快照
+        if self._git_tracker is not None:
+            try:
+                self._git_tracker.pre_snapshot()
+            except Exception as e:
+                logger.debug(f"P0-4 pre_snapshot 跳过: {e}")
 
         results = {"success": True, "completed_stages": [], "failed_stages": [],
                    "summary": "", "archive_dir": run_dir, "llm_prompts": {}}

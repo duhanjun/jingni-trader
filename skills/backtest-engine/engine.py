@@ -237,6 +237,41 @@ def run(ctx) -> Dict[str, Any]:
         if 'equity_curve' in result and not result['equity_curve'].empty:
             result['equity_curve'].to_parquet(equity_path)
 
+        # ============================================================
+        # P0-3 RuleJudge 五硬门评审（PRD P0-3.5）
+        # ============================================================
+        # 计算完成交易笔数：每次 signal 从 0→1 或 1→0 算一笔
+        trade_count = 0
+        try:
+            if not signals.empty and "signal" in signals.columns:
+                sig_sorted = signals.sort_values(["code", "date"])
+                sig_diff = sig_sorted.groupby("code")["signal"].diff().abs()
+                trade_count = int((sig_diff > 0).sum())
+        except Exception as tc_e:
+            logger.warning(f"trade_count 计算异常（默认 0）: {tc_e}")
+
+        verdict_dict = {}
+        try:
+            from scripts.rule_judge import RuleJudge
+            judge = RuleJudge()
+            equity_curve_for_judge = result.get("equity_curve", pd.DataFrame())
+            verdict = judge.judge(
+                metrics=result["metrics"],
+                equity_curve=equity_curve_for_judge,
+                trade_count=trade_count,
+            )
+            verdict_dict = verdict.to_dict()
+            if verdict.recommended_state == "rejected":
+                logger.warning(
+                    f"P0-3 策略未通过 RuleJudge 评审: failed_gates={verdict.failed_gates}"
+                )
+            else:
+                logger.info(
+                    f"P0-3 策略通过 RuleJudge 评审: passed_gates={verdict.passed_gates}"
+                )
+        except Exception as rj_e:
+            logger.warning(f"P0-3 RuleJudge 评审异常（不阻断流程）: {rj_e}")
+
         return {
             "success": True,
             "artifact_path": json_path,
@@ -245,6 +280,9 @@ def run(ctx) -> Dict[str, Any]:
                 "metrics": result['metrics'],
                 "backend": BACKTEST_BACKEND,
                 "equity_curve_path": equity_path,
+                # P0-3.5 新增：评审结果写入 result["verdict"]
+                "verdict": verdict_dict,
+                "trade_count": trade_count,
             },
             "error": ""
         }

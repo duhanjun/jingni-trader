@@ -257,17 +257,18 @@ class TushareAdapter(BaseDataProvider):
             roe, roa, gross_margin, net_margin,
             revenue_growth, profit_growth,
             debt_ratio, current_ratio, quick_ratio, ocf,
-            industry, name
+            industry, name, disclosure_date
         """
         period = report_date.replace('-', '')
 
         # 标准输出列（固定顺序）
+        # P0-1 PIT 契约：末尾追加 disclosure_date（来自 tushare ann_date，真实披露日）
         standard_cols = [
             'code', 'report_date', 'pe_ttm', 'pb', 'ps_ttm', 'dv_ratio',
             'roe', 'roa', 'gross_margin', 'net_margin',
             'revenue_growth', 'profit_growth',
             'debt_ratio', 'current_ratio', 'quick_ratio', 'ocf',
-            'industry', 'name',
+            'industry', 'name', 'disclosure_date',
         ]
 
         # 1) 财务指标 fina_indicator
@@ -374,9 +375,17 @@ class TushareAdapter(BaseDataProvider):
         out['industry'] = merged.get('industry')
         out['name'] = merged.get('name')
 
-        # 如果调用方指定了 fields，按需过滤列（code/report_date 始终保留）
+        # P0-1 PIT 契约：disclosure_date 来自 tushare ann_date（真实披露日）
+        # 若 ann_date 缺失，回填为 report_date（保守降级，确保下游 pit_filter 不 raise）
+        if 'ann_date' in merged.columns:
+            out['disclosure_date'] = merged['ann_date'].fillna(merged['end_date'])
+        else:
+            out['disclosure_date'] = merged['end_date']
+
+        # 如果调用方指定了 fields，按需过滤列
+        # P0-1 PIT 契约：code/report_date/disclosure_date 始终保留（防止下游 pit_filter 缺列 raise）
         if fields:
-            keep = ['code', 'report_date'] + [f for f in fields if f in standard_cols]
+            keep = ['code', 'report_date', 'disclosure_date'] + [f for f in fields if f in standard_cols]
             keep = list(dict.fromkeys(keep))  # 去重保序
             out = out[keep]
 

@@ -2,7 +2,7 @@ repo: duhanjun/jingni-trader
 branch: main
 local_commit: ''
 local_commit_date: ''
-last_check: '2026-07-29T12:10:23.782569+00:00'
+last_check: '2026-08-01T18:14:52.361983+00:00'
 update_policy: auto
 check_interval_hours: 24
 protected_paths:

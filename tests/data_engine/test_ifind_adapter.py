@@ -267,14 +267,28 @@ class TestIfindAdapterOtherMethods:
         assert df.empty
         assert "code" in df.columns and "date" in df.columns
 
-    def test_get_financial_returns_empty_schema(self, monkeypatch):
+    def test_get_financial_returns_standard_schema(self, monkeypatch):
+        """P0-1 PIT 契约：get_financial 返回标准 schema（含 disclosure_date）。
+
+        iFinD 财务接口字段映射已实现，但 mock 环境下 THS_BD 返回 errorcode，
+        各指标留空；code/report_date/disclosure_date 仍填充。
+        """
         mod, _, _ = _load_ifind_adapter(monkeypatch)
         adapter = mod.IfindAdapter()
         df = adapter.get_financial(["600000.SH"], "20240930", [])
-        # iFinD 财务接口字段映射暂未实现，返回空 schema
-        assert df.empty
+        # 1 行（每个 symbol 一行，code/report_date/disclosure_date 已填充）
+        assert not df.empty
+        assert len(df) == 1
+        # 标准 schema 列（含 P0-1 新增 disclosure_date）
         assert "code" in df.columns
         assert "pe_ttm" in df.columns
+        assert "disclosure_date" in df.columns
+        # P0-1 PIT 契约：ifind 无原生披露日，回填为 report_date（保守降级）
+        assert df["code"].iloc[0] == "600000.SH"
+        assert df["report_date"].iloc[0] == "20240930"
+        assert df["disclosure_date"].iloc[0] == "20240930"
+        # mock 环境下 THS_BD 返回 errorcode，财务指标应留空
+        assert pd.isna(df["pe_ttm"].iloc[0])
 
     def test_get_financial_empty_symbols(self, monkeypatch):
         mod, _, _ = _load_ifind_adapter(monkeypatch)

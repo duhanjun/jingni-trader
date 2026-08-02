@@ -76,18 +76,6 @@ class TestParseIntentGate:
 
         assert ctx.metadata["factor_source"] == "jingni"
 
-    def test_local_when_no_factor_stage(self, monkeypatch):
-        """没有 FACTOR 阶段时，factor_source 保持 'local'"""
-        monkeypatch.setenv("JINGNI_URL", "https://jingni.example.com")
-        monkeypatch.setenv("JINGNI_TOKEN", "gsa_test_token")
-
-        import engine
-        master = engine.MasterEngine()
-        ctx = master.parse_intent("获取近3年数据")  # 只有 DATA 阶段
-
-        assert ctx.metadata["factor_source"] == "local"
-        assert "FACTOR" not in ctx.target_stages
-
     def test_auto_when_only_url_configured(self, monkeypatch):
         """只配了 JINGNI_URL 但没配 TOKEN → 视为未配置，factor_source='local'"""
         monkeypatch.setenv("JINGNI_URL", "https://jingni.example.com")
@@ -143,9 +131,14 @@ class TestParseIntentKeywords:
         assert "PORTFOLIO" in ctx.target_stages
 
     def test_no_keyword_fallback(self):
-        """无任何已知关键词 → 默认 DATA→FACTOR→MODEL→BACKTEST→REPORT"""
+        """无任何已知关键词 → 默认走分析路径 DATA→FACTOR→REPORT
+
+        新单一工作流模型：默认不构建策略，仅做分析。用户明确要求回测/策略/实盘
+        等动作时才升级到完整 7 阶段管线。
+        """
         ctx = self._make_engine().parse_intent("今天天气真好")
-        assert ctx.target_stages == ["DATA", "FACTOR", "MODEL", "BACKTEST", "REPORT"]
+        assert ctx.target_stages == ["DATA", "FACTOR", "REPORT"]
+        assert ctx.metadata["strategy_required"] is False
 
     def test_stock_pool_csi300(self):
         """'沪深300' → stock_pool 含 000300.SH"""
@@ -326,6 +319,112 @@ class TestParseDataSourcesIntent:
         assert ctx.data_sources is not None
         assert ctx.data_sources[0] == "wind"
         assert "DATA" in ctx.target_stages
+        assert "BACKTEST" in ctx.target_stages
+
+
+# ============================================================================
+# Part 4: 单一工作流 + 因子用途分支（strategy_required 契约）
+# ============================================================================
+
+class TestStrategyRequiredRouting:
+    """验证单一工作流模型：根据 strategy_required 标志选择执行深度。
+
+    契约：
+    - strategy_required=False（默认）→ DATA → FACTOR → REPORT，仅出分析报告
+    - strategy_required=True（用户明确要求）→ 完整 7 阶段管线，含策略回测绩效报告
+    - 因子/分析/技术面/基本面等关键词不触发 strategy_required
+    - 回测/策略/模型/组合/实盘/选股/风控/下单等动作关键词触发 strategy_required
+    """
+
+    def _make_engine(self):
+        import engine
+        return engine.MasterEngine()
+
+    def test_default_analysis_path(self):
+        """无任何关键词 → 默认分析路径"""
+        ctx = self._make_engine().parse_intent("看看比亚迪")
+        assert ctx.metadata["strategy_required"] is False
+        assert ctx.target_stages == ["DATA", "FACTOR", "REPORT"]
+
+    def test_analysis_keywords_not_trigger_strategy(self):
+        """分析类关键词（技术面/基本面/K线/估值等）不触发策略路径"""
+        for text in [
+            "分析比亚迪技术面",
+            "看看这只股的估值",
+            "比亚迪怎么样",
+            "诊股 002594",
+            "查看MACD和KDJ",
+        ]:
+            ctx = self._make_engine().parse_intent(text)
+            assert ctx.metadata["strategy_required"] is False, f"'{text}' 不应触发策略路径"
+            assert ctx.target_stages == ["DATA", "FACTOR", "REPORT"]
+
+    def test_factor_keyword_not_trigger_strategy(self):
+        """'因子' 关键词本身不触发策略路径（因子计算是两条路径共用前置步骤）"""
+        ctx = self._make_engine().parse_intent("计算比亚迪的因子")
+        assert ctx.metadata["strategy_required"] is False
+        assert ctx.target_stages == ["DATA", "FACTOR", "REPORT"]
+
+    def test_alpha_ic_not_trigger_strategy(self):
+        """alpha/ic 关键词不触发策略路径（属于因子分析范畴）"""
+        ctx = self._make_engine().parse_intent("看看这只股的 alpha 和 IC")
+        assert ctx.metadata["strategy_required"] is False
+        assert ctx.target_stages == ["DATA", "FACTOR", "REPORT"]
+
+    def test_backtest_trigger_full_pipeline(self):
+        """'回测' 触发完整 7 阶段管线"""
+        ctx = self._make_engine().parse_intent("用近3年A股数据做回测")
+        assert ctx.metadata["strategy_required"] is True
+        assert ctx.target_stages == [
+            "DATA", "FACTOR", "MODEL", "BACKTEST", "PORTFOLIO", "EXECUTION", "REPORT"
+        ]
+
+    def test_strategy_keyword_trigger_full_pipeline(self):
+        """'策略' 触发完整管线"""
+        ctx = self._make_engine().parse_intent("构建一个选股策略")
+        assert ctx.metadata["strategy_required"] is True
+        assert "MODEL" in ctx.target_stages
+        assert "BACKTEST" in ctx.target_stages
+
+    def test_model_keyword_trigger_full_pipeline(self):
+        """'模型' 触发完整管线（训练模型本质上是策略构建）"""
+        ctx = self._make_engine().parse_intent("用 lightgbm 训练模型")
+        assert ctx.metadata["strategy_required"] is True
+        assert "MODEL" in ctx.target_stages
+
+    def test_live_trading_keyword_trigger_full_pipeline(self):
+        """'实盘/下单' 触发完整管线（实盘依赖已验证策略）"""
+        for text in ["实盘下单 100 股", "执行交易", "启动实盘"]:
+            ctx = self._make_engine().parse_intent(text)
+            assert ctx.metadata["strategy_required"] is True, f"'{text}' 应触发策略路径"
+            assert "EXECUTION" in ctx.target_stages
+
+    def test_report_template_always_set(self):
+        """报告模板检测独立于 strategy_required，两条路径都应设置"""
+        # 分析路径
+        ctx1 = self._make_engine().parse_intent("分析比亚迪技术面")
+        assert ctx1.metadata["report_template"] == "technical"
+        assert ctx1.metadata["strategy_required"] is False
+
+        # 策略路径也应设置 report_template（虽然 REPORT 阶段会走绩效报告，但字段仍存在）
+        ctx2 = self._make_engine().parse_intent("回测比亚迪的技术面策略")
+        assert "report_template" in ctx2.metadata
+        assert ctx2.metadata["strategy_required"] is True
+
+    def test_data_sources_intent_still_works_in_analysis_path(self):
+        """数据源优先级解析在分析路径下也正常工作"""
+        ctx = self._make_engine().parse_intent("用 wind 取数据分析比亚迪")
+        assert ctx.metadata["strategy_required"] is False
+        assert ctx.data_sources is not None
+        assert ctx.data_sources[0] == "wind"
+        assert ctx.target_stages == ["DATA", "FACTOR", "REPORT"]
+
+    def test_data_sources_intent_still_works_in_strategy_path(self):
+        """数据源优先级解析在策略路径下也正常工作"""
+        ctx = self._make_engine().parse_intent("用 wind 取数据做回测")
+        assert ctx.metadata["strategy_required"] is True
+        assert ctx.data_sources is not None
+        assert ctx.data_sources[0] == "wind"
         assert "BACKTEST" in ctx.target_stages
 
 

@@ -53,15 +53,18 @@
 
 ## 阶段状态机
 
-### 基础流程
+### 单一工作流 + 因子用途分支
+
+系统采用单一工作流模型，根据 `ctx.metadata["strategy_required"]` 布尔标志选择执行深度。因子计算/IC 分析本身是两条路径共用的前置步骤，不构成"策略构建"意图。
 
 ```
-[IDLE]
-    │
-    │ 用户输入
-    ▼
-[DATA] ──→ [FACTOR] ──→ [MODEL] ──→ [BACKTEST] ──→ [PORTFOLIO] ──→ [EXECUTION] ──→ [REPORT]
+                              ┌─ strategy_required=True ──→ [MODEL] → [BACKTEST] → [PORTFOLIO] → [EXECUTION] → ┐
+[IDLE] → [DATA] → [FACTOR] → ┤                                                                              ├→ [REPORT]
+                              └─ strategy_required=False（默认）──────────────────────────────────────────────┘
 ```
+
+- **默认分析路径**（`strategy_required=False`）：用户未明确要求回测/策略/实盘等动作时，因子仅用于分析，直接 DATA → FACTOR → REPORT
+- **策略构建路径**（`strategy_required=True`）：用户明确要求"回测/策略/模型/组合/实盘/选股/风控/下单"等动作时，完整执行 7 阶段管线
 
 ### 分支逻辑
 
@@ -80,7 +83,9 @@
 ```
 [FACTOR]
     │
-    ├── 成功 → [MODEL]
+    ├── strategy_required=True  → [MODEL]
+    │
+    ├── strategy_required=False → [REPORT] (分析路径，因子仅用于分析报告)
     │
     └── 失败 → [REPORT] (生成因子错误报告)
 ```
@@ -128,6 +133,12 @@
     │
     └── 失败 → [REPORT] (生成交易错误报告)
 ```
+
+#### 报告生成阶段 (REPORT)
+
+`reports-engine` 已统一路由（不区分量化/非量化）：
+- 存在 `BACKTEST` 产物 → 生成策略回测绩效报告（夏普/回撤/归因）
+- 不存在 `BACKTEST` 产物 → 按报告模板生成个股分析报告（技术面/基本面）
 
 ## 核心组件
 

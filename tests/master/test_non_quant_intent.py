@@ -1,10 +1,15 @@
-"""MasterEngine._is_analysis_intent 分析意图路由测试。
+"""MasterEngine._is_strategy_required 单一工作流路由测试。
+
+新单一工作流模型：根据用户是否明确需要构建策略选择执行深度。
+- strategy_required=False（默认）→ DATA → FACTOR → REPORT，仅出分析报告
+- strategy_required=True（用户明确要求）→ 完整 7 阶段管线
 
 覆盖：
-- ANALYSIS_KEYWORDS / QUANT_KEYWORDS 常量存在性与关键字集合
-- _is_analysis_intent() 对各类输入的判定（含 mixed 意图优先走量化路径）
-- 分析意图触发时 target_stages = ["DATA", "FACTOR", "REPORT"]
-- 分析意图触发时 ctx.metadata["report_template"] 被正确设置
+- STRATEGY_KEYWORDS 常量存在性与关键字集合
+- _is_strategy_required() 对各类输入的判定
+- 分析路径下 target_stages = ["DATA", "FACTOR", "REPORT"]
+- 分析路径下 ctx.metadata["report_template"] 被正确设置
+- ctx.metadata["strategy_required"] 布尔标志正确传递
 """
 from __future__ import annotations
 
@@ -15,57 +20,43 @@ import pytest
 # Part 1: 关键字常量契约
 # ============================================================================
 
-class TestAnalysisKeywordsConstant:
-    """验证 ANALYSIS_KEYWORDS 常量存在并包含预期关键字。"""
+class TestStrategyKeywordsConstant:
+    """验证 STRATEGY_KEYWORDS 常量存在并包含预期关键字。"""
 
     @pytest.mark.skill_master
     @pytest.mark.unit
     def test_constant_exists(self):
-        """ANALYSIS_KEYWORDS 在 engine 模块中可访问"""
+        """STRATEGY_KEYWORDS 在 engine 模块中可访问"""
         import engine
-        assert hasattr(engine, "ANALYSIS_KEYWORDS")
-        assert isinstance(engine.ANALYSIS_KEYWORDS, (set, list, tuple))
+        assert hasattr(engine, "STRATEGY_KEYWORDS")
+        assert isinstance(engine.STRATEGY_KEYWORDS, (set, list, tuple))
 
     @pytest.mark.skill_master
     @pytest.mark.unit
     def test_contains_expected_keywords(self):
-        """ANALYSIS_KEYWORDS 包含个人投资者分析常用关键字"""
+        """STRATEGY_KEYWORDS 包含策略构建动作关键字"""
         import engine
-        expected = {
-            "分析", "技术面", "基本面", "K线", "形态",
-            "MACD", "RSI", "KDJ", "均线", "PE", "PB", "ROE",
-        }
-        missing = expected - set(engine.ANALYSIS_KEYWORDS)
-        assert not missing, f"ANALYSIS_KEYWORDS 缺少: {missing}"
-
-
-class TestQuantKeywordsConstant:
-    """验证 QUANT_KEYWORDS 常量存在并包含预期关键字。"""
+        expected = {"回测", "策略", "模型", "组合", "实盘", "选股"}
+        missing = expected - set(engine.STRATEGY_KEYWORDS)
+        assert not missing, f"STRATEGY_KEYWORDS 缺少: {missing}"
 
     @pytest.mark.skill_master
     @pytest.mark.unit
-    def test_constant_exists(self):
-        """QUANT_KEYWORDS 在 engine 模块中可访问"""
+    def test_excludes_factor_analysis_keywords(self):
+        """STRATEGY_KEYWORDS 不应包含因子/分析类关键词（这些是两条路径共用的）"""
         import engine
-        assert hasattr(engine, "QUANT_KEYWORDS")
-        assert isinstance(engine.QUANT_KEYWORDS, (set, list, tuple))
-
-    @pytest.mark.skill_master
-    @pytest.mark.unit
-    def test_contains_expected_keywords(self):
-        """QUANT_KEYWORDS 包含量化交易常用关键字"""
-        import engine
-        expected = {"回测", "因子", "策略", "模型", "组合", "实盘", "选股"}
-        missing = expected - set(engine.QUANT_KEYWORDS)
-        assert not missing, f"QUANT_KEYWORDS 缺少: {missing}"
+        # '因子'、'alpha'、'ic' 属于因子分析范畴，不应触发策略路径
+        non_strategy = {"因子", "alpha", "ic"}
+        leaked = non_strategy & set(engine.STRATEGY_KEYWORDS)
+        assert not leaked, f"STRATEGY_KEYWORDS 不应包含分析类关键词: {leaked}"
 
 
 # ============================================================================
-# Part 2: _is_analysis_intent 判定逻辑
+# Part 2: _is_strategy_required 判定逻辑
 # ============================================================================
 
-class TestIsAnalysisIntent:
-    """验证 _is_analysis_intent 对各种输入的判定。"""
+class TestIsStrategyRequired:
+    """验证 _is_strategy_required 对各种输入的判定。"""
 
     def _make_engine(self):
         import engine
@@ -73,74 +64,95 @@ class TestIsAnalysisIntent:
 
     @pytest.mark.skill_master
     @pytest.mark.unit
-    def test_true_for_analyze_stock(self):
-        """'分析一下000001.SZ' → True（命中 '分析'）"""
+    def test_false_for_analyze_stock(self):
+        """'分析一下000001.SZ' → False（分析意图，不构建策略）"""
         master = self._make_engine()
-        assert master._is_analysis_intent("分析一下000001.SZ") is True
+        assert master._is_strategy_required("分析一下000001.SZ") is False
 
     @pytest.mark.skill_master
     @pytest.mark.unit
-    def test_true_for_technical_analysis(self):
-        """'000001.SZ技术面怎么样' → True（命中 '技术面'/'怎么样'）"""
+    def test_false_for_technical_analysis(self):
+        """'000001.SZ技术面怎么样' → False"""
         master = self._make_engine()
-        assert master._is_analysis_intent("000001.SZ技术面怎么样") is True
+        assert master._is_strategy_required("000001.SZ技术面怎么样") is False
 
     @pytest.mark.skill_master
     @pytest.mark.unit
-    def test_true_for_kline_pattern(self):
-        """'帮我看看K线形态' → True（命中 'K线'/'形态'）"""
+    def test_false_for_kline_pattern(self):
+        """'帮我看看K线形态' → False"""
         master = self._make_engine()
-        assert master._is_analysis_intent("帮我看看K线形态") is True
+        assert master._is_strategy_required("帮我看看K线形态") is False
 
     @pytest.mark.skill_master
     @pytest.mark.unit
-    def test_true_for_fundamental_analysis(self):
-        """'茅台的基本面分析' → True（命中 '基本面'/'分析'）"""
+    def test_false_for_fundamental_analysis(self):
+        """'茅台的基本面分析' → False"""
         master = self._make_engine()
-        assert master._is_analysis_intent("茅台的基本面分析") is True
+        assert master._is_strategy_required("茅台的基本面分析") is False
 
     @pytest.mark.skill_master
     @pytest.mark.unit
-    def test_false_for_backtest(self):
-        """'帮我做回测' → False（命中 '回测' 量化关键字）"""
+    def test_false_for_factor_only(self):
+        """'计算这只股的因子' → False（因子计算是共用前置步骤，不构成策略构建）"""
         master = self._make_engine()
-        assert master._is_analysis_intent("帮我做回测") is False
+        assert master._is_strategy_required("计算这只股的因子") is False
 
     @pytest.mark.skill_master
     @pytest.mark.unit
-    def test_false_for_model_training(self):
-        """'训练模型选股' → False（命中 '模型'/'选股' 量化关键字）"""
+    def test_true_for_backtest(self):
+        """'帮我做回测' → True（明确要求回测）"""
         master = self._make_engine()
-        assert master._is_analysis_intent("训练模型选股") is False
+        assert master._is_strategy_required("帮我做回测") is True
 
     @pytest.mark.skill_master
     @pytest.mark.unit
-    def test_false_for_portfolio_optimization(self):
-        """'优化组合' → False（命中 '组合' 量化关键字）"""
+    def test_true_for_model_training(self):
+        """'训练模型选股' → True（命中 '模型'/'选股'）"""
         master = self._make_engine()
-        assert master._is_analysis_intent("优化组合") is False
+        assert master._is_strategy_required("训练模型选股") is True
 
     @pytest.mark.skill_master
     @pytest.mark.unit
-    def test_false_for_mixed_intent_quant_wins(self):
-        """'分析一下这个因子回测效果' → False（量化关键字优先于分析）"""
+    def test_true_for_portfolio_optimization(self):
+        """'优化组合' → True（命中 '组合'）"""
         master = self._make_engine()
-        assert master._is_analysis_intent("分析一下这个因子回测效果") is False
+        assert master._is_strategy_required("优化组合") is True
+
+    @pytest.mark.skill_master
+    @pytest.mark.unit
+    def test_true_for_live_trading(self):
+        """'实盘下单' → True（命中 '实盘'/'下单'）"""
+        master = self._make_engine()
+        assert master._is_strategy_required("实盘下单") is True
+
+    @pytest.mark.skill_master
+    @pytest.mark.unit
+    def test_true_for_risk_control(self):
+        """'做风控' → True（命中 '风控'）"""
+        master = self._make_engine()
+        assert master._is_strategy_required("做风控") is True
 
     @pytest.mark.skill_master
     @pytest.mark.unit
     def test_false_for_empty_string(self):
-        """空字符串 → False"""
+        """空字符串 → False（默认走分析路径）"""
         master = self._make_engine()
-        assert master._is_analysis_intent("") is False
+        assert master._is_strategy_required("") is False
+
+    @pytest.mark.skill_master
+    @pytest.mark.unit
+    def test_false_for_none(self):
+        """None 输入 → False"""
+        master = self._make_engine()
+        assert master._is_strategy_required(None) is False
 
 
 # ============================================================================
-# Part 3: parse_intent 在分析意图路径下的副作用
+# Part 3: parse_intent 在分析路径下的副作用
 # ============================================================================
 
 class TestAnalysisIntentRouting:
-    """验证 parse_intent 在识别到分析意图时正确设置 target_stages 与 metadata。"""
+    """验证 parse_intent 在分析路径下正确设置 target_stages 与 metadata。"""
 
     def _make_engine(self):
         import engine
@@ -153,6 +165,14 @@ class TestAnalysisIntentRouting:
         master = self._make_engine()
         ctx = master.parse_intent("分析一下000001.SZ")
         assert ctx.target_stages == ["DATA", "FACTOR", "REPORT"]
+
+    @pytest.mark.skill_master
+    @pytest.mark.unit
+    def test_strategy_required_flag_false(self):
+        """分析意图 → ctx.metadata['strategy_required'] = False"""
+        master = self._make_engine()
+        ctx = master.parse_intent("分析一下000001.SZ")
+        assert ctx.metadata["strategy_required"] is False
 
     @pytest.mark.skill_master
     @pytest.mark.unit
@@ -178,6 +198,17 @@ class TestAnalysisIntentRouting:
         master = self._make_engine()
         ctx = master.parse_intent("茅台的基本面分析")
         assert ctx.metadata.get("report_template") == "fundamental"
+
+    @pytest.mark.skill_master
+    @pytest.mark.unit
+    def test_strategy_path_sets_flag_true(self):
+        """策略意图 → ctx.metadata['strategy_required'] = True 且走完整管线"""
+        master = self._make_engine()
+        ctx = master.parse_intent("帮我做回测")
+        assert ctx.metadata["strategy_required"] is True
+        assert ctx.target_stages == [
+            "DATA", "FACTOR", "MODEL", "BACKTEST", "PORTFOLIO", "EXECUTION", "REPORT"
+        ]
 
 
 if __name__ == "__main__":

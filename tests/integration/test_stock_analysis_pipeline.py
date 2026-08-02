@@ -133,10 +133,18 @@ class TestStockAnalysisPipeline:
 
         results = master.run_pipeline(ctx=ctx)
 
-        # 量化意图不应设置 report_template（走完整量化管线）
+        # 新单一工作流模型：strategy_required=True 触发完整量化管线
         metadata = results.get("context", {}).get("metadata") or {}
-        assert "report_template" not in metadata, (
-            "量化意图不应设置 report_template"
+        assert metadata.get("strategy_required") is True, (
+            "量化意图应设置 strategy_required=True"
+        )
+
+        # report_template 是正交维度，两条路径都会设置；
+        # 策略路径下 REPORT 阶段靠 BACKTEST 产物存在性自动走绩效报告路径
+        # （reports-engine/engine.py:run() 已统一路由），所以 report_template
+        # 字段存在不影响策略路径的绩效报告输出。
+        assert "report_template" in metadata, (
+            "report_template 应在两条路径下都被设置（正交维度）"
         )
 
         # 量化路径应包含 MODEL/BACKTEST 阶段

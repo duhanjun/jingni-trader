@@ -76,6 +76,10 @@ def _run_pipeline_prefix(stages: list[str], monkeypatch, tmp_path):
     monkeypatch.setenv("ALLOW_SYNTHETIC_FALLBACK", "true")
     monkeypatch.setenv("DATA_BACKENDS", "websearch")
     monkeypatch.setenv("LOG_LEVEL", "WARNING")
+    # 强制使用模拟交易执行器，避免环境变量 TRADE_MODE=live/TRADE_BACKEND=gm
+    # 导致集成测试尝试连接真实交易服务而失败（测试应保持 hermetic）
+    monkeypatch.setenv("TRADE_MODE", "paper")
+    monkeypatch.delenv("TRADE_BACKEND", raising=False)
 
     # 关键：重新加载 engine + scripts 包，使 QUANT_WORK_DIR 等环境变量生效。
     # engine.py 在首次被 import 时把 WORK_DIR/DATA_DIR/FACTOR_DIR/PORTFOLIO_DIR 等

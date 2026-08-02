@@ -114,12 +114,20 @@ jingni-trader 是量化交易 Skill 套件的**主协调中枢**，负责：
 
 ## 意图解析与路由
 
-系统根据用户意图自动路由到不同的分析路径：
+系统采用**单一工作流模型**：根据用户是否明确需要构建可回测/可交易策略，选择执行深度。因子计算/IC 分析本身是两条路径共用的前置步骤，不构成"策略构建"意图。
 
 | 用户意图 | 触发条件 | 阶段路径 | 报告类型 |
 |------|---------|---------|---------|
-| **量化策略** | 包含"回测/因子/策略/模型/组合/实盘"等关键词 | DATA → FACTOR → MODEL → BACKTEST → PORTFOLIO → EXECUTION → REPORT | 量化策略绩效报告（夏普/回撤/归因） |
-| **个股分析** | 包含"分析/怎么样/技术面/基本面/K线/诊股"等关键词 | DATA → FACTOR → REPORT | 个股深度分析报告（技术面+基本面） |
+| **策略构建**（`strategy_required=True`） | 包含"回测/策略/模型/组合/实盘/选股/风控/下单"等动作关键词 | DATA → FACTOR → MODEL → BACKTEST → PORTFOLIO → EXECUTION → REPORT | 策略回测绩效报告（夏普/回撤/归因） |
+| **分析（默认）**（`strategy_required=False`） | 未命中策略构建关键词（含"分析/技术面/基本面/因子/alpha/ic"等） | DATA → FACTOR → REPORT | 个股深度分析报告（技术面+基本面） |
+
+**默认走分析路径**：意图模糊或仅提及"因子/分析"时，`strategy_required=False`，因子仅用于分析，不构建策略。用户明确要求"回测/策略/实盘"等动作时才升级到完整 7 阶段管线。
+
+### 路由实现
+
+- `ctx.metadata["strategy_required"]`: 布尔标志，驱动 `target_stages` 选择
+- `ctx.metadata["report_template"]`: 报告模板检测（technical/fundamental/both），**正交维度**，两条路径都设置
+- `reports-engine` 已统一路由：根据是否存在 `BACKTEST` 产物自动选择生成绩效报告还是模板分析报告，无需上层区分
 
 个股分析报告支持三种模板：
 - **technical**: 仅生成技术面深度分析报告（含A股特色：资金面、龙虎榜）
@@ -243,21 +251,22 @@ workspace/archives/20260529_143025/
 
 ## 阶段状态机
 
-### 量化策略路径
-```
-[数据获取] → [因子构建] → [模型训练] → [回测验证] → [组合优化] → [模拟/实盘] → [绩效报告]
-```
+### 单一工作流 + 因子用途分支
 
-### 个股分析路径
+系统采用单一工作流，根据 `strategy_required` 标志选择执行深度：
+
 ```
-[数据获取] → [因子构建] → [报告生成]
+                              ┌─ strategy_required=True ──→ [MODEL] → [BACKTEST] → [PORTFOLIO] → [EXECUTION] → ┐
+[DATA] → [FACTOR] → ┤                                                                                              ├→ [REPORT]
+                              └─ strategy_required=False（默认）──────────────────────────────────────────────┘
 ```
 
 ### 分支逻辑
 
+- **默认分析路径**（`strategy_required=False`）：因子仅用于分析，跳过 MODEL/BACKTEST/PORTFOLIO/EXECUTION，直接 DATA → FACTOR → REPORT
+- **策略构建路径**（`strategy_required=True`）：完整 7 阶段管线，REPORT 阶段根据 BACKTEST 产物存在性自动生成绩效报告
 - 回测失败 → 返回因子调优
 - 模型过拟合 → 触发样本外再验证
-- 个股分析意图 → 跳过 MODEL/BACKTEST/PORTFOLIO/EXECUTION 阶段
 
 ## LLM 内容注入
 
@@ -295,7 +304,7 @@ result = engine.run_pipeline(
 | data_sources | Optional[List[str]] | data-engine 专用：用户对话指定的数据源优先级链（None 时走环境变量/默认值） |
 | run_dir | str | 当前运行归档目录路径 |
 | step_dirs | Dict[str, str] | 各步骤归档子目录路径 |
-| metadata | Dict[str, Any] | 各阶段元数据（含 report_template、factor_source、report_intent 等） |
+| metadata | Dict[str, Any] | 各阶段元数据（含 strategy_required、report_template、factor_source、report_intent 等） |
 | errors | List[str] | 错误记录 |
 
 ## 使用示例
