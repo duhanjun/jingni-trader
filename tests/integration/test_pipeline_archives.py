@@ -367,8 +367,6 @@ class TestProcessorPipelineIntegration:
         monkeypatch.setenv("QUANT_FORCE_REFRESH", "1")
         # 关闭 alphalens 报告，避免干扰
         monkeypatch.delenv("QUANT_ALPHALENS_REPORT", raising=False)
-        # 确保走 ProcessorChain 新路径
-        monkeypatch.delenv("QUANT_LEGACY_PIPELINE", raising=False)
 
         results = _run_pipeline_helper(
             str(work_dir),

@@ -1,12 +1,12 @@
 """
 回测引擎主逻辑
-统一接口，调度不同后端，计算绩效，生成报告
+统一接口，调度原生后端，计算绩效，生成报告
 """
 import os
 import sys
 import json
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -15,15 +15,12 @@ import pandas as pd
 import numpy as np
 
 from scripts.config import (
-    BACKTEST_BACKEND, BACKTEST_DIR, INIT_CAPITAL,
+    BACKTEST_DIR, INIT_CAPITAL,
     COMMISSION_RATE, MIN_COMMISSION, STAMP_TAX_RATE,
     TRANSFER_FEE_RATE, SLIPPAGE, BENCHMARK, RISK_FREE_RATE
 )
 
 logger = logging.getLogger("backtest-engine")
-
-# 新增: 增强回测引擎（借鉴 quant-stream）
-from enhanced import EnhancedBacktestEngine, BacktestConfig as EnhancedBacktestConfig
 
 try:
     import quantstats as qs
@@ -36,24 +33,8 @@ class BacktestEngine:
     """统一回测引擎"""
 
     def __init__(self):
-        self.adapter = self._load_adapter()
-
-    def _load_adapter(self):
-        """根据配置加载回测适配器"""
-        if BACKTEST_BACKEND == "rqalpha":
-            from scripts.adapters.rqalpha_adapter import RQAlphaAdapter
-            return RQAlphaAdapter()
-        elif BACKTEST_BACKEND == "backtrader":
-            from scripts.adapters.backtrader_adapter import BacktraderAdapter
-            return BacktraderAdapter()
-        elif BACKTEST_BACKEND == "gm":
-            from scripts.adapters.gm_adapter import GmAdapter
-            return GmAdapter()
-        elif BACKTEST_BACKEND == "native":
-            from scripts.adapters.native_adapter import NativeAdapter
-            return NativeAdapter()
-        else:
-            raise ValueError(f"不支持的回测引擎: {BACKTEST_BACKEND}")
+        from scripts.adapters.native_adapter import NativeAdapter
+        self.adapter = NativeAdapter()
 
     def run(
         self,
@@ -68,8 +49,8 @@ class BacktestEngine:
         price_limit: bool = True,
     ) -> Dict[str, Any]:
         """执行回测"""
-        logger.info(f"开始回测，后端: {BACKTEST_BACKEND}")
-        result = self.adapter.run_backtest(
+        logger.info("开始回测，后端: native")
+        return self.adapter.run_backtest(
             data=data,
             signals=signals,
             init_capital=init_capital,
@@ -79,35 +60,9 @@ class BacktestEngine:
             t_plus_1=t_plus_1,
             price_limit=price_limit,
             slippage=slippage,
+            transfer_fee_rate=TRANSFER_FEE_RATE,
+            min_commission=MIN_COMMISSION,
         )
-        if 'metrics' not in result or not result['metrics']:
-            result['metrics'] = self._calc_metrics(result.get('equity_curve', pd.DataFrame()), init_capital)
-        return result
-
-    def _calc_metrics(self, equity_curve: pd.DataFrame, init_capital: float) -> Dict[str, float]:
-        """计算全面绩效指标"""
-        if equity_curve.empty or 'equity' not in equity_curve.columns:
-            return {}
-        eq = equity_curve.set_index('date')['equity']
-        if len(eq) < 2:
-            return {}
-        returns = eq.pct_change().dropna()
-        cumulative = (1 + returns).cumprod()
-        total_return = cumulative.iloc[-1] - 1
-        annual_return = (1 + total_return) ** (252 / len(returns)) - 1
-        volatility = returns.std() * np.sqrt(252)
-        max_drawdown = (eq / eq.cummax() - 1).min()
-        sharpe = (annual_return - RISK_FREE_RATE) / volatility if volatility != 0 else 0
-        win_rate = (returns > 0).mean() if len(returns) > 0 else 0
-        return {
-            "total_return": float(total_return),
-            "annual_return": float(annual_return),
-            "volatility": float(volatility),
-            "sharpe_ratio": float(sharpe),
-            "max_drawdown": float(max_drawdown),
-            "win_rate": float(win_rate),
-            "calmar_ratio": float(annual_return / abs(max_drawdown)) if max_drawdown != 0 else 0,
-        }
 
     def generate_report(self, result: Dict[str, Any], output_dir: str = BACKTEST_DIR) -> str:
         """生成回测报告"""
@@ -125,35 +80,6 @@ class BacktestEngine:
         qs.reports.html(returns, output=report_path, title="A股策略回测报告")
         logger.info(f"回测报告已生成: {report_path}")
         return report_path
-
-    def run_enhanced(
-        self,
-        price_data: pd.DataFrame,
-        signals: pd.DataFrame,
-        init_capital: float = INIT_CAPITAL,
-        t_plus_1: bool = True,
-        price_limit: bool = True,
-    ) -> Dict[str, Any]:
-        """
-        使用增强回测引擎执行回测（借鉴 quant-stream）
-
-        相对于传统回测的改进:
-        - 前视偏差防护: 信号在 t, 执行在 t+1
-        - last_known_price: 停牌股票使用最后已知价格
-        - cost_reserve: 资本预留确保覆盖费用
-        - 涨跌停过滤
-        """
-        config = EnhancedBacktestConfig(
-            init_capital=init_capital,
-            commission_rate=COMMISSION_RATE,
-            stamp_tax_rate=STAMP_TAX_RATE,
-            min_commission=MIN_COMMISSION,
-            slippage=SLIPPAGE,
-            t_plus_1=t_plus_1,
-            price_limit=price_limit,
-        )
-        engine = EnhancedBacktestEngine(config)
-        return engine.run(price_data, signals)
 
 
 def run(ctx) -> Dict[str, Any]:
@@ -224,7 +150,7 @@ def run(ctx) -> Dict[str, Any]:
 
         result_json = {
             "metrics": result['metrics'],
-            "backend": BACKTEST_BACKEND,
+            "backend": "native",
             "timestamp": datetime.now().isoformat(),
         }
         json_path = os.path.join(BACKTEST_DIR, "backtest_result.json")
@@ -278,7 +204,7 @@ def run(ctx) -> Dict[str, Any]:
             "report_path": report_path,
             "metadata": {
                 "metrics": result['metrics'],
-                "backend": BACKTEST_BACKEND,
+                "backend": "native",
                 "equity_curve_path": equity_path,
                 # P0-3.5 新增：评审结果写入 result["verdict"]
                 "verdict": verdict_dict,
@@ -317,41 +243,3 @@ if __name__ == "__main__":
 
     result = run(ctx)
     print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
-
-
-# ---------------------------------------------------------------------------
-# 优化模块入口（已整合到 scripts/optimizations/）
-# 使用方式: from engine import optimizations
-# ---------------------------------------------------------------------------
-from scripts.optimizations.vectorized_adapter import (
-    VectorizedAdapter as _VectorizedAdapter,
-)
-from scripts.optimizations.extended_metrics import (
-    ExtendedMetrics as _ExtendedMetrics,
-)
-from scripts.optimizations.vectorized_ic import (
-    VectorizedIC as _VectorizedIC,
-)
-from scripts.optimizations.native_adapter_v2 import (
-    NativeAdapterV2 as _NativeAdapterV2,
-)
-from scripts.optimizations.walk_forward_validator import (
-    WalkForwardValidator as _WalkForwardValidator,
-)
-
-
-class optimizations:
-    """回测引擎优化模块集合"""
-    VectorizedAdapter = _VectorizedAdapter
-    NativeAdapterV2 = _NativeAdapterV2
-    ExtendedMetrics = _ExtendedMetrics
-    VectorizedIC = _VectorizedIC
-    WalkForwardValidator = _WalkForwardValidator
-
-    @staticmethod
-    def get_vectorized_backtest_engines():
-        """返回所有可用的向量化回测引擎类"""
-        return {
-            "vectorized_adapter": _VectorizedAdapter,
-            "native_adapter_v2": _NativeAdapterV2,
-        }

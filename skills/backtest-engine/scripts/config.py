@@ -3,10 +3,6 @@
 """
 import os
 
-# ── 回测后端选择 ──────────────────────────
-BACKTEST_BACKEND = os.environ.get("BACKTEST_BACKEND", "native")
-# 可选: rqalpha, backtrader, gm, native
-
 # ── 回测结果存储目录（优先读 QUANT_WORK_DIR 与主调度器对齐）──────────
 _WORK_DIR = os.environ.get("QUANT_WORK_DIR", "./workspace")
 BACKTEST_DIR = os.environ.get("BACKTEST_DIR", os.path.join(_WORK_DIR, "backtest_results"))
@@ -24,9 +20,5 @@ BENCHMARK = os.environ.get("BENCHMARK", "000300.SH")
 
 # ── 绩效计算参数 ──────────────────────────
 RISK_FREE_RATE = float(os.environ.get("RISK_FREE_RATE", 0.03))
-
-# ── Walk-Forward 参数 ──────────────────────
-WF_TRAIN_MONTHS = int(os.environ.get("WF_TRAIN_MONTHS", 36))
-WF_TEST_MONTHS = int(os.environ.get("WF_TEST_MONTHS", 12))
 
 os.makedirs(BACKTEST_DIR, exist_ok=True)

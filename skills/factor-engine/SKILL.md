@@ -49,10 +49,6 @@ environment_variables:
     description: DataFrame 后端（pandas / polars / auto），作用于 IC 计算/中性化/IC Decay/相关性分析等热路径。默认 pandas，polars 缺失时自动回退
     required: false
     default: "pandas"
-  - name: QUANT_LEGACY_PIPELINE
-    description: 强制走旧 4 步硬编码因子处理路径（兼容回滚用）。默认 "0" 走 ProcessorChain 新路径；设为 "1" 时绕过 pipeline.yaml，直接调用 FactorEngine.ic_analysis/correlation_analysis/factor_fusion
-    required: false
-    default: "0"
 language: python
 python_version: "3.9+"
 entry_point: engine.py
@@ -135,7 +131,7 @@ export QUANT_FACTOR_BACKEND=pandas
 
 ## Processor Pipeline 架构（方向一）
 
-借鉴 Microsoft Qlib 的 Processor + Recorder 设计，将因子处理流程抽象为**可插拔的工序链 + 实验可重放记录器**。默认路径（`QUANT_LEGACY_PIPELINE=0`）走 ProcessorChain，通过 `pipeline.yaml` 声明式配置工序组合。
+借鉴 Microsoft Qlib 的 Processor + Recorder 设计，将因子处理流程抽象为**可插拔的工序链 + 实验可重放记录器**。通过 `pipeline.yaml` 声明式配置工序组合。
 
 ### 核心组件
 
@@ -207,16 +203,12 @@ pipeline:
 
 manifest.json 自身 sha256 纳入 P1-3 sha256 Manifest 覆盖范围，支持实验可重放。
 
-### 旧路径兼容
-
-设置 `QUANT_LEGACY_PIPELINE=1` 强制走 v1.x 的 4 步硬编码路径（IC 分析 → 相关性去冗余 → 选因子 → 融合），绕过 pipeline.yaml 与 ExperimentRecorder，用于回归测试与回滚。`FactorEngine.neutralize/ic_analysis/correlation_analysis/factor_fusion` 旧 API 已标记 `DeprecationWarning`，v3.0 移除。
-
 ## 因子定义体系
 
 ### 内置因子
 
 - **动量因子**：`momentum_20d`、`momentum_60d`、`reversal_5d`、`reversal_20d`
-- **规模因子**：`lncap`（对数市值）、`estimated_mv`
+- **规模因子**：`lncap`（对数市值，`estimated_mv` 仅作为内部中间变量不输出）
 - **交易因子**：`turnover_20d`、`turnover_5d`、`turnover_change`、`volume_ratio`
 - **波动率因子**：`volatility_20d`
 - **资金流因子**：`money_flow_20d`（20日累计资金流）
@@ -326,14 +318,13 @@ python engine.py -i "计算反转因子"
 
 ## 优化模块
 
-可通过 `from engine import optimizations` 访问以下优化模块：
+以下优化模块位于 `scripts/optimizations/`，按需直接 import，例如 `from scripts.optimizations.ic_vectorized import ic_analysis_batch`：
 
-- **因子DSL**：`FactorEngine`、`AlphaEngine`、`AlphaRegistry`
-- **表达式DSL**：`FactorDSLEvaluator`、`AstNode`、`FieldNode`
-- **IC分析**：`ic_analysis_batch`、`ic_summary`、`ICDecayAnalyzer`、`calc_ic_series`、`calc_ic_stats`
-- **因子验证**：`validate_factor`、`FactorVerdict`、`lookahead_detector`
-- **因子注册**：`FactorRegistryV2`、`NeutralizerV2`、`neutralize_factor`、`neutralize_factors_batch`
-- **相关性分析**：`correlation_analysis`（支持 polars 后端）
+- **Alpha158 库**：`alpha158_lib.AlphaEngine`、`alpha158_lib.AlphaRegistry`
+- **IC分析**：`ic_vectorized.ic_analysis_batch`、`ic_vectorized.ic_summary`、`ic_decay.ICDecayAnalyzer`、`ic_analysis_v2.calc_ic_series`、`ic_analysis_v2.calc_ic_stats`
+- **因子验证**：`factor_validator.validate_factor`、`factor_validator.FactorVerdict`、`lookahead_detector`
+- **因子注册**：`factor_registry_v2.FactorRegistry`、`factor_registry_v2.Neutralizer`、`vectorized_neutralize.neutralize_factor`
+- **相关性分析**：`vectorized_correlation.correlation_analysis`（支持 polars 后端）
 
 ## Processor Pipeline 模块
 

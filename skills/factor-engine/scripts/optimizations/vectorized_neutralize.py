@@ -294,31 +294,3 @@ def _neutralize_polars_groups(
             residuals[row_idx] = y
 
     return residuals
-
-
-def neutralize_factors_batch(
-    factor_df: pd.DataFrame,
-    factor_names: List[str],
-    neutralize_mcap: bool = True,
-    neutralize_industry: bool = True,
-    mcap_col: str = "lncap",
-    industry_col: str = "industry",
-    min_count: int = 30,
-    backend: Optional[str] = None,
-) -> pd.DataFrame:
-    """
-    批量中性化（与 neutralize_factor 等价，保留别名便于调用）
-
-    性能优化点：行业哑变量只构造一次，所有因子共用同一 X 矩阵结构，
-    避免重复 get_dummies 调用。
-    """
-    return neutralize_factor(
-        factor_df,
-        factor_names,
-        neutralize_mcap,
-        neutralize_industry,
-        mcap_col,
-        industry_col,
-        min_count,
-        backend,
-    )

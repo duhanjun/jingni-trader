@@ -12,7 +12,7 @@
 
 ##### `__init__()`
 
-初始化回测引擎，自动加载配置的后端适配器。
+初始化回测引擎，加载原生 NativeAdapter。
 
 ```python
 engine = BacktestEngine()
@@ -28,6 +28,7 @@ engine = BacktestEngine()
 - `init_capital` (float): 初始资金
 - `commission_rate` (float): 佣金费率
 - `stamp_tax_rate` (float): 印花税率
+- `slippage` (float): 滑点比例（双侧应用）
 - `t_plus_1` (bool): 是否启用T+1
 - `price_limit` (bool): 是否启用涨跌停限制
 
@@ -36,7 +37,9 @@ engine = BacktestEngine()
 {
     "metrics": {...},
     "equity_curve": pd.DataFrame,
+    "gross_equity_curve": pd.DataFrame,
     "trades": [...],
+    "positions": pd.DataFrame,
 }
 ```
 
@@ -61,15 +64,16 @@ Skill 标准入口函数。
     "report_path": str,        # HTML报告路径
     "metadata": {
         "metrics": {...},
-        "backend": str,
+        "backend": "native",
         "equity_curve_path": str,
+        "verdict": {...},      # RuleJudge 评审结果
+        "trade_count": int,
     },
     "error": str
 }
 ```
 
 **示例：**
-
 ```python
 from engine import run
 
@@ -81,6 +85,8 @@ if result['success']:
 
 ## 绩效指标
 
+### 基础指标（BaseBacktestMetrics）
+
 | 指标名 | 描述 |
 |--------|------|
 | total_return | 累计收益率 |
@@ -88,8 +94,24 @@ if result['success']:
 | volatility | 年化波动率 |
 | sharpe_ratio | 夏普比率 |
 | max_drawdown | 最大回撤 |
-| win_rate | 胜率 |
+| win_rate | 胜率（基于真实 PnL） |
 | calmar_ratio | Calmar比率 |
+| sortino_ratio | Sortino比率 |
+| total_trades | 交易笔数 |
+
+### 扩展指标（成本分离 + 基准对比）
+
+| 指标名 | 描述 |
+|--------|------|
+| gross_total_return | 毛收益（不含费用） |
+| gross_annual_return | 毛年化收益 |
+| total_cost_drag | 成本拖累（毛收益-净收益） |
+| benchmark_return | 基准收益 |
+| benchmark_volatility | 基准波动率 |
+| benchmark_max_drawdown | 基准最大回撤 |
+| alpha | CAPM Alpha |
+| beta | CAPM Beta |
+| excess_return | 超额收益 |
 
 ## CLI 使用
 

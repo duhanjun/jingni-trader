@@ -14,10 +14,6 @@
 - ``ic_analysis``:            ICAnalysisProcessor（Pearson / Spearman IC 分析）
 - ``correlation_filter``:     CorrelationFilterProcessor（相关性去冗余）
 - ``fusion``:                 FusionProcessor（多因子等权 / IC 加权融合）
-
-环境变量
---------
-- ``QUANT_LEGACY_PIPELINE``:  ``"1"`` 时强制走旧 5 步硬编码路径（兼容回滚）
 """
 from scripts.processors.base import (
     Processor,

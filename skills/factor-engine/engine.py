@@ -1,13 +1,12 @@
 """
 A股因子引擎主逻辑
-负责因子计算、行业中性化、IC分析、相关性去冗余、多因子融合
+负责因子计算（行业中性化/IC分析/相关性去冗余/多因子融合已迁移到 ProcessorChain）
 """
 import os
 import sys
 import logging
 import json
 import importlib
-import warnings
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -15,16 +14,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
 import pandas as pd
-from scipy import stats
-from sklearn.linear_model import LinearRegression
 
-from scripts.config import (
-    FACTOR_BACKEND, FACTOR_DIR, IC_TYPE,
-    NEUTRALIZE_INDUSTRY, NEUTRALIZE_MARKET_CAP,
-    QUANTILES, MIN_IC, MIN_IC_IR, MAX_CORRELATION
-)
+from scripts.config import FACTOR_BACKEND, FACTOR_DIR
 
-# 新增: 表达式引擎和扩展因子库
+# 表达式引擎和扩展因子库
 from expression import FactorExpressionEngine as ExpressionEngine
 from factors import Alpha158FactorEngine
 from factors.factors_config import FACTOR_CATEGORIES
@@ -70,10 +63,12 @@ class FactorEngine:
         df = data.sort_values(['code', 'date']).copy()
         result = df[['code', 'date']].copy()
 
-        result['ret_1d'] = df.groupby('code')['close'].pct_change()
-        result['ret_5d'] = df.groupby('code')['close'].pct_change(5)
-        result['ret_20d'] = df.groupby('code')['close'].pct_change(20)
-        result['ret_60d'] = df.groupby('code')['close'].pct_change(60)
+        # 一次 groupby，所有 transform 复用
+        grouped_close = df.groupby('code')['close']
+        result['ret_1d'] = grouped_close.pct_change()
+        result['ret_5d'] = grouped_close.pct_change(5)
+        result['ret_20d'] = grouped_close.pct_change(20)
+        result['ret_60d'] = grouped_close.pct_change(60)
 
         result['reversal_5d'] = -result['ret_5d']
         result['reversal_20d'] = -result['ret_20d']
@@ -81,18 +76,19 @@ class FactorEngine:
         has_amount = 'amount' in df.columns and not df['amount'].isna().all()
         has_turnover = 'turnover_rate' in df.columns and not df['turnover_rate'].isna().all()
 
+        # estimated_mv 仅作为 lncap 的中间变量，不输出到结果
         if has_amount and has_turnover:
-            mv = result['estimated_mv'] = df['amount'] / df['turnover_rate'].replace(0, np.nan) * 100
+            mv = df['amount'] / df['turnover_rate'].replace(0, np.nan) * 100
             result['lncap'] = mv.replace(0, np.nan).apply(lambda x: np.log(x) if x > 0 else np.nan)
         else:
-            result['estimated_mv'] = np.nan
             result['lncap'] = np.nan
 
         if has_turnover:
-            result['turnover_20d'] = df.groupby('code')['turnover_rate'].transform(
+            grouped_turnover = df.groupby('code')['turnover_rate']
+            result['turnover_20d'] = grouped_turnover.transform(
                 lambda x: x.rolling(20, min_periods=5).mean()
             )
-            result['turnover_5d'] = df.groupby('code')['turnover_rate'].transform(
+            result['turnover_5d'] = grouped_turnover.transform(
                 lambda x: x.rolling(5, min_periods=3).mean()
             )
             result['turnover_change'] = result['turnover_5d'] / result['turnover_20d'].replace(0, np.nan) - 1
@@ -101,7 +97,7 @@ class FactorEngine:
             result['turnover_5d'] = np.nan
             result['turnover_change'] = np.nan
 
-        result['volatility_20d'] = df.groupby('code')['close'].transform(
+        result['volatility_20d'] = grouped_close.transform(
             lambda x: x.pct_change().rolling(20, min_periods=10).std()
         )
 
@@ -112,14 +108,11 @@ class FactorEngine:
 
         if 'change_pct' in df.columns:
             result['money_flow_raw'] = df['change_pct'] * df.get('amount', df['volume'])
-            result['money_flow_20d'] = result.groupby('code')['money_flow_raw'].transform(
-                lambda x: x.rolling(20, min_periods=5).sum()
-            )
         else:
             result['money_flow_raw'] = result['ret_1d'] * df.get('amount', df['volume'])
-            result['money_flow_20d'] = result.groupby('code')['money_flow_raw'].transform(
-                lambda x: x.rolling(20, min_periods=5).sum()
-            )
+        result['money_flow_20d'] = result.groupby('code')['money_flow_raw'].transform(
+            lambda x: x.rolling(20, min_periods=5).sum()
+        )
 
         logger.info(f"A股因子计算完成，共 {len(result.columns) - 2} 个因子")
         return result
@@ -163,269 +156,6 @@ class FactorEngine:
         """
         engine = Alpha158FactorEngine()
         return engine.compute(data, factor_names)
-
-    def neutralize(
-        self,
-        factor_df: pd.DataFrame,
-        industry_df: pd.DataFrame,
-        neutralize_mcap: bool = NEUTRALIZE_MARKET_CAP,
-        neutralize_industry: bool = NEUTRALIZE_INDUSTRY
-    ) -> pd.DataFrame:
-        """因子行业中性化处理
-
-        .. deprecated:: v2.0
-            将在 v3.0 移除，请改用 ``NeutralizeProcessor`` 或 ``ProcessorChain``。
-        """
-        warnings.warn(
-            "FactorEngine.neutralize() 将在 v3.0 移除，请改用 NeutralizeProcessor 或 ProcessorChain",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        if not neutralize_industry and not neutralize_mcap:
-            return factor_df
-
-        if factor_df.empty:
-            return factor_df
-
-        logger.info("开始因子中性化处理...")
-        result = factor_df.copy()
-
-        if 'industry' not in result.columns and neutralize_industry:
-            result = result.merge(industry_df[['code', 'industry']], on='code', how='left')
-
-        factor_cols = [c for c in factor_df.columns if c not in ['code', 'date', 'industry']]
-
-        for factor in factor_cols:
-            if factor not in result.columns:
-                continue
-
-            dates = result['date'].unique()
-            neutralized_values = pd.Series(index=result.index, dtype=float)
-
-            for dt in dates:
-                cross = result[result['date'] == dt].copy()
-
-                if len(cross) < 30:
-                    neutralized_values.loc[cross.index] = cross[factor]
-                    continue
-
-                X_vars = []
-                if neutralize_mcap and 'lncap' in cross.columns:
-                    X_vars.append('lncap')
-                if neutralize_industry and 'industry' in cross.columns:
-                    industry_dummies = pd.get_dummies(cross['industry'], prefix='ind')
-                    for col in industry_dummies.columns:
-                        cross[col] = industry_dummies[col].values
-                        X_vars.append(col)
-
-                if not X_vars:
-                    neutralized_values.loc[cross.index] = cross[factor]
-                    continue
-
-                X = cross[X_vars].fillna(0).values
-                y = cross[factor].fillna(0).values
-
-                try:
-                    model = LinearRegression()
-                    model.fit(X, y)
-                    y_pred = model.predict(X)
-                    residual = y - y_pred
-                    neutralized_values.loc[cross.index] = residual
-                except Exception:
-                    neutralized_values.loc[cross.index] = cross[factor]
-
-            result[f"{factor}_neutral"] = neutralized_values
-
-        logger.info("因子中性化完成")
-        return result
-
-    def ic_analysis(
-        self,
-        factor_df: pd.DataFrame,
-        forward_returns: pd.DataFrame,
-        factor_names: Optional[List[str]] = None
-    ) -> Dict[str, Any]:
-        """计算因子的IC序列和统计量
-
-        .. deprecated:: v2.0
-            将在 v3.0 移除，请改用 ``ICAnalysisProcessor`` 或 ``ProcessorChain``。
-        """
-        warnings.warn(
-            "FactorEngine.ic_analysis() 将在 v3.0 移除，请改用 ICAnalysisProcessor 或 ProcessorChain",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        if factor_df.empty or forward_returns.empty:
-            return {}
-
-        logger.info("开始因子IC分析...")
-
-        data = factor_df.merge(
-            forward_returns[['code', 'date', 'ret_forward_1d', 'ret_forward_5d', 'ret_forward_20d']],
-            on=['code', 'date'],
-            how='inner'
-        )
-
-        if factor_names is None:
-            factor_names = [c for c in factor_df.columns
-                           if c not in ['code', 'date', 'industry']]
-
-        results = {}
-
-        for forward_col in ['ret_forward_1d', 'ret_forward_5d', 'ret_forward_20d']:
-            if forward_col not in data.columns:
-                continue
-
-            ic_results = []
-            for factor in factor_names:
-                if factor not in data.columns:
-                    continue
-
-                ic_series = self._calc_ic(data, factor, forward_col)
-                if ic_series is None or ic_series.empty:
-                    continue
-
-                ic_mean = ic_series.mean()
-                ic_std = ic_series.std()
-                ic_ir = ic_mean / ic_std if ic_std > 0 else 0
-                ic_positive_ratio = (ic_series > 0).mean()
-
-                ic_results.append({
-                    "factor": factor,
-                    "forward_period": forward_col,
-                    "ic_mean": round(float(ic_mean), 6),
-                    "ic_std": round(float(ic_std), 6),
-                    "ic_ir": round(float(ic_ir), 4),
-                    "ic_positive_ratio": round(float(ic_positive_ratio), 4),
-                    "ic_t_stat": round(float(ic_mean / (ic_std / np.sqrt(len(ic_series)))) if ic_std > 0 else 0, 4),
-                })
-
-            results[forward_col] = ic_results
-
-        logger.info(f"IC分析完成，共分析 {len(factor_names)} 个因子")
-        return results
-
-    def _calc_ic(self, data: pd.DataFrame, factor_col: str, forward_col: str) -> Optional[pd.Series]:
-        """计算单个因子的IC时间序列"""
-        if forward_col not in data.columns:
-            return None
-
-        ic_list = []
-        dates = sorted(data['date'].unique())
-
-        for dt in dates:
-            cross = data[data['date'] == dt].dropna(subset=[factor_col, forward_col])
-            if len(cross) < 10:
-                continue
-
-            if IC_TYPE == "spearman":
-                ic, _ = stats.spearmanr(cross[factor_col], cross[forward_col], nan_policy='omit')
-            else:
-                ic, _ = stats.pearsonr(cross[factor_col].fillna(0), cross[forward_col].fillna(0))
-
-            if not np.isnan(ic):
-                ic_list.append({"date": dt, "ic": ic})
-
-        if not ic_list:
-            return None
-
-        ic_df = pd.DataFrame(ic_list)
-        ic_df['date'] = pd.to_datetime(ic_df['date'])
-        return ic_df.set_index('date')['ic']
-
-    def correlation_analysis(
-        self,
-        factor_df: pd.DataFrame,
-        factor_names: Optional[List[str]] = None,
-        max_correlation: float = MAX_CORRELATION,
-        backend: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """因子相关性分析
-
-        参数:
-            backend: ``"pandas"`` / ``"polars"`` / ``"auto"`` / ``None``
-                ``None`` 时使用环境变量 ``QUANT_FACTOR_BACKEND`` 默认值
-
-        .. deprecated:: v2.0
-            将在 v3.0 移除，请改用 ``CorrelationFilterProcessor`` 或 ``ProcessorChain``。
-        """
-        warnings.warn(
-            "FactorEngine.correlation_analysis() 将在 v3.0 移除，请改用 CorrelationFilterProcessor 或 ProcessorChain",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return _correlation_analysis(
-            factor_df=factor_df,
-            factor_names=factor_names,
-            max_correlation=max_correlation,
-            backend=backend,
-        )
-
-    def factor_fusion(
-        self,
-        factor_df: pd.DataFrame,
-        ic_results: Dict[str, Any],
-        selected_factors: List[str],
-        fusion_method: str = "ic_weighted"
-    ) -> pd.DataFrame:
-        """多因子融合为复合Alpha信号
-
-        .. deprecated:: v2.0
-            将在 v3.0 移除，请改用 ``FusionProcessor`` 或 ``ProcessorChain``。
-        """
-        warnings.warn(
-            "FactorEngine.factor_fusion() 将在 v3.0 移除，请改用 FusionProcessor 或 ProcessorChain",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        if factor_df.empty or not selected_factors:
-            return pd.DataFrame()
-
-        logger.info(f"开始多因子融合，方法: {fusion_method}")
-
-        if fusion_method == "ic_weighted":
-            weights = self._get_ic_weights(ic_results, selected_factors)
-        else:
-            weights = {f: 1.0 / len(selected_factors) for f in selected_factors}
-
-        normalized = factor_df[['code', 'date']].copy()
-        for factor in selected_factors:
-            if factor not in factor_df.columns:
-                continue
-            normalized[f"{factor}_rank"] = factor_df.groupby('date')[factor].transform(
-                lambda x: x.rank(pct=True)
-            ).fillna(0.5)  # NaN隔离：缺失因子的rank填充为中性值0.5，避免0权重×NaN污染整行
-
-        rank_cols = [f"{f}_rank" for f in selected_factors if f"{f}_rank" in normalized.columns]
-        normalized['alpha_score'] = 0.0
-        for f, col in zip(selected_factors, rank_cols):
-            w = weights.get(f, 0)
-            normalized['alpha_score'] += w * normalized[col]
-
-        result = normalized[['code', 'date', 'alpha_score']].copy()
-        logger.info(f"多因子融合完成，权重: {weights}")
-        return result
-
-    def _get_ic_weights(self, ic_results: Dict, selected_factors: List[str]) -> Dict[str, float]:
-        """根据IC_IR计算因子权重"""
-        weights = {}
-        total_ic_ir = 0
-
-        ic_list = ic_results.get('ret_forward_5d', [])
-        ic_map = {item['factor']: item['ic_ir'] for item in ic_list}
-
-        for factor in selected_factors:
-            ic_ir = abs(ic_map.get(factor, 0))
-            weights[factor] = ic_ir
-            total_ic_ir += ic_ir
-
-        if total_ic_ir > 0:
-            weights = {k: v / total_ic_ir for k, v in weights.items()}
-        else:
-            n = len(selected_factors)
-            weights = {k: 1.0 / n for k in selected_factors}
-
-        return weights
 
 
 def _try_load_factor_from_datafeed(ctx) -> Optional[pd.DataFrame]:
@@ -552,41 +282,8 @@ def _maybe_generate_alphalens_reports(
 
 
 # ---------------------------------------------------------------------------
-# T1-6/T1-8: Processor Pipeline 新路径 + 旧路径兼容层
+# Processor Pipeline 路径（旧硬编码路径已在 v3.0 移除）
 # ---------------------------------------------------------------------------
-
-
-def _run_legacy_factor_pipeline(
-    engine: "FactorEngine",
-    factor_df: pd.DataFrame,
-    forward_returns: pd.DataFrame,
-    factor_names: List[str],
-) -> Tuple[pd.DataFrame, Dict[str, Any], List[str], Dict[str, Any]]:
-    """旧 4 步硬编码因子处理路径（兼容回滚用）。
-
-    保留 v1.x 的 5 步逻辑（IC 分析 → 相关性去冗余 → 选因子 → 融合 → 合并 alpha_score），
-    通过 ``QUANT_LEGACY_PIPELINE=1`` 环境变量触发。
-
-    Returns
-    -------
-    (final_df, ic_results, selected_factors, corr_result)
-    """
-    # 旧路径直接调用 engine 内部方法（绕过 DeprecationWarning）
-    # 使用 warnings.catch_warnings 临时抑制 DeprecationWarning
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        ic_results = engine.ic_analysis(factor_df, forward_returns, factor_names)
-        corr_result = engine.correlation_analysis(factor_df, factor_names)
-        selected_factors = corr_result['selected_factors']
-        fusion_df = engine.factor_fusion(factor_df, ic_results, selected_factors)
-
-    # 合并 alpha_score 到 factor_df
-    final_df = factor_df.merge(
-        fusion_df[['code', 'date', 'alpha_score']],
-        on=['code', 'date'],
-        how='left',
-    )
-    return final_df, ic_results, selected_factors, corr_result
 
 
 def _run_processor_chain(
@@ -595,44 +292,39 @@ def _run_processor_chain(
     factor_names: List[str],
     task_id: str,
     data_path: str,
-) -> Tuple[pd.DataFrame, Dict[str, Any], List[str], Dict[str, Any]]:
-    """新 ProcessorChain 路径（默认路径）。
+) -> Tuple[pd.DataFrame, Dict[str, Any], List[str], List[str]]:
+    """ProcessorChain 路径。
 
     通过 ``pipeline.yaml`` 声明式配置因子处理流程，自动记录实验元数据到
     ``ExperimentRecorder``（manifest.json 含 7 字段，接入 P1-3 sha256 机制）。
 
+    使用模块顶部已导入的 `_ProcessorChain` / `_ProcessContext` / `_load_pipeline_config`
+    / `_ExperimentRecorder`，避免在测试环境中 `sys.modules['scripts']` 被重置后
+    延迟导入失败。
+
     Returns
     -------
-    (final_df, ic_results, selected_factors, corr_result)
+    (final_df, ic_results, selected_factors, removed_factors)
     """
-    # 延迟导入避免循环依赖
-    from scripts.processors import (
-        ProcessorChain,
-        ProcessContext,
-        load_pipeline_config,
-    )
-    from scripts.recorder import ExperimentRecorder
-
     # 加载 pipeline 配置（work_dir 优先 → skill 默认 → 兜底默认链）
     _work_dir = os.environ.get("QUANT_WORK_DIR", "./workspace")
     work_dir = Path(_work_dir) if _work_dir else None
 
     try:
-        processors = load_pipeline_config(work_dir=work_dir)
+        processor_list = _load_pipeline_config(work_dir=work_dir)
     except Exception as e:
         logger.warning(
             f"加载 pipeline.yaml 失败 ({e})，回退兜底默认链"
         )
-        from scripts.processors.loader import _default_processors
-        processors = _default_processors()
+        processor_list = _default_processors()
 
     # 构造 ProcessorChain
-    chain = ProcessorChain(processors, fail_fast=False)
+    chain = _ProcessorChain(processor_list, fail_fast=False)
 
     # 初始化 Recorder
     _archive_dir = os.path.join(_work_dir, "archives", "factor_engine")
     try:
-        recorder = ExperimentRecorder(
+        recorder = _ExperimentRecorder(
             archive_dir=Path(_archive_dir),
             pipeline_config=chain.describe_chain(),
             input_data_paths=[data_path] if data_path else None,
@@ -642,7 +334,7 @@ def _run_processor_chain(
         recorder = None
 
     # 构造 ProcessContext
-    proc_ctx = ProcessContext(
+    proc_ctx = _ProcessContext(
         forward_returns=forward_returns,
         factor_names=list(factor_names),
         task_id=task_id or "",
@@ -656,14 +348,8 @@ def _run_processor_chain(
     # 从 ctx 提取 IC 结果与选中因子
     ic_results = proc_ctx.ic_results or {}
     selected_factors = proc_ctx.selected_factors or []
-
-    # 构造 corr_result 兼容旧返回结构
     corr_meta = proc_ctx.metadata.get("correlation_result", {})
-    corr_result = {
-        "selected_factors": selected_factors,
-        "removed_factors": corr_meta.get("removed_factors", []),
-        "correlation_matrix": {},
-    }
+    removed_factors = corr_meta.get("removed_factors", [])
 
     # 记录输出产物并 finalize Recorder
     if recorder is not None:
@@ -678,7 +364,7 @@ def _run_processor_chain(
         logger.warning("ProcessorChain 输出未包含 alpha_score 列（FusionProcessor 可能被禁用）")
         final_df["alpha_score"] = 0.0
 
-    return final_df, ic_results, selected_factors, corr_result
+    return final_df, ic_results, selected_factors, removed_factors
 
 
 def run(ctx) -> Dict[str, Any]:
@@ -814,32 +500,19 @@ def run(ctx) -> Dict[str, Any]:
             )
 
         factor_names = [c for c in factor_df.columns
-                       if c not in ['code', 'date', 'industry', 'estimated_mv',
+                       if c not in ['code', 'date', 'industry',
                                     'money_flow_raw', 'ret_1d', 'ret_5d', 'ret_20d', 'ret_60d',
                                     'turnover_5d']]
 
-        # ── T1-6/T1-8: Processor Pipeline 新路径 vs 旧路径切换 ──
-        # 环境变量 QUANT_LEGACY_PIPELINE=1 强制走旧 4 步硬编码路径（兼容回滚）
-        # 默认走 ProcessorChain（新路径），通过 pipeline.yaml 声明式配置
-        use_legacy = os.environ.get("QUANT_LEGACY_PIPELINE", "0") == "1"
-
-        if use_legacy:
-            logger.info("QUANT_LEGACY_PIPELINE=1，走旧 4 步硬编码路径")
-            final_df, ic_results, selected_factors, corr_result = _run_legacy_factor_pipeline(
-                engine=engine,
-                factor_df=factor_df,
-                forward_returns=forward_returns,
-                factor_names=factor_names,
-            )
-        else:
-            logger.info("走 ProcessorChain 新路径（默认）")
-            final_df, ic_results, selected_factors, corr_result = _run_processor_chain(
-                factor_df=factor_df,
-                forward_returns=forward_returns,
-                factor_names=factor_names,
-                task_id=ctx.task_id,
-                data_path=data_path,
-            )
+        # ── ProcessorChain 路径（旧硬编码路径已在 v3.0 移除） ──
+        logger.info("走 ProcessorChain 路径（pipeline.yaml 声明式配置）")
+        final_df, ic_results, selected_factors, removed_factors = _run_processor_chain(
+            factor_df=factor_df,
+            forward_returns=forward_returns,
+            factor_names=factor_names,
+            task_id=ctx.task_id,
+            data_path=data_path,
+        )
 
         os.makedirs(FACTOR_DIR, exist_ok=True)
         output_path = os.path.join(FACTOR_DIR, "factor_data.parquet")
@@ -864,9 +537,8 @@ def run(ctx) -> Dict[str, Any]:
             "metadata": {
                 "factor_names": factor_names,
                 "selected_factors": selected_factors,
-                "removed_factors": corr_result['removed_factors'],
+                "removed_factors": removed_factors,
                 "ic_results": ic_results,
-                "correlation": {k: v for k, v in corr_result.items() if k != 'correlation_matrix'},
                 "fusion_method": "ic_weighted",
                 "computed_categories": computed_categories,
                 "skipped_categories": skipped_categories,
@@ -908,102 +580,12 @@ if __name__ == "__main__":
 
 # ---------------------------------------------------------------------------
 # 优化模块入口（已整合到 scripts/optimizations/）
-# 使用方式: from engine import optimizations
+# 按需导入，例如: from scripts.optimizations.ic_vectorized import ic_analysis_batch
 # ---------------------------------------------------------------------------
-from scripts.optimizations.factor_dsl import (
-    FactorEngine as _FactorEngine,
-)
-from scripts.optimizations.lookahead_detector import (
-    detect_in_code as _detect_lookahead_in_code,
-    detect_in_dataframe as _detect_lookahead_in_dataframe,
-)
-from scripts.optimizations.alpha158_lib import (
-    AlphaEngine as _AlphaEngine,
-    AlphaRegistry as _AlphaRegistry,
-)
-from scripts.optimizations.factor_validator import (
-    validate_factor as _validate_factor,
-    FactorVerdict as _FactorVerdict,
-)
-from scripts.optimizations.ic_vectorized import (
-    ic_analysis_batch as _ic_analysis_batch,
-    ic_summary as _ic_summary,
-)
-from scripts.optimizations.ic_decay import (
-    ICDecayAnalyzer as _ICDecayAnalyzer,
-)
-from scripts.optimizations.factor_registry_v2 import (
-    FactorRegistry as _FactorRegistryV2,
-    Neutralizer as _NeutralizerV2,
-)
-from scripts.optimizations.vectorized_neutralize import (
-    neutralize_factor as _neutralize_factor,
-    neutralize_factors_batch as _neutralize_factors_batch,
-)
-from scripts.optimizations.vectorized_correlation import (
-    correlation_analysis as _correlation_analysis,
-)
-from scripts.optimizations.ic_analysis_v2 import (
-    calc_ic_series as _calc_ic_series,
-    calc_ic_stats as _calc_ic_stats,
-)
-
-from scripts.optimizations.expression_dsl.evaluator import (
-    Evaluator as _FactorDSLEvaluator,
-)
-from scripts.optimizations.expression_dsl.parser import (
-    AstNode as _AstNode,
-    FieldNode as _FieldNode,
-)
-
-
-class optimizations:
-    """因子引擎优化模块集合"""
-    FactorDSLEvaluator = _FactorDSLEvaluator
-    AstNode = _AstNode
-    FieldNode = _FieldNode
-    FactorEngine = _FactorEngine
-    detect_lookahead_in_code = _detect_lookahead_in_code
-    detect_lookahead_in_dataframe = _detect_lookahead_in_dataframe
-    AlphaEngine = _AlphaEngine
-    AlphaRegistry = _AlphaRegistry
-    validate_factor = _validate_factor
-    FactorVerdict = _FactorVerdict
-    ic_analysis_batch = _ic_analysis_batch
-    ic_summary = _ic_summary
-    ICDecayAnalyzer = _ICDecayAnalyzer
-    FactorRegistryV2 = _FactorRegistryV2
-    NeutralizerV2 = _NeutralizerV2
-    neutralize_factor = _neutralize_factor
-    neutralize_factors_batch = _neutralize_factors_batch
-    correlation_analysis = _correlation_analysis
-    calc_ic_series = _calc_ic_series
-    calc_ic_stats = _calc_ic_stats
-
-    @staticmethod
-    def get_factor_dsl_engines():
-        """返回所有可用的因子DSL引擎"""
-        return {
-            "factor_engine": _FactorEngine,
-            "expression_dsl_evaluator": _FactorDSLEvaluator,
-            "ast_node": _AstNode,
-            "field_node": _FieldNode,
-            "alpha_engine": _AlphaEngine,
-        }
-
-    @staticmethod
-    def get_ic_analyzers():
-        """返回所有可用的IC分析器"""
-        return {
-            "ic_analysis_batch": _ic_analysis_batch,
-            "ic_decay_analyzer": _ICDecayAnalyzer,
-            "calc_ic_series": _calc_ic_series,
-            "calc_ic_stats": _calc_ic_stats,
-        }
 
 
 # ---------------------------------------------------------------------------
-# T1-6: Processor Pipeline 模块入口（方向一）
+# Processor Pipeline 模块入口
 # 使用方式: from engine import processors
 #           processors.ProcessorChain / processors.NeutralizeProcessor / ...
 # ---------------------------------------------------------------------------
@@ -1021,6 +603,7 @@ from scripts.processors.loader import (
     parse_yaml_to_processors as _parse_yaml_to_processors,
     register_processor as _register_processor,
     PROCESSOR_REGISTRY as _PROCESSOR_REGISTRY,
+    _default_processors as _default_processors,
 )
 from scripts.processors.neutralize import NeutralizeProcessor as _NeutralizeProcessor
 from scripts.processors.winsorize import WinsorizeProcessor as _WinsorizeProcessor
@@ -1035,7 +618,7 @@ from scripts.recorder import ExperimentRecorder as _ExperimentRecorder
 
 
 class processors:
-    """因子引擎 Processor Pipeline 模块集合（方向一）
+    """因子引擎 Processor Pipeline 模块集合
 
     通过 ``from engine import processors`` 访问所有 Processor 相关类与工具函数。
     """
@@ -1072,5 +655,4 @@ class processors:
     @staticmethod
     def create_default_chain():
         """创建默认 ProcessorChain（兜底默认链，仅 IC + Correlation + Fusion）"""
-        from scripts.processors.loader import _default_processors
         return _ProcessorChain(_default_processors())

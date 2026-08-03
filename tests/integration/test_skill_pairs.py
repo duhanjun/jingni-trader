@@ -90,8 +90,8 @@ def _run_pipeline_prefix(stages: list[str], monkeypatch, tmp_path):
     # 一旦其他测试触发了 master.run_pipeline → importlib.import_module("skills.X.engine")，
     # 对应的 skills/X 目录就被插入 sys.path 最前面。此时 `import engine` 会优先
     # 解析到 skills/X/engine.py（子 skill），而不是根目录 engine.py（主调度器），
-    # reload(engine) 会重新执行子 skill engine.py，触发顶层 `from scripts.optimizations...`
-    # 但此时 sys.modules['scripts'] 是主 scripts 包（无 optimizations 子目录），导致
+    # reload(engine) 会重新执行子 skill engine.py，触发顶层 `from scripts.processors...`
+    # 但此时 sys.modules['scripts'] 是主 scripts 包（无 processors 子目录），导致
     # ModuleNotFoundError。
     #
     # 解决方案：
