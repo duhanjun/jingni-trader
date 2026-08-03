@@ -997,13 +997,345 @@ def _build_fallback_fundamental(prompt_data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _build_attribution_llm_prompt(
+    rt_stats: dict,
+    pnl_by_stock: pd.DataFrame,
+    exec_quality: dict,
+    stress_perf: dict,
+) -> dict:
+    """构建绩效归因 LLM prompt"""
+    system_prompt = (
+        "你是一位专业的量化投资绩效分析师。请根据以下绩效归因数据，"
+        "生成一份结构化的绩效归因分析报告。要求：\n"
+        "1. 分析盈亏的主要来源（按标的/按持仓时间/按交易方向）\n"
+        "2. 评估交易执行质量（费用占比/滑点）\n"
+        "3. 识别交易模式中的优势与不足\n"
+        "4. 给出具体的改进建议\n"
+        "请以 JSON 格式返回，包含以下字段：\n"
+        '{"overall_summary": "总体评价", "pnl_source_analysis": "盈亏来源分析", '
+        '"execution_quality_analysis": "执行质量分析", "pattern_analysis": "交易模式分析", '
+        '"improvement_suggestions": "改进建议", "risk_assessment": "风险评估"}'
+    )
+
+    # 构建用户 prompt
+    parts = []
+    if rt_stats:
+        parts.append("=== Round-Trip 统计 ===")
+        parts.append(f"闭环交易数: {rt_stats.get('total_round_trips', 0)}")
+        parts.append(f"胜率: {rt_stats.get('win_rate', 0) * 100:.1f}%")
+        parts.append(f"总净盈亏: {rt_stats.get('total_net_pnl', 0):,.2f}")
+        parts.append(f"盈亏比: {rt_stats.get('profit_factor', 0):.2f}")
+        parts.append(f"平均持仓天数: {rt_stats.get('avg_holding_days', 0):.1f}")
+
+    if not pnl_by_stock.empty:
+        parts.append("\n=== 按标的盈亏（前10） ===")
+        for _, row in pnl_by_stock.head(10).iterrows():
+            parts.append(
+                f"{row['code']}: 盈亏={row['total_pnl']:,.2f}, "
+                f"交易次数={row['trade_count']}, 胜率={row['win_rate']:.1f}%, "
+                f"平均收益={row['avg_return_pct']:.2f}%"
+            )
+
+    if exec_quality:
+        parts.append("\n=== 执行质量 ===")
+        parts.append(f"总成交额: {exec_quality.get('total_turnover', 0):,.2f}")
+        parts.append(f"成本占比: {exec_quality.get('cost_ratio_bps', 0):.2f} bps")
+        parts.append(f"滑点占比: {exec_quality.get('slippage_ratio_bps', 0):.2f} bps")
+
+    if stress_perf:
+        parts.append("\n=== 压力期表现 ===")
+        for name, data in stress_perf.items():
+            parts.append(f"{name}: 收益={data['return_pct']:.2f}%, 回撤={data['max_drawdown_pct']:.2f}%")
+
+    return {
+        "system_prompt": system_prompt,
+        "user_prompt": "\n".join(parts),
+    }
+
+
+def _build_fallback_attribution(prompt_data: Dict[str, Any]) -> Dict[str, Any]:
+    """LLM 不可用时，生成规则兜底绩效归因解读"""
+    user_prompt = prompt_data.get("user_prompt", "")
+
+    # 从 prompt 中提取关键数据
+    import re
+    win_rate_match = re.search(r'胜率:\s*([\d.]+)%', user_prompt)
+    win_rate = float(win_rate_match.group(1)) if win_rate_match else 0
+
+    pnl_match = re.search(r'总净盈亏:\s*([-\d,.]+)', user_prompt)
+    total_pnl = float(pnl_match.group(1).replace(',', '')) if pnl_match else 0
+
+    pf_match = re.search(r'盈亏比:\s*([\d.]+)', user_prompt)
+    profit_factor = float(pf_match.group(1)) if pf_match else 0
+
+    cost_match = re.search(r'成本占比:\s*([\d.]+)\s*bps', user_prompt)
+    cost_bps = float(cost_match.group(1)) if cost_match else 0
+
+    # 规则生成
+    if total_pnl > 0:
+        overall = f"本期交易整体盈利，总净盈亏 {total_pnl:,.2f} 元，胜率 {win_rate:.1f}%。"
+    elif total_pnl < 0:
+        overall = f"本期交易整体亏损，总净盈亏 {total_pnl:,.2f} 元，胜率 {win_rate:.1f}%。"
+    else:
+        overall = "本期交易盈亏基本持平。"
+
+    if profit_factor > 1.5:
+        pnl_analysis = f"盈亏比 {profit_factor:.2f}，盈利交易的规模显著大于亏损交易，风险控制良好。"
+    elif profit_factor > 1.0:
+        pnl_analysis = f"盈亏比 {profit_factor:.2f}，略高于1，盈利略大于亏损，有改善空间。"
+    else:
+        pnl_analysis = f"盈亏比 {profit_factor:.2f}，低于1，亏损交易规模大于盈利，需加强止损管理。"
+
+    if cost_bps > 30:
+        exec_analysis = f"交易成本占比 {cost_bps:.2f} bps，偏高，建议减少交易频率或优化下单方式。"
+    elif cost_bps > 10:
+        exec_analysis = f"交易成本占比 {cost_bps:.2f} bps，适中，处于合理范围。"
+    else:
+        exec_analysis = f"交易成本占比 {cost_bps:.2f} bps，较低，执行效率良好。"
+
+    if win_rate > 60:
+        pattern = f"胜率 {win_rate:.1f}%，交易胜率较高，说明选股策略有一定的有效性。"
+    elif win_rate > 40:
+        pattern = f"胜率 {win_rate:.1f}%，胜率中等，建议结合盈亏比综合评估策略效果。"
+    else:
+        pattern = f"胜率 {win_rate:.1f}%，胜率偏低，建议优化入场条件或增加过滤条件。"
+
+    suggestions = []
+    if profit_factor < 1.5:
+        suggestions.append("建议设置更严格的止损规则，控制单笔亏损规模。")
+    if cost_bps > 20:
+        suggestions.append("建议减少短线交易频率，降低交易成本对收益的侵蚀。")
+    if win_rate < 50:
+        suggestions.append("建议增加入场信号过滤条件，提高交易胜率。")
+    if not suggestions:
+        suggestions.append("当前策略表现稳定，建议持续监控并定期复盘。")
+
+    return {
+        "overall_summary": overall,
+        "pnl_source_analysis": pnl_analysis,
+        "execution_quality_analysis": exec_analysis,
+        "pattern_analysis": pattern,
+        "improvement_suggestions": " ".join(suggestions),
+        "risk_assessment": "绩效归因基于历史交易数据，不构成未来收益保证。建议持续监控策略表现，及时调整。",
+    }
+
+
+def _render_attribution_analysis(resp: Dict[str, Any]) -> str:
+    """渲染绩效归因 LLM 解读 HTML"""
+    import html as _html_lib
+
+    return (
+        f'<div class="llm-analysis-body">'
+        f'<h4>总体评价</h4><p>{_html_lib.escape(resp.get("overall_summary", ""))}</p>'
+        f'<h4>盈亏来源分析</h4><p>{_html_lib.escape(resp.get("pnl_source_analysis", ""))}</p>'
+        f'<h4>执行质量分析</h4><p>{_html_lib.escape(resp.get("execution_quality_analysis", ""))}</p>'
+        f'<h4>交易模式分析</h4><p>{_html_lib.escape(resp.get("pattern_analysis", ""))}</p>'
+        f'<h4>改进建议</h4><p>{_html_lib.escape(resp.get("improvement_suggestions", ""))}</p>'
+        f'<h4>风险评估</h4><p>{_html_lib.escape(resp.get("risk_assessment", ""))}</p>'
+        f'</div>'
+    )
+
+
+def _inject_attribution_analysis(
+    html_path: str,
+    llm_responses: Dict[str, Any],
+    llm_prompts: Dict[str, Any],
+) -> None:
+    """将 LLM 绩效归因解读注入 HTML 报告（替换占位符）"""
+    with open(html_path, "r", encoding="utf-8") as f:
+        html_content = f.read()
+
+    if "<!--LLM_ATTRIBUTION_PLACEHOLDER-->" in html_content:
+        resp = llm_responses.get("attribution")
+        if not resp:
+            resp = _build_fallback_attribution(llm_prompts.get("attribution", {}))
+        rendered = _render_attribution_analysis(resp)
+        html_content = html_content.replace(
+            "<!--LLM_ATTRIBUTION_PLACEHOLDER-->", rendered
+        )
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html_content)
+        logger.info(f"绩效归因解读已注入: {html_path}")
+
+
+def _run_attribution_report(ctx) -> Dict[str, Any]:
+    """绩效归因报告生成路径
+
+    流程：
+    1. 读取 EXECUTION 产物（ledger.jsonl / trade_log.json）
+    2. AttributionAnalyzer 解析和归因
+    3. ReportGenerator 生成图表
+    4. 渲染 HTML 报告（含 LLM 占位符）
+    5. 调用 LLM 生成深度解读（可选）
+    6. 替换占位符 → 输出最终报告
+    """
+    from scripts.attribution_analyzer import AttributionAnalyzer
+    from scripts.templates.attribution_report import (
+        build_attribution_html,
+        make_pnl_by_stock_chart,
+        make_round_trip_scatter,
+    )
+
+    _work_dir = os.environ.get("QUANT_WORK_DIR", "./workspace")
+    _report_dir = os.path.join(_work_dir, "reports")
+    os.makedirs(_report_dir, exist_ok=True)
+
+    # 1. 定位 EXECUTION 产物
+    execution_artifact = ctx.get_artifact("EXECUTION") if hasattr(ctx, 'get_artifact') else None
+    if not execution_artifact:
+        return {
+            "success": False, "artifact_path": "", "metadata": {},
+            "error": "未找到 EXECUTION 产物，无法生成绩效归因报告。请先执行模拟/实盘交易。"
+        }
+
+    # ledger.jsonl 位于 execution 目录下
+    execution_dir = os.path.dirname(execution_artifact) if os.path.isfile(execution_artifact) else execution_artifact
+    ledger_path = os.path.join(execution_dir, "ledger.jsonl")
+    trade_log_path = os.path.join(execution_dir, "trade_log.json")
+
+    if not os.path.exists(ledger_path):
+        return {
+            "success": False, "artifact_path": "", "metadata": {},
+            "error": f"ledger 文件不存在: {ledger_path}"
+        }
+
+    # 2. 初始化分析器
+    analyzer = AttributionAnalyzer(ledger_path, trade_log_path)
+    if not analyzer.load():
+        return {
+            "success": False, "artifact_path": "", "metadata": {},
+            "error": "ledger 文件为空或无法解析"
+        }
+
+    analyzer.build_round_trips()
+
+    # 3. 提取分析数据
+    tx_stats = analyzer.get_transaction_stats()
+    rt_stats = analyzer.get_round_trip_stats()
+    pnl_by_stock = analyzer.get_pnl_by_stock()
+    exec_quality = analyzer.get_execution_quality()
+    stress_perf = analyzer.get_stress_period_performance()
+    consecutive = analyzer.get_consecutive_stats()
+
+    # 4. 生成图表
+    generator = ReportGenerator(title="绩效归因报告")
+    charts: List[str] = []
+
+    # 净值曲线
+    nav_series = analyzer.get_nav_series()
+    metrics = {}
+    if not nav_series.empty:
+        equity_curve = pd.DataFrame({
+            "date": nav_series.index,
+            "equity": nav_series.values,
+        })
+        equity_chart = generator.make_equity_chart(equity_curve)
+        if equity_chart:
+            charts.append(equity_chart)
+
+        # 月度热力图
+        if INCLUDE_HEATMAP:
+            heatmap = generator.make_monthly_heatmap(equity_curve)
+            if heatmap:
+                charts.append(heatmap)
+
+        # 计算绩效指标
+        metrics = generator.calc_performance_metrics(equity_curve)
+
+    # 按标的盈亏图
+    if not pnl_by_stock.empty:
+        pnl_chart = make_pnl_by_stock_chart(pnl_by_stock, CHART_THEME)
+        if pnl_chart:
+            charts.append(pnl_chart)
+
+    # Round-trip 散点图
+    if analyzer.round_trips:
+        rt_chart = make_round_trip_scatter(analyzer.round_trips, CHART_THEME)
+        if rt_chart:
+            charts.append(rt_chart)
+
+    # 5. 构建 HTML
+    html = build_attribution_html(
+        metrics=metrics,
+        tx_stats=tx_stats,
+        rt_stats=rt_stats,
+        pnl_by_stock=pnl_by_stock,
+        exec_quality=exec_quality,
+        stress_perf=stress_perf,
+        consecutive=consecutive,
+        charts=charts,
+        round_trips=analyzer.round_trips,
+        chart_theme=CHART_THEME,
+    )
+
+    # 6. 写入文件
+    html_path = os.path.join(_report_dir, "attribution_report.html")
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html)
+    logger.info(f"绩效归因报告已生成: {html_path}")
+
+    # 7. 准备 LLM prompt
+    llm_prompts = {
+        "attribution": _build_attribution_llm_prompt(
+            rt_stats, pnl_by_stock, exec_quality, stress_perf
+        )
+    }
+
+    # 8. 尝试调用 LLM
+    llm_status = "skipped"
+    llm_responses: Dict[str, Any] = {}
+    try:
+        from scripts.llm_client import generate_analysis, is_available
+        if is_available():
+            logger.info("开始调用 LLM 生成绩效归因解读...")
+            resp = generate_analysis(llm_prompts["attribution"])
+            if resp:
+                llm_responses["attribution"] = resp
+                llm_status = "success"
+            else:
+                llm_status = "failed"
+    except Exception as e:
+        logger.warning(f"LLM 调用异常: {e}")
+        llm_status = "failed"
+
+    # 9. 替换占位符
+    _inject_attribution_analysis(html_path, llm_responses, llm_prompts)
+
+    # 10. 落盘 report_data.json
+    report_data = {
+        "report_type": "attribution",
+        "generated_at": datetime.now().isoformat(),
+        "metrics": metrics,
+        "tx_stats": tx_stats,
+        "rt_stats": rt_stats,
+        "llm_status": llm_status,
+    }
+    data_path_out = os.path.join(_report_dir, "report_data.json")
+    with open(data_path_out, "w", encoding="utf-8") as f:
+        json.dump(report_data, f, ensure_ascii=False, indent=2, default=str)
+
+    return {
+        "success": True,
+        "artifact_path": html_path,
+        "metadata": {
+            "report_type": "attribution",
+            "llm_prompts": llm_prompts,
+            "llm_status": llm_status,
+            "metrics": metrics,
+            "report_data_path": data_path_out,
+        },
+        "error": ""
+    }
+
+
 def run(ctx) -> Dict[str, Any]:
     """
     reports-engine 的 run 函数
 
-    统一路由逻辑（不再区分量化/非量化）：
-    1. 若有 BACKTEST 产物 → 生成回测绩效报告（夏普/回撤/归因）
-    2. 否则 → 按报告模板生成个股分析报告（技术面/基本面）
+    统一路由逻辑（三分支，按优先级）：
+    1. 绩效复盘意图（report_intent == "attribution"）→ 绩效归因报告
+    2. 有 BACKTEST 产物 → 回测绩效报告（夏普/回撤/归因）
+    3. 默认 → 按报告模板生成个股分析报告（技术面/基本面）
 
     参数:
         ctx: Context 对象
@@ -1016,12 +1348,18 @@ def run(ctx) -> Dict[str, Any]:
             "error": str
         }
     """
-    # 检查是否有回测产物 → 回测绩效报告路径
+    # 优先级 1: 绩效复盘意图 → 绩效归因报告
+    meta = getattr(ctx, 'metadata', {}) or {}
+    if meta.get("report_intent") == "attribution":
+        logger.info("检测到绩效复盘意图，生成绩效归因报告")
+        return _run_attribution_report(ctx)
+
+    # 优先级 2: 有 BACKTEST 产物 → 回测绩效报告
     backtest_path = ctx.get_artifact("BACKTEST") if hasattr(ctx, 'get_artifact') else None
     has_backtest = backtest_path and os.path.exists(backtest_path)
 
     if not has_backtest:
-        # 无回测产物 → 模板化个股分析报告
+        # 优先级 3: 默认 → 模板化个股分析报告
         return _run_template_report(ctx)
 
     try:

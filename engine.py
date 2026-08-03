@@ -125,6 +125,13 @@ STRATEGY_KEYWORDS = {
     "backtest", "夏普", "回撤", "仓位", "风控", "模拟", "下单", "执行",
 }
 
+# 绩效复盘关键词（触发复盘路径：读取 EXECUTION 产物 → REPORT）
+# 优先级高于策略关键词，用于回答"实盘盈亏来自哪里？"
+ATTRIBUTION_KEYWORDS = {
+    "绩效归因", "归因分析", "复盘", "实盘报告", "盈亏分析",
+    "执行报告", "交易复盘", "绩效复盘", "attribution",
+}
+
 
 # ── 数据源优先级意图解析（方案 D：用户对话切换数据源）──────────────
 # 用户可通过自然语言指定数据源优先级，例如：
@@ -193,6 +200,16 @@ class MasterEngine:
             ensure_skill(project_root, "jingni-datafeed")
         except Exception as e:
             logger.debug(f"skill 版本检查跳过: {e}")
+
+    def _is_attribution_intent(self, user_intent: str) -> bool:
+        """判断用户是否触发绩效复盘意图。
+
+        优先级高于策略构建意图，命中时路由到复盘路径：
+        DATA → FACTOR → EXECUTION → REPORT（跳过 MODEL/BACKTEST/PORTFOLIO）。
+        """
+        if not user_intent:
+            return False
+        return any(kw in user_intent for kw in ATTRIBUTION_KEYWORDS)
 
     def _is_strategy_required(self, user_intent: str) -> bool:
         """判断用户是否明确需要构建可回测/可交易策略。
@@ -317,7 +334,15 @@ class MasterEngine:
         # 报告模板检测：正交维度，无论是否构建策略都应工作
         ctx.metadata["report_template"] = self._detect_report_template(user_input)
 
-        if strategy_required:
+        # 绩效复盘意图：最高优先级，独立路由（优先级 > 策略构建 > 个股分析）
+        is_attribution = self._is_attribution_intent(user_input)
+        if is_attribution:
+            ctx.metadata["report_intent"] = "attribution"
+            target_stages = ["DATA", "FACTOR", "EXECUTION", "REPORT"]
+            logger.info(
+                f"检测到绩效复盘意图，路由到复盘路径: {' → '.join(target_stages)}"
+            )
+        elif strategy_required:
             # 完整策略管线：DATA → FACTOR → MODEL → BACKTEST → PORTFOLIO → EXECUTION → REPORT
             # MODEL 和 BACKTEST 已在管线中，实盘依赖回测验证的策略自动满足
             target_stages = ["DATA", "FACTOR", "MODEL", "BACKTEST", "PORTFOLIO", "EXECUTION", "REPORT"]

@@ -428,5 +428,66 @@ class TestStrategyRequiredRouting:
         assert "BACKTEST" in ctx.target_stages
 
 
+# ============================================================================
+# Part 5: 绩效复盘意图解析（attribution intent routing）
+# ============================================================================
+
+class TestAttributionIntent:
+    """验证 MasterEngine._is_attribution_intent 与 parse_intent 的复盘意图路由。
+
+    契约：
+    - 命中 ATTRIBUTION_KEYWORDS → ctx.metadata['report_intent'] == 'attribution'
+    - target_stages 为 ['DATA', 'FACTOR', 'EXECUTION', 'REPORT']（按 STAGE_ORDER 排序）
+    - 优先级高于策略构建意图：即使输入含 '回测' 等 STRATEGY_KEYWORDS，仍走复盘路径
+    - 跳过 MODEL/BACKTEST/PORTFOLIO 阶段
+    """
+
+    def _make_engine(self):
+        import engine
+        return engine.MasterEngine()
+
+    def test_parse_attribution_intent(self):
+        """'复盘' 触发绩效复盘意图，target_stages 按 STAGE_ORDER 排序"""
+        ctx = self._make_engine().parse_intent("复盘")
+        assert ctx.metadata["report_intent"] == "attribution"
+        assert ctx.target_stages == ["DATA", "FACTOR", "EXECUTION", "REPORT"]
+
+    def test_parse_attribution_intent_variants(self):
+        """多个 ATTRIBUTION_KEYWORDS 关键词均应触发复盘意图"""
+        keywords = [
+            "绩效归因", "归因分析", "实盘报告",
+            "盈亏分析", "交易复盘", "绩效复盘", "attribution",
+        ]
+        for kw in keywords:
+            ctx = self._make_engine().parse_intent(kw)
+            assert ctx.metadata.get("report_intent") == "attribution", (
+                f"关键词 '{kw}' 应触发 attribution 意图"
+            )
+
+    def test_parse_attribution_not_triggered(self):
+        """普通输入不应触发复盘意图"""
+        for text in ["今天天气真好", "分析比亚迪技术面"]:
+            ctx = self._make_engine().parse_intent(text)
+            assert ctx.metadata.get("report_intent") != "attribution", (
+                f"'{text}' 不应触发 attribution 意图"
+            )
+
+    def test_attribution_priority_over_strategy(self):
+        """'复盘回测' 同时命中复盘与策略关键词，应优先走复盘路径（不含 MODEL/BACKTEST）"""
+        ctx = self._make_engine().parse_intent("复盘回测")
+        assert ctx.metadata["report_intent"] == "attribution"
+        assert "MODEL" not in ctx.target_stages
+        assert "BACKTEST" not in ctx.target_stages
+
+    def test_attribution_target_stages_order(self):
+        """复盘路径 target_stages 严格按 STAGE_ORDER 排序"""
+        import engine
+        ctx = self._make_engine().parse_intent("复盘")
+        assert ctx.target_stages == ["DATA", "FACTOR", "EXECUTION", "REPORT"]
+        # 显式校验顺序与 STAGE_ORDER 一致
+        order = [engine.STAGE_ORDER[s] for s in ctx.target_stages]
+        assert order == sorted(order)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
