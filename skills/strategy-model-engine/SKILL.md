@@ -29,17 +29,17 @@ environment_variables:
     required: false
     default: "./workspace"
   - name: LABEL_TYPE
-    description: 标签类型（return / classification）
+    description: 标签类型（regression / classification）
     required: false
-    default: "return"
+    default: "regression"
   - name: OPTUNA_TRIALS
     description: Optuna 超参搜索次数
     required: false
-    default: "50"
+    default: "100"
   - name: OPTUNA_TIMEOUT
     description: Optuna 超时时间（秒）
     required: false
-    default: "600"
+    default: "3600"
   - name: MLFLOW_TRACKING_URI
     description: MLflow 跟踪服务 URI
     required: false
@@ -64,8 +64,6 @@ trigger_keywords:
   - LightGBM
   - 超参数优化
   - 实验管理
-  - 意图解析
-  - 动态权重
 ---
 
 # strategy-model-engine
@@ -78,10 +76,6 @@ strategy-model-engine 是 A 股量化投研的**策略开发与模型训练引�
 2. **超参数优化**：Optuna 自动调参（支持搜索次数和超时限制）
 3. **实验追踪**：MLflow 模型版本管理
 4. **防过拟合**：分组时序交叉验证（Purged Group Time Series Split），含清洗期（purge gap）
-5. **策略模板**：规则型策略（反转、趋势等）
-6. **意图解析器**：从自然语言中解析策略意图和参数
-7. **Alpha 表达式引擎**：声明式因子表达式
-8. **动态权重分配**：基于因子表现的动态权重调整
 
 ## 模型训练流程
 
@@ -108,10 +102,10 @@ strategy-model-engine 是 A 股量化投研的**策略开发与模型训练引�
 | TRAIN_WINDOW_MONTHS | 36 | 训练窗口（月） |
 | VALIDATION_WINDOW_MONTHS | 12 | 验证窗口（月） |
 | TEST_WINDOW_MONTHS | 12 | 测试窗口（月） |
-| PURGE_GAP_DAYS | 5 | 清洗期（天），防止训练集和验证集重叠 |
-| FORWARD_PERIOD | 1 | 前视期（天），标签为 T+1 日收益 |
-| OPTUNA_TRIALS | 50 | Optuna 搜索次数 |
-| OPTUNA_TIMEOUT | 600 | Optuna 超时（秒） |
+| PURGE_GAP_DAYS | 2 | 清洗期（天），防止训练集和验证集重叠 |
+| FORWARD_PERIOD | 20 | 前视期（天），标签为 T+20 日收益 |
+| OPTUNA_TRIALS | 100 | Optuna 搜索次数 |
+| OPTUNA_TIMEOUT | 3600 | Optuna 超时（秒） |
 
 ## 使用示例
 
@@ -135,14 +129,6 @@ result = run(ctx)
 ```bash
 python engine.py -i "训练LightGBM模型"
 ```
-
-## 优化模块
-
-可通过 `from engine import optimizations` 访问以下优化模块：
-
-- **Alpha 表达式引擎**：`AlphaExpressionEngine`
-- **动态权重**：`DynamicWeightAllocator`
-- **意图解析器**：`IntentParser`
 
 ## 配置说明
 

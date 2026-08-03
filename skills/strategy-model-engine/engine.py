@@ -61,6 +61,14 @@ warnings.filterwarnings('ignore')
 logger = logging.getLogger("strategy-model-engine")
 
 
+class _NullContext:
+    """MLflow 不可用时的空上下文管理器"""
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        return False
+
+
 class ModelEngine:
     """策略模型引擎"""
 
@@ -189,6 +197,10 @@ class ModelEngine:
                 raise ImportError("CatBoost 未安装")
 
         elif MODEL_TYPE == 'logistic_regression':
+            if LABEL_TYPE != 'classification':
+                raise ValueError(
+                    "logistic_regression 仅支持分类任务，请设置 LABEL_TYPE=classification"
+                )
             if trial is not None and HAS_OPTUNA:
                 params = {
                     'C': trial.suggest_float('C', 0.01, 10.0, log=True),
@@ -276,12 +288,19 @@ class ModelEngine:
         y: pd.Series,
         best_params: Dict[str, Any] = None,
         test_dates: pd.Series = None
-    ) -> Tuple[Any, Dict[str, float], Optional[np.ndarray]]:
-        """训练模型并评估"""
+    ) -> Tuple[Any, Dict[str, float], Optional[np.ndarray], Optional[str]]:
+        """训练模型并评估
+
+        返回: (model, metrics, predictions, model_path)
+        model_path 为模型文件落盘路径（joblib 不可用时为 None）
+        """
         logger.info("训练最终模型...")
 
-        if HAS_MLFLOW:
-            with mlflow.start_run():
+        # 整个训练+评估+记录流程包裹在单个 MLflow run 上下文中
+        mlflow_ctx = mlflow.start_run() if HAS_MLFLOW else _NullContext()
+
+        with mlflow_ctx:
+            if HAS_MLFLOW:
                 mlflow.log_params({
                     "model_type": MODEL_TYPE,
                     "label_type": LABEL_TYPE,
@@ -291,103 +310,63 @@ class ModelEngine:
                 if best_params:
                     mlflow.log_params(best_params)
 
-        model = self.create_model()
-        if best_params:
-            model.set_params(**best_params)
+            model = self.create_model()
+            if best_params:
+                model.set_params(**best_params)
 
-        if test_dates is not None and len(test_dates) > 0:
-            train_mask = ~X.index.isin(test_dates.index)
-            X_train = X.loc[train_mask]
-            y_train = y.loc[train_mask]
-            X_test = X.loc[~train_mask]
-            y_test = y.loc[~train_mask]
-        else:
-            X_train, y_train = X, y
-            X_test, y_test = None, None
-
-        model.fit(X_train, y_train)
-
-        metrics = {}
-        predictions = None
-
-        if X_test is not None:
-            predictions = model.predict(X_test)
-
-            if LABEL_TYPE == 'classification':
-                from sklearn.metrics import accuracy_score, f1_score
-                metrics['accuracy'] = accuracy_score(y_test, predictions)
-                metrics['f1'] = f1_score(y_test, predictions, average='weighted')
+            if test_dates is not None and len(test_dates) > 0:
+                train_mask = ~X.index.isin(test_dates.index)
+                X_train = X.loc[train_mask]
+                y_train = y.loc[train_mask]
+                X_test = X.loc[~train_mask]
+                y_test = y.loc[~train_mask]
             else:
-                from sklearn.metrics import mean_squared_error, r2_score
-                metrics['mse'] = mean_squared_error(y_test, predictions)
-                metrics['rmse'] = np.sqrt(metrics['mse'])
-                metrics['r2'] = r2_score(y_test, predictions)
+                X_train, y_train = X, y
+                X_test, y_test = None, None
 
-            pred_series = pd.Series(predictions, index=X_test.index)
-            y_test_aligned = y_test.loc[X_test.index]
-            metrics['ic'] = pred_series.corr(y_test_aligned)
-        else:
-            if hasattr(model, 'score'):
-                metrics['train_score'] = model.score(X_train, y_train)
+            model.fit(X_train, y_train)
 
-        if HAS_MLFLOW:
-            mlflow.log_metrics(metrics)
+            metrics = {}
+            predictions = None
 
-            if hasattr(model, 'feature_importances_'):
-                importance_dict = dict(zip(X.columns, model.feature_importances_))
-                if HAS_MLFLOW:
-                    with mlflow.start_run(nested=True):
-                        mlflow.log_dict(importance_dict, "feature_importance.json")
+            if X_test is not None:
+                predictions = model.predict(X_test)
 
-        os.makedirs(MODEL_DIR, exist_ok=True)
-        model_path = os.path.join(MODEL_DIR, f"model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pkl")
-        if HAS_JOBLIB:
-            joblib.dump(model, model_path)
-        if HAS_MLFLOW:
-            mlflow.log_artifact(model_path)
+                if LABEL_TYPE == 'classification':
+                    from sklearn.metrics import accuracy_score, f1_score
+                    metrics['accuracy'] = accuracy_score(y_test, predictions)
+                    metrics['f1'] = f1_score(y_test, predictions, average='weighted')
+                else:
+                    from sklearn.metrics import mean_squared_error, r2_score
+                    metrics['mse'] = mean_squared_error(y_test, predictions)
+                    metrics['rmse'] = np.sqrt(metrics['mse'])
+                    metrics['r2'] = r2_score(y_test, predictions)
+
+                pred_series = pd.Series(predictions, index=X_test.index)
+                y_test_aligned = y_test.loc[X_test.index]
+                metrics['ic'] = pred_series.corr(y_test_aligned)
+            else:
+                if hasattr(model, 'score'):
+                    metrics['train_score'] = model.score(X_train, y_train)
+
+            if HAS_MLFLOW:
+                mlflow.log_metrics(metrics)
+
+                if hasattr(model, 'feature_importances_'):
+                    importance_dict = dict(zip(X.columns, model.feature_importances_))
+                    mlflow.log_dict(importance_dict, "feature_importance.json")
+
+            # 模型落盘（单次保存）
+            model_path = None
+            os.makedirs(MODEL_DIR, exist_ok=True)
+            model_path = os.path.join(MODEL_DIR, f"model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pkl")
+            if HAS_JOBLIB:
+                joblib.dump(model, model_path)
+            if HAS_MLFLOW and HAS_JOBLIB:
+                mlflow.log_artifact(model_path)
 
         logger.info(f"模型训练完成，指标: {metrics}")
-        return model, metrics, predictions
-
-    def generate_rule_based_signal(
-        self,
-        factor_df: pd.DataFrame,
-        strategy_type: str = "single_factor"
-    ) -> pd.DataFrame:
-        """生成基于规则的策略信号"""
-        df = factor_df[['code', 'date']].copy()
-
-        if strategy_type == "single_factor":
-            if 'alpha_score' in factor_df.columns:
-                factor_col = 'alpha_score'
-            elif 'reversal_20d' in factor_df.columns:
-                factor_col = 'reversal_20d'
-            else:
-                factor_col = [c for c in factor_df.columns if c not in ['code', 'date']][0]
-
-            df['raw_score'] = factor_df[factor_col]
-            df['rank_pct'] = df.groupby('date')['raw_score'].rank(pct=True)
-            df['signal'] = 0
-            df.loc[df['rank_pct'] > 0.8, 'signal'] = 1
-            df.loc[df['rank_pct'] < 0.2, 'signal'] = -1
-            df = df[['code', 'date', 'signal']]
-
-        elif strategy_type == "mean_reversion":
-            if 'ret_20d' in factor_df.columns:
-                df['signal'] = -np.sign(factor_df['ret_20d'])
-            df = df[['code', 'date', 'signal']]
-
-        elif strategy_type == "trend_following":
-            if 'ma_20' in factor_df.columns and 'close' in factor_df.columns:
-                df['signal'] = (factor_df['close'] > factor_df['ma_20']).astype(int)
-            df = df[['code', 'date', 'signal']]
-
-        else:
-            raise ValueError(f"未知策略类型: {strategy_type}")
-
-        logger.info(f"规则型策略信号生成完成: {strategy_type}")
-        return df
-
+        return model, metrics, predictions, model_path
 
 def run(ctx) -> Dict[str, Any]:
     """
@@ -438,62 +417,39 @@ def run(ctx) -> Dict[str, Any]:
 
         price_df = pd.read_parquet(data_path)
 
-        strategy_name = getattr(ctx, 'strategy_name', None) or ctx.strategy_params.get('strategy_type', 'ml')
+        feature_cols = [c for c in factor_df.columns
+                      if c not in ['code', 'date', 'industry', 'alpha_score']]
+        if 'alpha_score' in factor_df.columns:
+            feature_cols.append('alpha_score')
+        # 过滤掉全NaN的列
+        feature_cols = [c for c in feature_cols if not factor_df[c].isna().all()]
 
-        if strategy_name in ['ml', 'model', 'lightgbm', 'catboost']:
-            feature_cols = [c for c in factor_df.columns
-                          if c not in ['code', 'date', 'industry', 'alpha_score']]
-            if 'alpha_score' in factor_df.columns:
-                feature_cols.append('alpha_score')
-            # 过滤掉全NaN的列
-            feature_cols = [c for c in feature_cols if not factor_df[c].isna().all()]
+        X, y, dates = engine.prepare_data(factor_df, price_df, feature_cols)
 
-            X, y, dates = engine.prepare_data(factor_df, price_df, feature_cols)
+        best_params = engine.optimize_hyperparams(X, y, dates)
 
-            best_params = engine.optimize_hyperparams(X, y, dates)
+        # train() 内部完成模型落盘，run() 不再重复保存
+        model, metrics, predictions, model_path = engine.train(X, y, best_params)
 
-            model, metrics, predictions = engine.train(X, y, best_params)
-
-            if predictions is not None:
-                signal_df = factor_df[['code', 'date']].copy()
-                signal_df['pred'] = predictions
-                signal_path = os.path.join(MODEL_DIR, "predictions.parquet")
-                signal_df.to_parquet(signal_path, index=False)
-            else:
-                signal_path = ""
-
-            model_path = os.path.join(MODEL_DIR, f"model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pkl")
-            if HAS_JOBLIB:
-                joblib.dump(model, model_path)
-
-            return {
-                "success": True,
-                "artifact_path": model_path,
-                "predictions_path": signal_path,
-                "metadata": {
-                    "model_type": MODEL_TYPE,
-                    "metrics": metrics,
-                    "feature_cols": feature_cols,
-                },
-                "error": ""
-            }
-
-        else:
-            signal_df = engine.generate_rule_based_signal(factor_df, strategy_type=strategy_name)
-
-            signal_path = os.path.join(MODEL_DIR, f"signal_{strategy_name}.parquet")
+        if predictions is not None:
+            signal_df = factor_df[['code', 'date']].copy()
+            signal_df['pred'] = predictions
+            signal_path = os.path.join(MODEL_DIR, "predictions.parquet")
             signal_df.to_parquet(signal_path, index=False)
+        else:
+            signal_path = ""
 
-            return {
-                "success": True,
-                "artifact_path": signal_path,
-                "predictions_path": signal_path,
-                "metadata": {
-                    "strategy_type": strategy_name,
-                    "signal_count": len(signal_df),
-                },
-                "error": ""
-            }
+        return {
+            "success": True,
+            "artifact_path": model_path or "",
+            "predictions_path": signal_path,
+            "metadata": {
+                "model_type": MODEL_TYPE,
+                "metrics": metrics,
+                "feature_cols": feature_cols,
+            },
+            "error": ""
+        }
 
     except Exception as e:
         logger.exception("模型引擎执行失败")
@@ -525,34 +481,3 @@ if __name__ == "__main__":
 
     result = run(ctx)
     print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
-
-
-# ---------------------------------------------------------------------------
-# 优化模块入口（已整合到 scripts/optimizations/）
-# 使用方式: from engine import optimizations
-# ---------------------------------------------------------------------------
-from scripts.optimizations.intent_parser import (
-    IntentParser as _IntentParser,
-)
-from scripts.optimizations.alpha_expression_engine import (
-    ExpressionEngine as _ExpressionEngine,
-)
-from scripts.optimizations.dynamic_weights import (
-    DynamicFactorWeighting as _DynamicFactorWeighting,
-)
-
-
-class optimizations:
-    """策略模型引擎优化模块集合"""
-    IntentParser = _IntentParser
-    ExpressionEngine = _ExpressionEngine
-    DynamicFactorWeighting = _DynamicFactorWeighting
-
-    @staticmethod
-    def get_strategy_modules():
-        """返回所有可用的策略优化模块"""
-        return {
-            "intent_parser": _IntentParser,
-            "expression_engine": _ExpressionEngine,
-            "dynamic_factor_weighting": _DynamicFactorWeighting,
-        }
