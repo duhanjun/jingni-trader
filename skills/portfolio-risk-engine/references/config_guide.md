@@ -27,30 +27,28 @@ RISK_FREE_RATE = float(os.getenv("RISK_FREE_RATE", "0.03"))
 
 ```python
 MAX_SINGLE_STOCK_WEIGHT = 0.10      # 单票最大持仓 10%
-MAX_INDUSTRY_DEVIATION = 0.05      # 行业偏离 ±5%
-MAX_TURNOVER = 0.50               # 最大换手率 50%
-MIN_WEIGHT = 0.0                  # 最小权重（不可做空）
+MAX_TURNOVER = 0.30                 # 最大换手率 30%
+MIN_WEIGHT = 0.0                    # 最小权重（不可做空）
 ```
 
 ### 风险配置
 
 ```python
-MAX_DAILY_LOSS_RATIO = 0.02       # 单日最大亏损 2%
-INDIVIDUAL_STOP_LOSS = 0.07       # 个股止损 7%
-VAR_CONFIDENCE = 0.95             # VaR 置信度
-CVAR_CONFIDENCE = 0.95            # CVaR 置信度
-BARRA_FACTORS = "SIZE,BP,EP,ROE,Growth"
+MAX_DAILY_LOSS_RATIO = 0.02         # 单日最大亏损 2%
+INDIVIDUAL_STOP_LOSS = 0.08         # 个股止损 8%
+VAR_CONFIDENCE = 0.95               # VaR 置信度
+CVAR_CONFIDENCE = 0.95              # CVaR 置信度
 ```
 
 ## 优化方法
 
 | 方法 | 说明 |
 |------|------|
-| max_sharpe | 最大夏普比率 |
+| max_sharpe | 最大夏普比率（默认） |
 | min_variance | 最小方差 |
-| risk_parity | 分层风险平价 |
+| risk_parity / hierarchical_risk_parity / hrp | 分层风险平价（HRP） |
 | black_litterman | Black-Litterman |
-| cvar | CVaR 优化 |
+| cvar | CVaR 优化（需 cvxpy） |
 
 ## 使用示例
 

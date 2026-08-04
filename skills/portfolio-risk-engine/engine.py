@@ -6,36 +6,34 @@ import os
 import sys
 import json
 import logging
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
 import pandas as pd
-from datetime import datetime
 
 from scripts.config import (
     PORTFOLIO_DIR, OPTIMIZATION_METHOD, RISK_FREE_RATE,
-    ESTIMATION_PERIOD, MAX_SINGLE_STOCK_WEIGHT, MAX_INDUSTRY_DEVIATION,
+    MAX_SINGLE_STOCK_WEIGHT, MAX_INDUSTRY_DEVIATION,
     MAX_TURNOVER, COVARIANCE_METHOD, EXPECTED_RETURNS_METHOD,
     MAX_DAILY_LOSS_RATIO, INDIVIDUAL_STOP_LOSS,
-    VAR_CONFIDENCE, CVAR_CONFIDENCE, BARRA_FACTORS, MIN_WEIGHT, BACKEND
+    VAR_CONFIDENCE, CVAR_CONFIDENCE, MIN_WEIGHT,
 )
 
 logger = logging.getLogger("portfolio-risk-engine")
 
 try:
-    from pypfopt import EfficientFrontier, risk_models, expected_returns, HRPOpt, CLA
-    from pypfopt import plotting as pfopt_plot
+    from pypfopt import EfficientFrontier, risk_models, expected_returns, HRPOpt
     HAS_PYPFOPT = True
 except ImportError:
     HAS_PYPFOPT = False
 
 try:
-    import riskfolio as rl
-    HAS_RISKFOLIO = True
+    import cvxpy as cp
+    HAS_CVXPY = True
 except ImportError:
-    HAS_RISKFOLIO = False
+    HAS_CVXPY = False
 
 
 class PortfolioOptimizer:
@@ -87,8 +85,19 @@ class PortfolioOptimizer:
         method: str = OPTIMIZATION_METHOD,
         constraints: Optional[Dict[str, float]] = None,
         current_weights: Optional[pd.Series] = None,
+        returns: Optional[pd.DataFrame] = None,
     ) -> Tuple[pd.Series, Dict[str, float]]:
-        """执行组合优化"""
+        """执行组合优化
+
+        参数:
+            expected_rets: 预期收益 Series
+            cov_matrix: 协方差矩阵 DataFrame
+            method: 优化方法 (max_sharpe/min_variance/max_return/
+                     risk_parity/hierarchical_risk_parity/hrp/cvar/black_litterman)
+            constraints: 约束字典
+            current_weights: 当前持仓权重（用于换手率约束）
+            returns: 原始收益率 DataFrame（HRP/CVaR 方法需要）
+        """
         if self._fallback:
             n = len(expected_rets)
             weights = pd.Series(1.0 / n, index=expected_rets.index)
@@ -100,19 +109,26 @@ class PortfolioOptimizer:
         max_weight = constraints.get("max_weight", MAX_SINGLE_STOCK_WEIGHT)
         min_weight = constraints.get("min_weight", MIN_WEIGHT)
 
-        if method == "risk_parity":
-            return self._optimize_hrp(expected_rets, cov_matrix)
+        # HRP 需要 returns
+        if method in ("risk_parity", "hierarchical_risk_parity", "hrp"):
+            return self._optimize_hrp(returns)
 
-        ef = EfficientFrontier(expected_rets, cov_matrix, weight_bounds=(min_weight, max_weight))
+        # CVaR 需要 returns
+        if method == "cvar":
+            return self._optimize_cvar(returns, constraints)
 
+        # Black-Litterman 独立处理
+        if method == "black_litterman":
+            return self._black_litterman(expected_rets, cov_matrix, constraints)
+
+        # 带换手率约束的优化
         if current_weights is not None and len(current_weights) > 0:
-            try:
-                turnover = constraints.get("max_turnover", MAX_TURNOVER)
-                ef.add_objective(
-                    lambda w: np.sum(np.abs(w - current_weights.reindex(w.index, fill_value=0)))
-                )
-            except Exception as e:
-                logger.warning(f"添加换手率约束失败: {e}")
+            return self._optimize_with_turnover(
+                expected_rets, cov_matrix, current_weights, constraints
+            )
+
+        # 标准均值-方差优化
+        ef = EfficientFrontier(expected_rets, cov_matrix, weight_bounds=(min_weight, max_weight))
 
         if method == "max_sharpe":
             weights = ef.max_sharpe(risk_free_rate=RISK_FREE_RATE)
@@ -120,11 +136,6 @@ class PortfolioOptimizer:
             weights = ef.min_volatility()
         elif method == "max_return":
             weights = ef.max_quadratic_utility()
-        elif method == "black_litterman":
-            weights = self._black_litterman(expected_rets, cov_matrix, constraints)
-            return weights, {}
-        elif method == "cvar":
-            return self._optimize_cvar(expected_rets, cov_matrix, constraints)
         else:
             weights = ef.max_sharpe(risk_free_rate=RISK_FREE_RATE)
 
@@ -139,33 +150,143 @@ class PortfolioOptimizer:
 
     def _optimize_hrp(
         self,
-        expected_rets: pd.Series,
-        cov_matrix: pd.DataFrame
+        returns: Optional[pd.DataFrame],
     ) -> Tuple[pd.Series, Dict[str, float]]:
-        """分层风险平价"""
-        returns = pd.DataFrame()
-        hrp = HRPOpt(returns)
-        weights = hrp.optimize()
-        cleaned = hrp.clean_weights()
-        return pd.Series(cleaned), {"method": "hrp"}
+        """分层风险平价 —— 修复版（接收真实 returns DataFrame）"""
+        if returns is None or returns.empty:
+            logger.warning("HRP 收到空 returns，返回等权")
+            cols = returns.columns if returns is not None else []
+            return self._equal_weight(cols), {"method": "hrp_fallback", "note": "空收益"}
+
+        try:
+            hrp = HRPOpt(returns)
+            weights = hrp.optimize()
+            cleaned = hrp.clean_weights()
+            try:
+                perf = hrp.portfolio_performance()
+                meta = {
+                    "method": "hrp",
+                    "expected_return": float(perf[0]),
+                    "volatility": float(perf[1]),
+                    "sharpe_ratio": float(perf[2]),
+                }
+            except Exception:
+                meta = {"method": "hrp"}
+            return pd.Series(cleaned), meta
+        except Exception as exc:
+            logger.warning(f"HRP 优化失败，降级等权: {exc}")
+            return self._equal_weight(returns.columns), {"method": "hrp_fallback", "error": str(exc)}
 
     def _optimize_cvar(
         self,
+        returns: Optional[pd.DataFrame],
+        constraints: Dict[str, float],
+    ) -> Tuple[pd.Series, Dict[str, float]]:
+        """CVaR 最小化优化 —— cvxpy 实现（Rockafellar-Uryasev 公式）"""
+        if returns is None or returns.empty:
+            cols = returns.columns if returns is not None else []
+            return self._equal_weight(cols), {"method": "cvar_fallback", "note": "空收益"}
+
+        assets = list(returns.columns)
+        n = len(assets)
+        if n == 0:
+            return pd.Series(), {"method": "cvar", "note": "无资产"}
+
+        max_weight = constraints.get("max_weight", MAX_SINGLE_STOCK_WEIGHT)
+        min_weight = constraints.get("min_weight", MIN_WEIGHT)
+        confidence = CVAR_CONFIDENCE
+
+        if not HAS_CVXPY:
+            logger.warning("cvxpy 未安装，CVaR 降级等权")
+            return self._equal_weight(assets), {"method": "cvar_fallback", "note": "无 cvxpy"}
+
+        try:
+            R = returns[assets].values  # T x n
+            T = R.shape[0]
+            w = cp.Variable(n)
+            alpha = cp.Variable()
+            z = cp.Variable(T)
+
+            cvar = alpha + cp.sum(z) / ((1 - confidence) * T)
+            constraints_cvx = [
+                z >= -R @ w - alpha,
+                z >= 0,
+                cp.sum(w) == 1,
+                w >= min_weight,
+                w <= max_weight,
+            ]
+            prob = cp.Problem(cp.Minimize(cvar), constraints_cvx)
+            prob.solve()
+
+            if w.value is None:
+                logger.warning("CVaR 求解失败，降级等权")
+                return self._equal_weight(assets), {"method": "cvar_fallback", "note": "求解失败"}
+
+            weights = pd.Series(w.value, index=assets)
+            weights = weights.clip(lower=0)
+            weights = weights / weights.sum()
+
+            portfolio_returns = returns[assets].values @ weights.values
+            var = np.percentile(portfolio_returns, (1 - confidence) * 100)
+            cvar_val = float(portfolio_returns[portfolio_returns <= var].mean())
+
+            return weights, {
+                "method": "cvar",
+                "cvar": cvar_val,
+                "var": float(var),
+                "confidence": confidence,
+            }
+        except Exception as exc:
+            logger.warning(f"CVaR 优化异常，降级等权: {exc}")
+            return self._equal_weight(assets), {"method": "cvar_fallback", "error": str(exc)}
+
+    def _optimize_with_turnover(
+        self,
         expected_rets: pd.Series,
         cov_matrix: pd.DataFrame,
-        constraints: Dict[str, float]
+        current_weights: pd.Series,
+        constraints: Dict[str, float],
     ) -> Tuple[pd.Series, Dict[str, float]]:
-        """CVaR 优化"""
-        n = len(expected_rets)
-        weights = pd.Series(1.0 / n, index=expected_rets.index)
-        logger.warning("CVaR优化需要历史收益数据，当前返回等权组合")
-        return weights, {"method": "cvar", "note": "简化实现，使用等权"}
+        """带换手率约束的最大夏普优化 —— 修复版（显式传入惩罚强度）"""
+        max_weight = constraints.get("max_weight", MAX_SINGLE_STOCK_WEIGHT)
+        max_turnover = constraints.get("max_turnover", MAX_TURNOVER)
+
+        try:
+            ef = EfficientFrontier(
+                expected_rets, cov_matrix,
+                weight_bounds=(0, max_weight),
+            )
+            cw = current_weights.reindex(expected_rets.index, fill_value=0.0).values
+            turnover_penalty = 1.0
+            if HAS_CVXPY:
+                ef.add_objective(lambda w: turnover_penalty * cp.norm1(w - cw))
+
+            weights = ef.max_sharpe(risk_free_rate=RISK_FREE_RATE)
+            cleaned = ef.clean_weights()
+            w_series = pd.Series(cleaned)
+
+            actual_turnover = float(
+                (w_series - current_weights.reindex(w_series.index, fill_value=0.0)).abs().sum()
+            )
+            perf = ef.portfolio_performance(risk_free_rate=RISK_FREE_RATE)
+            return w_series, {
+                "method": "max_sharpe_with_turnover",
+                "expected_return": float(perf[0]),
+                "volatility": float(perf[1]),
+                "sharpe_ratio": float(perf[2]),
+                "actual_turnover": actual_turnover,
+                "max_turnover_target": max_turnover,
+                "turnover_constraint_met": actual_turnover <= max_turnover,
+            }
+        except Exception as exc:
+            logger.warning(f"带换手率约束优化失败，降级等权: {exc}")
+            return self._equal_weight(expected_rets.index), {"method": "fallback", "error": str(exc)}
 
     def _black_litterman(
         self,
         expected_rets: pd.Series,
         cov_matrix: pd.DataFrame,
-        constraints: Dict[str, float]
+        constraints: Dict[str, float],
     ) -> Tuple[pd.Series, Dict[str, float]]:
         """Black-Litterman 模型"""
         from pypfopt import black_litterman
@@ -180,63 +301,38 @@ class PortfolioOptimizer:
         cleaned = ef.clean_weights()
         return pd.Series(cleaned), {"method": "black_litterman"}
 
+    @staticmethod
+    def _equal_weight(index) -> pd.Series:
+        n = len(index)
+        if n == 0:
+            return pd.Series()
+        return pd.Series(1.0 / n, index=index)
+
 
 class AShareConstraints:
     """A股组合约束管理"""
 
-    def __init__(
-        self,
-        industry_map: Optional[pd.DataFrame] = None,
-        benchmark_weights: Optional[pd.Series] = None,
-    ):
-        self.industry_map = industry_map
-        self.benchmark_weights = benchmark_weights
-
     def validate_constraints(
         self,
         weights: pd.Series,
-        constraints: Dict[str, float]
+        constraints: Dict[str, float],
     ) -> Dict[str, bool]:
         """验证组合是否满足所有约束"""
         result = {}
         max_w = constraints.get("max_weight", MAX_SINGLE_STOCK_WEIGHT)
         result["max_single_weight"] = all(weights <= max_w)
         result["weights_sum_one"] = abs(weights.sum() - 1.0) < 0.001
-
-        if self.industry_map is not None and not self.industry_map.empty:
-            result["industry_deviation"] = self._check_industry_deviation(weights, constraints)
-
         return result
-
-    def _check_industry_deviation(self, weights, constraints) -> bool:
-        """检查行业偏离"""
-        max_deviation = constraints.get("max_industry_deviation", MAX_INDUSTRY_DEVIATION)
-        ind_map = self.industry_map.set_index('code')['industry'].to_dict()
-
-        ind_weights = {}
-        for code, w in weights.items():
-            ind = ind_map.get(code, "其他")
-            ind_weights[ind] = ind_weights.get(ind, 0) + w
-
-        for ind, w in ind_weights.items():
-            bench_w = 0
-            if self.benchmark_weights is not None and ind in self.benchmark_weights.index:
-                bench_w = self.benchmark_weights[ind]
-            if abs(w - bench_w) > max_deviation:
-                return False
-        return True
 
 
 class RiskManager:
     """风险计算与止损管理"""
 
     def __init__(self):
-        self._daily_pnl = 0.0
         self._start_nav = 0.0
 
     def reset_daily(self, nav: float):
-        """交易日开始时重置日损益"""
-        self._daily_pnl = 0.0
+        """交易日开始时重置基准净值"""
         self._start_nav = nav
 
     def check_portfolio_stop(self, current_nav: float) -> Dict[str, Any]:
@@ -291,20 +387,6 @@ class RiskManager:
             "confidence": confidence,
         }
 
-    def barra_style_attribution(
-        self,
-        returns_df: pd.DataFrame,
-        factor_data: pd.DataFrame,
-        weights: pd.Series,
-    ) -> Dict[str, float]:
-        """简化版 Barra CNE5 风格因子归因"""
-        style_exposures = {}
-        for style in BARRA_FACTORS.split(","):
-            style = style.strip()
-            style_exposures[style] = 0.0
-        logger.info("Barra归因需要完整的因子暴露数据，当前返回空结果")
-        return style_exposures
-
     def generate_stop_loss_signals(
         self,
         data: pd.DataFrame,
@@ -312,6 +394,7 @@ class RiskManager:
         nav: float,
     ) -> Dict[str, Any]:
         """综合生成所有止损信号"""
+        self.reset_daily(nav)
         stop_result = self.check_portfolio_stop(nav)
 
         individual_stops = pd.Series(False, index=portfolio_weights.index)
@@ -397,7 +480,10 @@ def run(ctx) -> Dict[str, Any]:
             "max_industry_deviation": strategy_params.get("max_industry_deviation", MAX_INDUSTRY_DEVIATION),
         }
 
-        weights, metrics = optimizer.optimize(expected_rets, cov_matrix, method=method, constraints=constraints)
+        weights, metrics = optimizer.optimize(
+            expected_rets, cov_matrix, method=method,
+            constraints=constraints, returns=returns,
+        )
 
         constraint_checker = AShareConstraints()
         constraint_result = constraint_checker.validate_constraints(weights, constraints)
@@ -464,36 +550,12 @@ if __name__ == "__main__":
 from scripts.optimizations.circuit_breaker_v2 import (
     CircuitBreakerV2 as _CircuitBreakerV2,
 )
-from scripts.optimizations.portfolio_optimizer_v2 import (
-    PortfolioOptimizerV2 as _PortfolioOptimizerV2,
-)
 from scripts.optimizations.risk_engine import (
     RiskEngine as _RiskEngine,
-)
-from scripts.optimizations.walk_forward import (
-    WalkForwardValidator as _WalkForwardValidator,
 )
 
 
 class optimizations:
     """风控引擎优化模块集合"""
     CircuitBreakerV2 = _CircuitBreakerV2
-    PortfolioOptimizerV2 = _PortfolioOptimizerV2
     RiskEngine = _RiskEngine
-    WalkForwardValidator = _WalkForwardValidator
-
-    @staticmethod
-    def get_risk_modules():
-        """返回所有可用的风控优化模块"""
-        return {
-            "circuit_breaker_v2": _CircuitBreakerV2,
-            "portfolio_optimizer_v2": _PortfolioOptimizerV2,
-            "risk_engine": _RiskEngine,
-        }
-
-    @staticmethod
-    def get_walk_forward_modules():
-        """返回所有可用的Walk-Forward验证模块"""
-        return {
-            "walk_forward_validator": _WalkForwardValidator,
-        }

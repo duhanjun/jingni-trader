@@ -26,9 +26,17 @@ optimizer = PortfolioOptimizer()
 
 估计协方差矩阵。
 
-##### `optimize(expected_rets, cov_matrix, method, constraints, current_weights) -> Tuple[pd.Series, Dict]`
+##### `optimize(expected_rets, cov_matrix, method, constraints, current_weights, returns) -> Tuple[pd.Series, Dict]`
 
 执行组合优化。
+
+**参数：**
+- `expected_rets`: 预期收益 Series
+- `cov_matrix`: 协方差矩阵 DataFrame
+- `method`: 优化方法（max_sharpe / min_variance / risk_parity / hrp / cvar / black_litterman）
+- `constraints`: 约束字典
+- `current_weights`: 当前持仓权重（用于换手率约束）
+- `returns`: 原始收益率 DataFrame（HRP/CVaR 方法需要）
 
 **返回：**
 ```python
@@ -51,6 +59,10 @@ A股组合约束管理类。
 
 #### 方法
 
+##### `reset_daily(nav)`
+
+重置基准净值。
+
 ##### `check_portfolio_stop(current_nav) -> Dict`
 
 检查组合层面止损。
@@ -70,6 +82,10 @@ A股组合约束管理类。
 ##### `calc_portfolio_var_cvar(returns_df, weights, confidence) -> Dict`
 
 计算组合 VaR/CVaR。
+
+##### `generate_stop_loss_signals(data, portfolio_weights, nav) -> Dict`
+
+综合生成所有止损信号。
 
 ## 标准入口函数
 
@@ -99,7 +115,6 @@ Skill 标准入口函数。
 ```
 
 **示例：**
-
 ```python
 from engine import run
 

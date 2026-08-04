@@ -17,8 +17,6 @@ MAX_DAILY_LOSS_RATIO = float(os.environ.get("MAX_DAILY_LOSS_RATIO", 0.02))
 INDIVIDUAL_STOP_LOSS = float(os.environ.get("INDIVIDUAL_STOP_LOSS", 0.08))
 VAR_CONFIDENCE = float(os.environ.get("VAR_CONFIDENCE", 0.95))
 CVAR_CONFIDENCE = float(os.environ.get("CVAR_CONFIDENCE", 0.95))
-BARRA_FACTORS = os.environ.get("BARRA_FACTORS", "size,value,momentum,volatility,quality,leverage,growth")
 MIN_WEIGHT = float(os.environ.get("MIN_WEIGHT", 0.0))
-BACKEND = os.environ.get("PORTFOLIO_BACKEND", "pypfopt")
 
 os.makedirs(PORTFOLIO_DIR, exist_ok=True)
