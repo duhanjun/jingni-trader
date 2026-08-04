@@ -28,10 +28,8 @@ RISK_FREE_RATE = 0.03
 ### 图表配置
 
 ```python
-INCLUDE_TEARSHEET = True
 INCLUDE_HEATMAP = True
 INCLUDE_ATTRIBUTION = True
-INCLUDE_TRADES = True
 CHART_THEME = "plotly_white"
 ```
 

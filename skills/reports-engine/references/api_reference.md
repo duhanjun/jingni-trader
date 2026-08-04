@@ -55,10 +55,6 @@ generator = ReportGenerator(title="我的策略报告")
 
 生成行业归因图。
 
-##### `calc_brinson_attribution(...) -> Dict`
-
-计算 Brinson 归因。
-
 ##### `build_html_report() -> str`
 
 构建完整 HTML 报告。

@@ -80,19 +80,16 @@ LABEL_TYPE = "return"              # 标签类型：return / classification
 MLFLOW_TRACKING_URI = ""           # MLflow跟踪URI（可选）
 MLFLOW_EXPERIMENT_NAME = "jingnitrader"  # MLflow实验名
 
-# ── 组合优化参数 ──────────────────────────
-OPTIMIZATION_METHOD = "hierarchical_risk_parity"  # 优化方法
+# ── 组合优化参数（与 portfolio-risk-engine/scripts/config.py 保持一致）──
+OPTIMIZATION_METHOD = "max_sharpe"  # 优化方法
 ESTIMATION_PERIOD = 252            # 协方差估计周期（交易日）
-MAX_TURNOVER = 0.5                 # 最大换手率
-COVARIANCE_METHOD = "shrink"       # 协方差估计方法：shrink / ledoit_wolf / oas
-EXPECTED_RETURNS_METHOD = "mean"   # 预期收益估计方法：mean / ema / capm
-INDIVIDUAL_STOP_LOSS = 0.05        # 个股止损阈值
+MAX_TURNOVER = 0.30                # 最大换手率
+COVARIANCE_METHOD = "ledoit_wolf"  # 协方差估计方法：ledoit_wolf / sample_cov / shrinkage
+EXPECTED_RETURNS_METHOD = "ema_historical"  # 预期收益估计方法：ema_historical / mean_historical / capm_return
+INDIVIDUAL_STOP_LOSS = 0.08        # 个股止损阈值
 VAR_CONFIDENCE = 0.95              # VaR置信度
 CVAR_CONFIDENCE = 0.95             # CVaR置信度
-BARRA_FACTORS = ["size", "value", "momentum", "quality"]  # Barra风格因子
-MIN_WEIGHT = 0.001                 # 最小持仓权重
-PORTFOLIO_BACKEND = "cvxpy"        # 组合优化后端
-BACKEND = PORTFOLIO_BACKEND          # 兼容旧版引用
+MIN_WEIGHT = 0.0                   # 最小持仓权重（不可做空）
 
 # ── 执行监控参数 ──────────────────────────
 EXECUTION_DIR = os.path.join(WORK_DIR, "execution")
@@ -105,12 +102,12 @@ ACCOUNT_STATE_PATH = os.path.join(WORK_DIR, "account_state.json")
 # ── 报告生成参数 ──────────────────────────
 REPORT_TITLE = "jingnitrader 回测报告"
 REPORT_FORMAT = "html"             # 报告格式：html / pdf
-INDUSTRY_STANDARD = "sw1"         # 行业分类标准：sw1（一级）/ csi（证监会）
+INDUSTRY_STANDARD = "sw"          # 行业分类标准：sw（申万）/ zz（中信）
 INCLUDE_TEARSHEET = True          # 是否包含完整绩效单页
 INCLUDE_HEATMAP = True             # 是否包含因子收益热力图
 INCLUDE_ATTRIBUTION = True         # 是否包含收益归因
 INCLUDE_TRADES = True             # 是否包含交易记录
-CHART_THEME = "light"             # 图表主题：light / dark
+CHART_THEME = "plotly_white"     # 图表主题（plotly_white / plotly_dark）
 
 # ── 数据库配置 ────────────────────────────
 DATABASE_URL = os.environ.get("QUANT_DB_URL", f"sqlite:///{WORK_DIR}/quant.db")

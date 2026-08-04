@@ -37,13 +37,13 @@ environment_variables:
     required: false
     default: "000300.SH"
   - name: INDUSTRY_STANDARD
-    description: 行业分类标准（sw1 / csi）
+    description: 行业分类标准（sw=申万 / zz=中信）
     required: false
-    default: "sw1"
+    default: "sw"
   - name: CHART_THEME
-    description: 图表主题（light / dark）
+    description: 图表主题（plotly_white / plotly_dark）
     required: false
-    default: "light"
+    default: "plotly_white"
 language: python
 python_version: "3.9+"
 entry_point: engine.py
@@ -197,15 +197,6 @@ result = run(ctx)
 ```bash
 python engine.py -i "生成我的策略报告"
 ```
-
-## 优化模块
-
-可通过 `from engine import optimizations` 访问以下优化模块：
-
-- **Brinson 归因**：`brinson_fachler`、`brinson_by_industry`、`brinson_attribution_summary`
-- **扩展指标**：`omega_ratio`、`ulcer_index`、`ulcer_performance_index`、`deflated_sharpe_ratio`
-- **绩效指标**：`alpha_beta`、`information_ratio`、`up_down_capture`、`sortino_ratio`、`calmar_ratio`
-- **向量化指标**：`sharpe_vectorized`、`sortino_vectorized`、`max_drawdown_vectorized`、`win_rate_vectorized`
 
 ## 配置说明
 
