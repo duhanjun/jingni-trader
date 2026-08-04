@@ -9,7 +9,7 @@
 | 变量名 | 描述 | 必需 | 默认值 |
 |--------|------|------|--------|
 | TRADE_MODE | 交易模式（paper / live） | 否 | "paper" |
-| TRADE_BACKEND | 交易接口后端（xtquant / gm） | 否 | "xtquant" |
+| TRADE_BACKEND | 交易接口后端（xtquant / gm） | 否 | "paper" |
 | QUANT_WORK_DIR | 工作目录根路径 | 否 | "./workspace" |
 | EXECUTION_DIR | 执行日志目录 | 否 | "{QUANT_WORK_DIR}/execution" |
 

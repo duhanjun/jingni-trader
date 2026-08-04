@@ -7,20 +7,19 @@ import sys
 import json
 import logging
 import time
-from typing import Dict, Any, List, Optional, Set
-from dataclasses import dataclass, field, asdict
+from typing import Dict, Any, List, Optional
+from dataclasses import dataclass, field
 import uuid
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import numpy as np
 import pandas as pd
 
 from scripts.config import (
     EXECUTION_DIR, TRADE_MODE, TRADE_BACKEND, INIT_CAPITAL,
-    MAX_DAILY_LOSS_RATIO, MAX_SINGLE_ORDER_RATIO, MAX_SINGLE_STOCK_WEIGHT,
+    MAX_DAILY_LOSS_RATIO, MAX_SINGLE_ORDER_RATIO,
     MAX_ORDER_FREQUENCY, MIN_COMMISSION, COMMISSION_RATE, STAMP_TAX_RATE,
     SLIPPAGE, AUDIT_LOG_PATH, ACCOUNT_STATE_PATH
 )
@@ -41,11 +40,9 @@ class Account:
     available_cash: float = INIT_CAPITAL
     start_of_day_nav: float = INIT_CAPITAL
     positions: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    daily_pnl: float = 0.0
 
     def reset_daily(self):
         self.start_of_day_nav = self.nav
-        self.daily_pnl = 0.0
         # T+1: 次日所有持仓可卖
         for pos in self.positions.values():
             pos["available_volume"] = pos["volume"]
@@ -90,8 +87,8 @@ class Account:
         return {
             "nav": self.nav,
             "available_cash": self.available_cash,
+            "start_of_day_nav": self.start_of_day_nav,
             "positions": self.positions,
-            "daily_pnl": self.daily_pnl,
         }
 
 
@@ -242,6 +239,7 @@ class PaperExecutor(BaseExecutor):
         side: str,
         shares: int,
         price: float,
+        base_price: float,
         commission: float,
         stamp_tax: float,
     ) -> None:
@@ -251,8 +249,8 @@ class PaperExecutor(BaseExecutor):
         pos = self.account.positions.get(code, {})
         position_after = pos.get("volume", 0)
         nav_after = self.account.nav
-        # 滑点成本
-        slippage_cost = abs(price - price) * shares if SLIPPAGE == 0 else 0.0
+        # 滑点成本 = 成交价相对基准价的偏离 × 股数（仅 SLIPPAGE>0 时有意义）
+        slippage_cost = abs(price - base_price) * shares if SLIPPAGE > 0 else 0.0
         try:
             record = PaperTradeRecordV1(
                 execution_id=f"{ts.strftime('%Y%m%d%H%M%S')}_{self._trade_seq:04d}",
@@ -331,7 +329,7 @@ class PaperExecutor(BaseExecutor):
             self.audit.log_order(order_id, code, side, volume, fill_price, "filled", {"order_price": base_price})
             # P1-1.5: 成交后追加 record 到 ledger.jsonl（事务日志）
             stamp_tax_amt = order_value * STAMP_TAX_RATE if side == "sell" else 0.0
-            self._append_trade_record(code, side, volume, fill_price, commission, stamp_tax_amt)
+            self._append_trade_record(code, side, volume, fill_price, base_price, commission, stamp_tax_amt)
             return {"success": True, "order_id": order_id, "status": "filled", "fill_price": fill_price}
 
         except Exception as e:
@@ -557,24 +555,3 @@ if __name__ == "__main__":
 
     result = run(ctx)
     print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
-
-
-# ---------------------------------------------------------------------------
-# 优化模块入口（已整合到 scripts/optimizations/）
-# 使用方式: from engine import optimizations
-# ---------------------------------------------------------------------------
-from scripts.optimizations.quant_circuit_breaker import (
-    CircuitBreakerV2 as _CircuitBreakerV2,
-)
-
-
-class optimizations:
-    """执行监控引擎优化模块集合"""
-    CircuitBreakerV2 = _CircuitBreakerV2
-
-    @staticmethod
-    def get_breaker_modules():
-        """返回所有可用的断路器模块"""
-        return {
-            "quant_circuit_breaker": _CircuitBreakerV2,
-        }

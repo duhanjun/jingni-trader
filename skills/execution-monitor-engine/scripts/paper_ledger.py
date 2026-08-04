@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -137,7 +138,6 @@ def _read_execution_ids(path: Path) -> Set[str]:
             if not line:
                 continue
             try:
-                import json
                 obj = json.loads(line)
                 eid = obj.get("execution_id")
                 if eid:
@@ -249,8 +249,6 @@ def migrate_legacy_state(
 
     返回：True 表示已迁移，False 表示无需迁移（ledger 已存在或 state 不存在）
     """
-    import json
-
     ledger_path = Path(ledger_path)
     state_path = Path(state_path)
 

@@ -26,7 +26,7 @@ environment_variables:
   - name: TRADE_BACKEND
     description: 交易接口后端（xtquant / gm）
     required: false
-    default: "xtquant"
+    default: "paper"
   - name: QUANT_WORK_DIR
     description: 工作目录根路径
     required: false
@@ -113,18 +113,18 @@ execution-monitor-engine 是 A 股量化投研的**实盘执行与监控引擎**
 
 ## 硬风控断路器
 
-- **单日亏损限制**：累计亏损超过净值 3% → 拒绝新开仓
-- **单笔金额上限**：不超过净资产 2%
-- **持仓集中度**：单票上限 10%
-- **订单频率**：每分钟最多 5 笔
+- **单日亏损限制**：累计亏损超过净值 2% → 拒绝新开仓
+- **单笔金额上限**：不超过净资产 10%
+- **订单频率**：每秒最多 2 笔
 
 ## 量化断路器
 
-`optimizations/quant_circuit_breaker.py` 提供增强版量化断路器：
+`optimizations/quant_circuit_breaker.py` 提供增强版量化断路器（可选独立组件，未被 PaperExecutor 默认集成）：
 
-- 支持多维度风控规则组合
-- 可配置的触发阈值和恢复条件
-- 与审计日志联动
+- 支持多维度风控规则组合（单日亏损 / 滚动窗口 ROI / 单笔金额 / 频率）
+- 可配置的触发阈值和滞回恢复条件
+- Fail-open 语义（自身异常时放行，避免风控 bug 阻断全部交易）
+- JSON 状态持久化，支持跨进程恢复
 
 ## 使用示例
 
